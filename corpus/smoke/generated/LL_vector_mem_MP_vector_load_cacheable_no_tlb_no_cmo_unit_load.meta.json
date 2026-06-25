@@ -1,0 +1,51 @@
+{
+  "axes": {
+    "attribute": "cacheable",
+    "category": "vector_mem",
+    "cmo": "no_cmo",
+    "memory_event": "vector_load",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "unit_load"
+  },
+  "combination": {
+    "attribute": "cacheable",
+    "category": "vector_mem",
+    "cmo": "no_cmo",
+    "memory_event": "vector_load",
+    "name": "LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load",
+    "params": {},
+    "profile": "smoke",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "unit_load"
+  },
+  "decision": {
+    "expected_kind": "hardware-observation",
+    "hand_category": null,
+    "metadata": {},
+    "notes": [
+      "rule:vector_ordering"
+    ],
+    "reason": "Combination is legal in the Litmus-link finite generation domain.",
+    "requires": [
+      "RV64I",
+      "V"
+    ],
+    "rvwmo_class": "rvwmo-instruction-level",
+    "status": "generated"
+  },
+  "expected_kind": "hardware-observation",
+  "generated_from": {
+    "category": "vector_mem",
+    "profile": "smoke"
+  },
+  "legality_status": "generated",
+  "name": "LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load",
+  "requires": [
+    "RV64I",
+    "V"
+  ],
+  "rvwmo_class": "rvwmo-instruction-level",
+  "schema": "litmus-link.meta.v1"
+}

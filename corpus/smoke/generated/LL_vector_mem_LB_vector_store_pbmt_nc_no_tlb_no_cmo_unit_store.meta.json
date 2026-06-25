@@ -1,0 +1,55 @@
+{
+  "axes": {
+    "attribute": "pbmt_nc",
+    "category": "vector_mem",
+    "cmo": "no_cmo",
+    "memory_event": "vector_store",
+    "skeleton": "LB",
+    "tlb": "no_tlb",
+    "vector": "unit_store"
+  },
+  "combination": {
+    "attribute": "pbmt_nc",
+    "category": "vector_mem",
+    "cmo": "no_cmo",
+    "memory_event": "vector_store",
+    "name": "LL_vector_mem_LB_vector_store_pbmt_nc_no_tlb_no_cmo_unit_store",
+    "params": {},
+    "profile": "smoke",
+    "skeleton": "LB",
+    "tlb": "no_tlb",
+    "vector": "unit_store"
+  },
+  "decision": {
+    "expected_kind": "hardware-observation",
+    "hand_category": null,
+    "metadata": {
+      "effective_memory_type": "NC main memory, idempotent, RVWMO"
+    },
+    "notes": [
+      "rule:vector_ordering"
+    ],
+    "reason": "Combination is legal in the Litmus-link finite generation domain.",
+    "requires": [
+      "RV64I",
+      "Svpbmt",
+      "V"
+    ],
+    "rvwmo_class": "rvwmo-instruction-level",
+    "status": "generated"
+  },
+  "expected_kind": "hardware-observation",
+  "generated_from": {
+    "category": "vector_mem",
+    "profile": "smoke"
+  },
+  "legality_status": "generated",
+  "name": "LL_vector_mem_LB_vector_store_pbmt_nc_no_tlb_no_cmo_unit_store",
+  "requires": [
+    "RV64I",
+    "Svpbmt",
+    "V"
+  ],
+  "rvwmo_class": "rvwmo-instruction-level",
+  "schema": "litmus-link.meta.v1"
+}

@@ -1,0 +1,61 @@
+{
+  "axes": {
+    "attribute": "cacheable_nc_alias",
+    "category": "cross",
+    "cmo": "flush_sync",
+    "memory_event": "vector_store",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "cross_page"
+  },
+  "combination": {
+    "attribute": "cacheable_nc_alias",
+    "category": "cross",
+    "cmo": "flush_sync",
+    "memory_event": "vector_store",
+    "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_sync_cross_page",
+    "params": {},
+    "profile": "smoke",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "cross_page"
+  },
+  "decision": {
+    "expected_kind": "hardware-observation",
+    "hand_category": null,
+    "metadata": {
+      "alias_sync_required": "fence iorw,iorw; cbo.flush; fence iorw,iorw"
+    },
+    "notes": [
+      "rule:alias_sync",
+      "sync:fence-iorw-cbo.flush-fence-iorw",
+      "rule:vector_ordering"
+    ],
+    "reason": "Combination is legal in the Litmus-link finite generation domain.",
+    "requires": [
+      "RV64I",
+      "Svpbmt",
+      "V",
+      "Zicbom",
+      "Zifencei"
+    ],
+    "rvwmo_class": "prose-spec",
+    "status": "generated"
+  },
+  "expected_kind": "hardware-observation",
+  "generated_from": {
+    "category": "cross",
+    "profile": "smoke"
+  },
+  "legality_status": "generated",
+  "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_sync_cross_page",
+  "requires": [
+    "RV64I",
+    "Svpbmt",
+    "V",
+    "Zicbom",
+    "Zifencei"
+  ],
+  "rvwmo_class": "prose-spec",
+  "schema": "litmus-link.meta.v1"
+}

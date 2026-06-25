@@ -1,0 +1,10 @@
+{
+  "excluded_illegal": 0,
+  "excluded_unsupported": 0,
+  "generated": 8,
+  "hand_required": 0,
+  "missing": 0,
+  "profile": "smoke",
+  "schema": "litmus-link.audit.v1",
+  "total_combinations": 8
+}

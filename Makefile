@@ -5,7 +5,11 @@ OUT ?= out/$(PROFILE)
 .PHONY: test smoke audit validate clean asm-check
 
 test:
-	PYTHONPATH=src $(PYTHON) -m pytest
+	@if $(PYTHON) -c 'import pytest' >/dev/null 2>&1; then \
+		PYTHONPATH=src $(PYTHON) -m pytest; \
+	else \
+		PYTHONPATH=src $(PYTHON) tests/run_tests.py; \
+	fi
 
 smoke:
 	rm -rf corpus/smoke/generated

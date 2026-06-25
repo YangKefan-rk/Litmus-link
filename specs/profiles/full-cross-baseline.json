@@ -1,0 +1,10 @@
+{
+  "excluded_illegal": 51,
+  "excluded_unsupported": 0,
+  "generated": 85,
+  "hand_required": 50,
+  "missing": 0,
+  "profile": "full-cross",
+  "schema": "litmus-link.audit-baseline.v1",
+  "total_combinations": 186
+}
