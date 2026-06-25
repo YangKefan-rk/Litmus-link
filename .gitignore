@@ -10,7 +10,9 @@ dist/
 *.egg-info/
 out/
 tmp/
+docs/
 hw-tests/
 model-results/generated/
 *.log
 random_seed.dat
+docs/
