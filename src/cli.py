@@ -5,12 +5,13 @@ import json
 import sys
 from pathlib import Path
 
-from .asm_check import asm_check
-from .generator import generate_profile, write_audit
-from .profiles import HAND_CATEGORIES, axis_values, list_profiles
-from .rules import list_rules
-from .upstream import import_upstream
-from .validator import ValidationError, validate_path
+from asm_check import asm_check
+from generator import generate_combinations, generate_profile, write_audit, write_audit_for_combinations
+from profiles import HAND_CATEGORIES, axis_values, list_profiles
+from rule_file import RuleFileError, load_rule_file, rule_field_values
+from rules import list_rules
+from upstream import import_upstream
+from validator import ValidationError, validate_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,11 +19,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     gen = sub.add_parser("generate", help="generate litmus tests")
-    gen.add_argument("--profile", required=True)
+    gen.add_argument("--profile")
+    gen.add_argument("--rule-file", type=Path, help="JSON file describing user-defined generation axes or cases")
     gen.add_argument("--out", required=True, type=Path)
 
     audit = sub.add_parser("audit", help="audit a profile without generating litmus files")
-    audit.add_argument("--profile", required=True)
+    audit.add_argument("--profile")
+    audit.add_argument("--rule-file", type=Path, help="JSON file describing user-defined generation axes or cases")
     audit.add_argument("--out", type=Path)
 
     validate = sub.add_parser("validate", help="validate generated corpus")
@@ -43,12 +46,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
-            report = generate_profile(args.profile, args.out)
+            _require_profile_or_rule_file(args.profile, args.rule_file)
+            if args.rule_file:
+                rule_set = load_rule_file(args.rule_file)
+                report = generate_combinations(rule_set.name, rule_set.combinations, args.out, source=str(args.rule_file))
+            else:
+                report = generate_profile(args.profile, args.out)
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0 if report.get("missing", 0) == 0 else 1
         if args.command == "audit":
             out = args.out or Path("out") / "audit"
-            report = write_audit(args.profile, out)
+            _require_profile_or_rule_file(args.profile, args.rule_file)
+            if args.rule_file:
+                rule_set = load_rule_file(args.rule_file)
+                report = write_audit_for_combinations(rule_set.name, rule_set.combinations, out, source=str(args.rule_file))
+            else:
+                report = write_audit(args.profile, out)
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0 if report.get("missing", 0) == 0 else 1
         if args.command == "validate":
@@ -66,10 +79,15 @@ def main(argv: list[str] | None = None) -> int:
             for line in asm_check(args.atfile, args.gcc):
                 print(line)
             return 0
-    except (ValueError, FileNotFoundError, ValidationError) as exc:
+    except (ValueError, FileNotFoundError, ValidationError, RuleFileError) as exc:
         print(f"litmus-link: error: {exc}", file=sys.stderr)
         return 2
     return 2
+
+
+def _require_profile_or_rule_file(profile: str | None, rule_file: Path | None) -> None:
+    if bool(profile) == bool(rule_file):
+        raise ValueError("provide exactly one of --profile or --rule-file")
 
 
 def _print_list(what: str) -> None:
@@ -77,10 +95,16 @@ def _print_list(what: str) -> None:
         for name, description in list_profiles().items():
             print(f"{name}\t{description}")
     elif what == "axes":
-        print(json.dumps(axis_values(), indent=2, sort_keys=True))
+        values = axis_values()
+        values["rule_file_fields"] = rule_field_values()
+        print(json.dumps(values, indent=2, sort_keys=True))
     elif what == "rules":
         for name, description in list_rules().items():
             print(f"{name}\t{description}")
     elif what == "hand":
         for category in HAND_CATEGORIES:
             print(category)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

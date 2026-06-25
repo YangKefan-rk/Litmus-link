@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .models import Combination, Decision, EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED
+from models import Combination, Decision, EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED
 
 
 RULE_DESCRIPTIONS: Dict[str, str] = {

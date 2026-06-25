@@ -1,5 +1,5 @@
-from litmus_link.models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
-from litmus_link.rules import evaluate
+from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
+from rules import evaluate
 
 
 def test_pbmt_reserved_is_illegal() -> None:

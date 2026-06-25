@@ -4,12 +4,13 @@ import json
 import tempfile
 from pathlib import Path
 
-from litmus_link.cli import main
-from litmus_link.generator import audit_profile, generate_profile, write_audit
-from litmus_link.models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
-from litmus_link.rules import evaluate
-from litmus_link.upstream import import_upstream
-from litmus_link.validator import validate_path
+from cli import main
+from generator import audit_profile, generate_combinations, generate_profile, write_audit
+from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
+from rule_file import load_rule_file
+from rules import evaluate
+from upstream import import_upstream
+from validator import validate_path
 
 
 def check(condition: bool, message: str) -> None:
@@ -42,6 +43,38 @@ def test_generation() -> None:
         rows, vector = audit_profile("vector_mem")
         check(rows and vector["excluded_illegal"] > 0, "vector profile should include illegal exclusions")
         check(vector["hand_required"] > 0, "vector profile should include HAND cases")
+        rule_file = root / "rules.json"
+        rule_file.write_text(
+            json.dumps(
+                {
+                    "name": "custom-vector-cmo",
+                    "defaults": {"skeleton": "MP", "attribute": "cacheable"},
+                    "axes": {"vector": ["unit_load", "unit_store"], "cmo": ["no_cmo", "flush"]},
+                    "exclude": [{"vector": "unit_store", "cmo": "flush"}],
+                    "limit": 10,
+                }
+            ),
+            encoding="utf-8",
+        )
+        rule_set = load_rule_file(rule_file)
+        check(len(rule_set.combinations) == 3, "rule file expansion count mismatch")
+        custom_report = generate_combinations(rule_set.name, rule_set.combinations, root / "custom", source=str(rule_file))
+        check(custom_report["total_combinations"] == 3, "custom rule report count mismatch")
+        validate_path(root / "custom" / "@all")
+        illegal_file = root / "illegal-rules.json"
+        illegal_file.write_text(json.dumps({"name": "custom-illegal", "axes": {"vector": ["fof_strided"]}, "limit": 10}), encoding="utf-8")
+        illegal_set = load_rule_file(illegal_file)
+        illegal_report = generate_combinations(illegal_set.name, illegal_set.combinations, root / "illegal", source=str(illegal_file))
+        check(illegal_report["generated"] == 0, "illegal rule file should not generate tests")
+        check(illegal_report["excluded_illegal"] == 1, "illegal rule file should be audited as illegal")
+        cross_file = root / "cross-rules.json"
+        cross_file.write_text(json.dumps({"name": "custom-cross", "axes": {"vector": ["unit_load"], "cmo": ["flush"]}, "limit": 10}), encoding="utf-8")
+        cross_set = load_rule_file(cross_file)
+        check(cross_set.combinations[0].category == "cross", "vector+cmo rule should infer cross category")
+        cross_report = generate_combinations(cross_set.name, cross_set.combinations, root / "cross", source=str(cross_file))
+        check(cross_report["generated"] == 1, "cross rule file should generate one test")
+        litmus = next((root / "cross").glob("*.litmus")).read_text(encoding="utf-8")
+        check("vle32.v" in litmus and "cbo.flush" in litmus, "cross rule litmus should include vector and CMO operations")
 
 
 def test_cli() -> None:
@@ -50,6 +83,15 @@ def test_cli() -> None:
         check(main(["generate", "--profile", "smoke", "--out", str(out)]) == 0, "CLI generate failed")
         check(main(["validate", str(out / "@all")]) == 0, "CLI validate failed")
         check(main(["list", "rules"]) == 0, "CLI list rules failed")
+        rule_file = Path(tmp) / "rules.json"
+        rule_file.write_text(json.dumps({"name": "cli-custom", "axes": {"cmo": ["flush"]}}), encoding="utf-8")
+        check(main(["generate", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "custom")]) == 0, "CLI rule-file generate failed")
+        check(main(["audit", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "audit")]) == 0, "CLI rule-file audit failed")
+        check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")
+        check(
+            main(["generate", "--profile", "smoke", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "both-sources")]) == 2,
+            "CLI should reject profile and rule file together",
+        )
 
 
 def test_upstream() -> None:

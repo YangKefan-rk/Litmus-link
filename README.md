@@ -20,6 +20,7 @@ litmus-link list profiles
 litmus-link generate --profile smoke --out out/smoke
 litmus-link validate out/smoke/@all
 litmus-link audit --profile full-cross --out out/audit
+litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
 ```
 
 The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is recommended for future development and CI.
@@ -27,10 +28,30 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 ## Commands
 
 - `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `@all`, and `audit-report.json`.
+- `litmus-link generate --rule-file <json> --out <dir>` generates from user-defined axes or explicit cases instead of a built-in profile.
 - `litmus-link validate <dir-or-@all>` validates index references, metadata, naming, and legality status.
-- `litmus-link audit --profile <name>` expands the profile without writing tests and reports generated, excluded, HAND-required, and missing combinations.
+- `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link list profiles|axes|rules|hand` prints available profiles, generation axes, legality rules, or HAND categories.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
+
+## User Rule Files
+
+Rule files let users define a bounded generation domain without editing Python. The input is JSON with `name`, optional `defaults`, cross-product `axes`, explicit `cases`, optional `exclude` patterns, and a `limit` guardrail. All expanded combinations still pass through the same ISA legality and RVWMO classification rules as built-in profiles.
+
+Use `litmus-link list axes` to see accepted values. A minimal rule file can be as small as:
+
+```json
+{
+  "name": "my-cmo-smoke",
+  "axes": {
+    "cmo": ["flush", "zero"],
+    "attribute": ["cacheable", "pbmt_nc"]
+  },
+  "limit": 20
+}
+```
+
+See `specs/rule-files/README.md` and `specs/rule-files/example-vector-cmo.json` for a larger example that combines Vector and CMO axes.
 
 ## Design Boundary
 

@@ -13,10 +13,21 @@ authors = [{ name = "Litmus-link contributors" }]
 dependencies = []
 
 [project.scripts]
-litmus-link = "litmus_link.cli:main"
+litmus-link = "cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+py-modules = [
+  "asm_check",
+  "cli",
+  "generator",
+  "models",
+  "profiles",
+  "renderer",
+  "rule_file",
+  "rules",
+  "upstream",
+  "validator",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

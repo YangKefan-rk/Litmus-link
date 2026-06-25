@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from .models import Combination, Decision, GENERATED, GeneratedCase
+from models import Combination, Decision, GENERATED, GeneratedCase
 
 
 def render_case(combination: Combination, decision: Decision) -> GeneratedCase:
     if decision.status != GENERATED:
         raise ValueError(f"cannot render non-generated combination: {decision.status}")
-    if combination.memory_event == "scalar_pair":
+    if combination.vector != "none" and combination.cmo != "no_cmo":
+        body = _vector_cmo_body(combination)
+    elif combination.memory_event == "scalar_pair":
         body = _scalar_body(combination)
     elif combination.memory_event in {"vector_load", "vector_store"}:
         body = _vector_body(combination)
@@ -25,7 +27,7 @@ def render_case(combination: Combination, decision: Decision) -> GeneratedCase:
 
 
 def _scalar_body(combination: Combination) -> str:
-    return """"PodWW Rfe Fre"
+    return r""""PodWW Rfe Fre"
 {
 0:x5=1; 0:x6=x; 0:x7=y;
 1:x6=y; 1:x8=x;
@@ -83,8 +85,30 @@ exists
 (1:x5=1)"""
 
 
+def _vector_cmo_body(combination: Combination) -> str:
+    vector_line = _vector_instruction(combination)
+    cmo_lines = _cmo_lines(combination)
+    p0_lines = ["vsetvli x10,x11,e32,m1,ta,ma", vector_line, *cmo_lines, "sw x5,0(x7)"]
+    p1_lines = ["lw x5,0(x6)", "fence rw,rw", "lw x7,0(x8)"]
+    rows = []
+    for index in range(max(len(p0_lines), len(p1_lines))):
+        left = p0_lines[index] if index < len(p0_lines) else ""
+        right = p1_lines[index] if index < len(p1_lines) else ""
+        rows.append(f" {left:<26} | {right:<13} ;")
+    table = "\n".join(rows)
+    return f""""Vector/CMO cross observation"
+{{
+0:x5=1; 0:x6=x; 0:x7=y; 0:x9=4; 0:x11=4;
+1:x6=y; 1:x8=x;
+}}
+ P0                         | P1            ;
+{table}
+exists
+(1:x5=1)"""
+
+
 def _ifetch_body(combination: Combination) -> str:
-    return """"Instruction fetch observation"
+    return r""""Instruction fetch observation"
 Variant=self
 {
 0:t0=instr:"li t6, 2"; 0:a1=P1:mod; 0:a2=flag; 0:t1=1;

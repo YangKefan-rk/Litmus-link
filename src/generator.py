@@ -4,17 +4,21 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from .models import Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, MISSING, count_by_status
-from .profiles import profile_combinations
-from .renderer import render_case
-from .rules import evaluate
+from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, MISSING, count_by_status
+from profiles import profile_combinations
+from renderer import render_case
+from rules import evaluate
 
 
 def audit_profile(profile: str) -> Tuple[List[Tuple[object, Decision]], Dict[str, object]]:
+    return audit_combinations(profile, profile_combinations(profile))
+
+
+def audit_combinations(profile: str, combinations: Iterable[Combination], source: str | None = None) -> Tuple[List[Tuple[Combination, Decision]], Dict[str, object]]:
     rows = []
     decisions = []
     missing = []
-    for combination in profile_combinations(profile):
+    for combination in combinations:
         decision = evaluate(combination)
         rows.append((combination, decision))
         decisions.append(decision)
@@ -31,12 +35,18 @@ def audit_profile(profile: str) -> Tuple[List[Tuple[object, Decision]], Dict[str
         "hand_required": counts.get(HAND_REQUIRED, 0),
         "missing": counts.get(MISSING, 0),
     }
+    if source:
+        report["source"] = source
     return rows, report
 
 
 def generate_profile(profile: str, out_dir: Path) -> Dict[str, object]:
+    return generate_combinations(profile, profile_combinations(profile), out_dir)
+
+
+def generate_combinations(profile: str, combinations: Iterable[Combination], out_dir: Path, source: str | None = None) -> Dict[str, object]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows, report = audit_profile(profile)
+    rows, report = audit_combinations(profile, combinations, source=source)
     generated_names: List[str] = []
     excluded: List[Dict[str, object]] = []
 
@@ -58,8 +68,12 @@ def generate_profile(profile: str, out_dir: Path) -> Dict[str, object]:
 
 
 def write_audit(profile: str, out_dir: Path) -> Dict[str, object]:
+    return write_audit_for_combinations(profile, profile_combinations(profile), out_dir)
+
+
+def write_audit_for_combinations(profile: str, combinations: Iterable[Combination], out_dir: Path, source: str | None = None) -> Dict[str, object]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows, report = audit_profile(profile)
+    rows, report = audit_combinations(profile, combinations, source=source)
     excluded_illegal = []
     hand_required = []
     missing = []

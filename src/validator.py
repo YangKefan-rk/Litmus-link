@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from typing import List
 
-from .models import Combination, GENERATED
-from .rules import evaluate
+from models import Combination, GENERATED
+from rules import evaluate
 
 
 class ValidationError(Exception):

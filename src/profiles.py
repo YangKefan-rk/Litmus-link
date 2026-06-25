@@ -3,7 +3,7 @@ from __future__ import annotations
 from itertools import product
 from typing import Dict, Iterable, List
 
-from .models import Combination
+from models import Combination
 
 
 HAND_CATEGORIES = [

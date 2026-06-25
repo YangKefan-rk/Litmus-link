@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -15,4 +16,3 @@ hw-tests/
 model-results/generated/
 *.log
 random_seed.dat
-docs/

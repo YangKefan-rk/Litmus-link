@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from litmus_link.upstream import import_upstream
+from upstream import import_upstream
 
 
 def test_import_upstream_indexes_without_copying(tmp_path: Path) -> None:
