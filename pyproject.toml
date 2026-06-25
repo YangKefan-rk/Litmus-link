@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "RISC-V litmus generator for RVWMO, Vector, CMO, PBMT/NC, and TLB cross scenarios"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "BSD-2-Clause" }
+license = { text = "MIT" }
 authors = [{ name = "Litmus-link contributors" }]
 dependencies = []
 
