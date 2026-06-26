@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
+
+if TYPE_CHECKING:
+    from litmus_ir import LitmusCaseIR
 
 
 MAX_GENERATED_NAME_LEN = 180
@@ -137,13 +140,18 @@ class GeneratedCase:
     combination: Combination
     decision: Decision
     litmus: str
+    case_ir: Optional["LitmusCaseIR"] = None
+
+    @property
+    def name(self) -> str:
+        return self.case_ir.name if self.case_ir is not None else self.combination.name
 
     def meta(self) -> Dict[str, Any]:
         from descriptions import describe_combination
 
-        return {
+        meta = {
             "schema": "litmus-link.meta.v1",
-            "name": self.combination.name,
+            "name": self.name,
             "combination": self.combination.to_json(),
             "axes": self.combination.axes(),
             "test_description": describe_combination(self.combination),
@@ -157,6 +165,11 @@ class GeneratedCase:
                 "category": self.combination.category,
             },
         }
+        if self.case_ir is not None:
+            meta["case_ir"] = self.case_ir.to_json()
+            meta["variant"] = self.case_ir.variant
+            meta["combination_name"] = self.combination.name
+        return meta
 
 
 def count_by_status(decisions: Iterable[Decision]) -> Dict[str, int]:

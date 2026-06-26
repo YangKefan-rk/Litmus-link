@@ -6,7 +6,8 @@ from typing import Dict, Iterable, List, Tuple
 
 from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, MISSING, count_by_status
 from profiles import profile_combinations
-from renderer import render_case
+from litmus_ir import case_count
+from renderer import render_cases
 from rules import evaluate
 
 
@@ -18,10 +19,13 @@ def audit_combinations(profile: str, combinations: Iterable[Combination], source
     rows = []
     decisions = []
     missing = []
+    generated_cases = 0
     for combination in combinations:
         decision = evaluate(combination)
         rows.append((combination, decision))
         decisions.append(decision)
+        if decision.status == GENERATED:
+            generated_cases += case_count(combination, decision)
         if decision.status == MISSING:
             missing.append(combination.to_json())
     counts = count_by_status(decisions)
@@ -30,6 +34,7 @@ def audit_combinations(profile: str, combinations: Iterable[Combination], source
         "profile": profile,
         "total_combinations": len(rows),
         "generated": counts.get(GENERATED, 0),
+        "generated_litmus": generated_cases,
         "excluded_illegal": counts.get(EXCLUDED_ILLEGAL, 0),
         "excluded_unsupported": counts.get(EXCLUDED_UNSUPPORTED, 0),
         "hand_required": counts.get(HAND_REQUIRED, 0),
@@ -49,6 +54,7 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
     generated_names: List[str] = []
     counts = _empty_counts()
     total = 0
+    generated_cases = 0
 
     with _JsonArrayWriter(out_dir / "excluded.json") as excluded:
         for combination in combinations:
@@ -56,16 +62,18 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
             decision = evaluate(combination)
             counts[decision.status] = counts.get(decision.status, 0) + 1
             if decision.status == GENERATED:
-                case = render_case(combination, decision)
-                litmus_path = out_dir / f"{combination.name}.litmus"
-                meta_path = out_dir / f"{combination.name}.meta.json"
-                litmus_path.write_text(case.litmus, encoding="utf-8")
-                meta_path.write_text(json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-                generated_names.append(litmus_path.name)
+                for case in render_cases(combination, decision):
+                    litmus_path = out_dir / f"{case.name}.litmus"
+                    meta_path = out_dir / f"{case.name}.meta.json"
+                    litmus_path.write_text(case.litmus, encoding="utf-8")
+                    meta_path.write_text(json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    generated_names.append(litmus_path.name)
+                    generated_cases += 1
             else:
                 excluded.write({"combination": combination.to_json(), "decision": decision.to_json()})
 
     report = _report(profile, total, counts, source)
+    report["generated_litmus"] = generated_cases
 
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -85,6 +93,7 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
         return report
     counts = _empty_counts()
     total = 0
+    generated_cases = 0
     with (
         _JsonArrayWriter(out_dir / "covered.json") as covered,
         _JsonArrayWriter(out_dir / "excluded-illegal.json") as excluded_illegal,
@@ -97,6 +106,7 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
             counts[decision.status] = counts.get(decision.status, 0) + 1
             item = {"combination": combination.to_json(), "decision": decision.to_json()}
             if decision.status == GENERATED:
+                generated_cases += case_count(combination, decision)
                 covered.write(item)
             elif decision.status == EXCLUDED_ILLEGAL:
                 excluded_illegal.write(item)
@@ -106,6 +116,7 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
                 missing.write(item)
 
     report = _report(profile, total, counts, source)
+    report["generated_litmus"] = generated_cases
     (out_dir / "cross-coverage.md").write_text(_coverage_markdown(report), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -114,11 +125,16 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
 def audit_summary(profile: str, combinations: Iterable[Combination], source: str | None = None) -> Dict[str, object]:
     counts = _empty_counts()
     total = 0
+    generated_cases = 0
     for combination in combinations:
         total += 1
         decision = evaluate(combination)
         counts[decision.status] = counts.get(decision.status, 0) + 1
-    return _report(profile, total, counts, source)
+        if decision.status == GENERATED:
+            generated_cases += case_count(combination, decision)
+    report = _report(profile, total, counts, source)
+    report["generated_litmus"] = generated_cases
+    return report
 
 
 def _empty_counts() -> Dict[str, int]:
@@ -131,6 +147,7 @@ def _report(profile: str, total: int, counts: Dict[str, int], source: str | None
         "profile": profile,
         "total_combinations": total,
         "generated": counts.get(GENERATED, 0),
+        "generated_litmus": counts.get(GENERATED, 0),
         "excluded_illegal": counts.get(EXCLUDED_ILLEGAL, 0),
         "excluded_unsupported": counts.get(EXCLUDED_UNSUPPORTED, 0),
         "hand_required": counts.get(HAND_REQUIRED, 0),
@@ -179,6 +196,7 @@ def _coverage_markdown(report: Dict[str, object]) -> str:
             "",
             f"- Total combinations: {report['total_combinations']}",
             f"- Generated: {report['generated']}",
+            f"- Generated litmus files: {report.get('generated_litmus', report['generated'])}",
             f"- Excluded illegal: {report['excluded_illegal']}",
             f"- Excluded unsupported: {report['excluded_unsupported']}",
             f"- HAND-required: {report['hand_required']}",

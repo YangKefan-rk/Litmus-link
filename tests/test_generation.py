@@ -12,10 +12,12 @@ from validator import validate_path
 def test_smoke_generation_round_trip(tmp_path: Path) -> None:
     report = generate_profile("smoke", tmp_path)
     assert report["generated"] == 8
+    assert report["generated_litmus"] > report["generated"]
     entries = validate_path(tmp_path / "@all")
-    assert len(entries) == 8
+    assert len(entries) == report["generated_litmus"]
     first_meta = json.loads((tmp_path / entries[0]).with_suffix(".meta.json").read_text())
     assert first_meta["schema"] == "litmus-link.meta.v1"
+    assert first_meta["case_ir"]["variant"]
     assert first_meta["test_description"]["summary"]
     assert first_meta["test_description"]["features"]
 
@@ -119,12 +121,29 @@ def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> N
 def test_preview_payload_includes_litmus_and_analysis() -> None:
     preview = preview_payload({"mode": "profile", "profile": "smoke", "sample_limit": 4})
     generated = [item for item in preview["sample"] if item.get("litmus")]
-    assert generated
+    assert len(generated) > 4
     first = generated[0]
     assert first["litmus"].startswith("RISCV ")
+    assert first["case_ir"]["relations"]
     assert first["analysis"]["cycle"]
     assert first["analysis"]["exists"]
     assert "forbidden_outcome" in first["analysis"]
+
+
+def test_mp_cacheable_expands_to_multiple_variants() -> None:
+    preview = preview_payload(
+        {
+            "mode": "rule",
+            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
+            "sample_limit": 1,
+        }
+    )
+    generated = [item for item in preview["sample"] if item.get("litmus")]
+    variants = {item["case_ir"]["variant"] for item in generated}
+    assert preview["report"]["total_combinations"] == 1
+    assert preview["report"]["generated_litmus"] >= 6
+    assert len(generated) >= 6
+    assert {"base", "fence_rw_rw", "addr_dep"}.issubset(variants)
 
 
 def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:

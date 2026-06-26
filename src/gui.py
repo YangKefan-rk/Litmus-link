@@ -36,7 +36,7 @@ from profiles import (
 )
 from rule_file import RuleFileError, load_rule_data, rule_field_values
 from rules import evaluate
-from renderer import render_case
+from renderer import render_cases
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
@@ -98,18 +98,14 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     iterator = iter(cached if cached is not None else combinations)
     for combination in islice(iterator, max(sample_limit, 0)):
         decision = evaluate(combination)
-        litmus = ""
+        rendered_cases = []
         if decision.status == GENERATED:
-            litmus = render_case(combination, decision).litmus
-        sample.append(
-            {
-                "name": combination.name,
-                "combination": combination.to_json(),
-                "decision": decision.to_json(),
-                "litmus": litmus,
-                "analysis": _preview_analysis(combination, decision.to_json(), litmus),
-            }
-        )
+            rendered_cases = render_cases(combination, decision)
+        if rendered_cases:
+            for case in rendered_cases:
+                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None))
+        else:
+            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None))
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
     return {
         "profile": name,
@@ -119,18 +115,29 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _preview_analysis(combination: Combination, decision: Dict[str, Any], litmus: str) -> Dict[str, Any]:
-    exists = _extract_exists(litmus)
-    cycle = _cycle_text(combination, litmus)
-    tokens = _cycle_tokens(cycle)
+def _preview_item(combination: Combination, decision: Dict[str, Any], name: str, litmus: str, case_ir: Dict[str, Any] | None) -> Dict[str, Any]:
+    return {
+        "name": name,
+        "combination": combination.to_json(),
+        "decision": decision,
+        "litmus": litmus,
+        "case_ir": case_ir,
+        "analysis": _preview_analysis(combination, decision, litmus, case_ir),
+    }
+
+
+def _preview_analysis(combination: Combination, decision: Dict[str, Any], litmus: str, case_ir: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    exists = str(case_ir.get("exists")) if case_ir else _extract_exists(litmus)
+    cycle = str(case_ir.get("cycle")) if case_ir else _cycle_text(combination, litmus)
+    tokens = [relation.get("label", relation.get("kind", "")) for relation in case_ir.get("relations", [])] if case_ir else _cycle_tokens(cycle)
     forbidden = _forbidden_text(combination, decision, exists)
     return {
         "cycle": cycle,
         "cycle_tokens": tokens,
         "exists": exists,
         "forbidden_outcome": forbidden,
-        "harts": _harts_from_litmus(litmus),
-        "memory_locations": _memory_locations_from_litmus(litmus),
+        "harts": [f"P{index}" for index, _hart in enumerate(case_ir.get("harts", []))] if case_ir else _harts_from_litmus(litmus),
+        "memory_locations": _memory_locations_from_ir(case_ir) if case_ir else _memory_locations_from_litmus(litmus),
     }
 
 
@@ -191,6 +198,18 @@ def _memory_locations_from_litmus(litmus: str) -> list[str]:
         return ["x", "y"]
     locations = sorted(set(re.findall(r"=([A-Za-z_][A-Za-z0-9_]*)(?:[;\s]|$)", init_match.group(1))))
     return [location for location in locations if not location.startswith("P")][:4] or ["x", "y"]
+
+
+def _memory_locations_from_ir(case_ir: Dict[str, Any] | None) -> list[str]:
+    if not case_ir:
+        return ["x", "y"]
+    locations: list[str] = []
+    for hart in case_ir.get("harts", []):
+        for event in hart:
+            location = event.get("location")
+            if location and location not in locations:
+                locations.append(location)
+    return locations or ["x", "y"]
 
 
 def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

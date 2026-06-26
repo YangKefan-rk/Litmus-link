@@ -2,6 +2,7 @@
   "excluded_illegal": 4880,
   "excluded_unsupported": 0,
   "generated": 39840,
+  "generated_litmus": 39840,
   "hand_required": 205640,
   "missing": 0,
   "profile": "stress-large",

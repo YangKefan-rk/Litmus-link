@@ -57,11 +57,11 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     combination = Combination.from_json(meta["combination"])
     decision = evaluate(combination)
     header = litmus_path.read_text(encoding="utf-8").splitlines()[0].strip()
-    expected_header = f"RISCV {combination.name}"
+    expected_header = f"RISCV {meta.get('name', combination.name)}"
     if header != expected_header:
         errors.append(f"{litmus_path}: expected header {expected_header!r}, got {header!r}")
-    if meta.get("name") != combination.name:
-        errors.append(f"{meta_path}: metadata name does not match combination")
+    if not str(meta.get("name", "")).startswith(combination.name):
+        errors.append(f"{meta_path}: metadata name does not derive from combination")
     if meta.get("legality_status") != GENERATED:
         errors.append(f"{meta_path}: generated corpus contains non-generated status")
     if decision.status != GENERATED:
