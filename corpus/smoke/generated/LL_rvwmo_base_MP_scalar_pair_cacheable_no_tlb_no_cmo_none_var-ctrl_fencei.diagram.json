@@ -1,0 +1,115 @@
+{
+  "cycle": "PodWW -> Rfe -> PodRR -> Fre [ctrl_fencei]",
+  "events": [
+    {
+      "event_id": "p0_wx",
+      "hart": 0,
+      "instruction": "sw x5,0(x6)",
+      "kind": "store",
+      "location": "x",
+      "register": "",
+      "role": "data-write",
+      "value": "1"
+    },
+    {
+      "event_id": "p0_wy",
+      "hart": 0,
+      "instruction": "sw x5,0(x7)",
+      "kind": "store",
+      "location": "y",
+      "register": "",
+      "role": "flag-write",
+      "value": "1"
+    },
+    {
+      "event_id": "p1_ry",
+      "hart": 1,
+      "instruction": "lw x5,0(x6)",
+      "kind": "load",
+      "location": "y",
+      "register": "x5",
+      "role": "flag-read",
+      "value": "1"
+    },
+    {
+      "event_id": "p1_branch",
+      "hart": 1,
+      "instruction": "beq x5,x5,1f",
+      "kind": "dep",
+      "location": "",
+      "register": "",
+      "role": "ctrl-dep",
+      "value": ""
+    },
+    {
+      "event_id": "p1_label",
+      "hart": 1,
+      "instruction": "1:",
+      "kind": "label",
+      "location": "",
+      "register": "",
+      "role": "ctrl-dep",
+      "value": ""
+    },
+    {
+      "event_id": "p1_fencei",
+      "hart": 1,
+      "instruction": "fence.i",
+      "kind": "fence",
+      "location": "",
+      "register": "",
+      "role": "ctrl-fencei",
+      "value": ""
+    },
+    {
+      "event_id": "p1_rx",
+      "hart": 1,
+      "instruction": "lw x7,0(x8)",
+      "kind": "load",
+      "location": "x",
+      "register": "x7",
+      "role": "data-read",
+      "value": "0"
+    }
+  ],
+  "exists": "(1:x5=1 /\\ 1:x7=0)",
+  "harts": [
+    "P0",
+    "P1"
+  ],
+  "name": "LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei",
+  "png": "corpus/smoke/generated/LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei.diagram.png",
+  "relations": [
+    {
+      "dst": "p0_wy",
+      "kind": "po",
+      "label": "PodWW+ctrlfencei",
+      "local": true,
+      "src": "p0_wx"
+    },
+    {
+      "dst": "p1_ry",
+      "kind": "rfe",
+      "label": "Rfe",
+      "local": false,
+      "src": "p0_wy"
+    },
+    {
+      "dst": "p1_rx",
+      "kind": "po",
+      "label": "PodRR+ctrlfencei",
+      "local": true,
+      "src": "p1_ry"
+    },
+    {
+      "dst": "p0_wx",
+      "kind": "fre",
+      "label": "Fre",
+      "local": false,
+      "src": "p1_rx"
+    }
+  ],
+  "schema": "litmus-link.diagram.v1",
+  "solver_status": "verified",
+  "verdict": "allowed"
+}

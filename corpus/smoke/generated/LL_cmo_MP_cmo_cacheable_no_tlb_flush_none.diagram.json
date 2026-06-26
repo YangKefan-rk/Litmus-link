@@ -1,0 +1,54 @@
+{
+  "cycle": "MP + cmo + cacheable + flush",
+  "events": [
+    {
+      "event_id": "p0_w",
+      "hart": 0,
+      "instruction": "sw x5,0(x6)",
+      "kind": "store",
+      "location": "x",
+      "register": "",
+      "role": "",
+      "value": ""
+    },
+    {
+      "event_id": "p0_cmo0",
+      "hart": 0,
+      "instruction": "cbo.flush 0(x6)",
+      "kind": "cmo",
+      "location": "x",
+      "register": "",
+      "role": "",
+      "value": ""
+    },
+    {
+      "event_id": "p1_r",
+      "hart": 1,
+      "instruction": "lw x5,0(x6)",
+      "kind": "load",
+      "location": "y",
+      "register": "",
+      "role": "",
+      "value": ""
+    }
+  ],
+  "exists": "(1:x5=1)",
+  "harts": [
+    "P0",
+    "P1"
+  ],
+  "name": "LL_cmo_MP_cmo_cacheable_no_tlb_flush_none",
+  "png": "corpus/smoke/generated/LL_cmo_MP_cmo_cacheable_no_tlb_flush_none.diagram.png",
+  "relations": [
+    {
+      "dst": "p1_r",
+      "kind": "obs",
+      "label": "observation",
+      "local": false,
+      "src": "p0_w"
+    }
+  ],
+  "schema": "litmus-link.diagram.v1",
+  "solver_status": "not_applicable",
+  "verdict": "unmodeled"
+}

@@ -1,0 +1,37 @@
+{
+  "allowed": null,
+  "command": [],
+  "cross_check": "native_only",
+  "edges": [],
+  "fusion": {
+    "allowed": null,
+    "findings": [
+      {
+        "citation": "Zicbom/Zicboz: a CBO is ordered by FENCE with matching PRED/SUCC bits; the robust pattern is fence;cbo;fence",
+        "covered": true,
+        "detail": "fence;cbo;fence wrap present: the CBO effect is ordered both before and after (robust pattern).",
+        "feature": "cmo:flush"
+      },
+      {
+        "citation": "Svpbmt + alias rule: a cacheable/NC alias needs fence iorw,iorw; cbo.flush; fence iorw,iorw to avoid losing coherence/order",
+        "covered": true,
+        "detail": "Documented barrier present.",
+        "feature": "attr:cacheable_nc_alias"
+      }
+    ],
+    "formal_forbidden_claim": false,
+    "model": "extension-prose",
+    "reason": "Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+    "schema": "litmus-link.fusion.v1",
+    "status": "analyzed",
+    "verdict": "ordering-documented"
+  },
+  "model": "prose-spec",
+  "observation": "",
+  "raw_output": "",
+  "reason": "Extension-prose fusion analysis (informative, no herd verdict): Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+  "schema": "litmus-link.solver.v1",
+  "status": "not_applicable",
+  "tool": "none",
+  "verdict": "unmodeled"
+}

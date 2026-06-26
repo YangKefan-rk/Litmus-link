@@ -1,0 +1,105 @@
+{
+  "cycle": "PodWW -> Rfe -> PodRR -> Fre [fence_w_w_r_rw]",
+  "events": [
+    {
+      "event_id": "p0_wx",
+      "hart": 0,
+      "instruction": "sw x5,0(x6)",
+      "kind": "store",
+      "location": "x",
+      "register": "",
+      "role": "data-write",
+      "value": "1"
+    },
+    {
+      "event_id": "p0_fence",
+      "hart": 0,
+      "instruction": "fence w,w",
+      "kind": "fence",
+      "location": "",
+      "register": "",
+      "role": "writer",
+      "value": ""
+    },
+    {
+      "event_id": "p0_wy",
+      "hart": 0,
+      "instruction": "sw x5,0(x7)",
+      "kind": "store",
+      "location": "y",
+      "register": "",
+      "role": "flag-write",
+      "value": "1"
+    },
+    {
+      "event_id": "p1_ry",
+      "hart": 1,
+      "instruction": "lw x5,0(x6)",
+      "kind": "load",
+      "location": "y",
+      "register": "x5",
+      "role": "flag-read",
+      "value": "1"
+    },
+    {
+      "event_id": "p1_fence",
+      "hart": 1,
+      "instruction": "fence r,rw",
+      "kind": "fence",
+      "location": "",
+      "register": "",
+      "role": "reader",
+      "value": ""
+    },
+    {
+      "event_id": "p1_rx",
+      "hart": 1,
+      "instruction": "lw x7,0(x8)",
+      "kind": "load",
+      "location": "x",
+      "register": "x7",
+      "role": "data-read",
+      "value": "0"
+    }
+  ],
+  "exists": "(1:x5=1 /\\ 1:x7=0)",
+  "harts": [
+    "P0",
+    "P1"
+  ],
+  "name": "LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw",
+  "png": "corpus/smoke/generated/LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw.diagram.png",
+  "relations": [
+    {
+      "dst": "p0_wy",
+      "kind": "po",
+      "label": "PodWW+fence",
+      "local": true,
+      "src": "p0_wx"
+    },
+    {
+      "dst": "p1_ry",
+      "kind": "rfe",
+      "label": "Rfe",
+      "local": false,
+      "src": "p0_wy"
+    },
+    {
+      "dst": "p1_rx",
+      "kind": "po",
+      "label": "PodRR+fence",
+      "local": true,
+      "src": "p1_ry"
+    },
+    {
+      "dst": "p0_wx",
+      "kind": "fre",
+      "label": "Fre",
+      "local": false,
+      "src": "p1_rx"
+    }
+  ],
+  "schema": "litmus-link.diagram.v1",
+  "solver_status": "verified",
+  "verdict": "forbidden"
+}

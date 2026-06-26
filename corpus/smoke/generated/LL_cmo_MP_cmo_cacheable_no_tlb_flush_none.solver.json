@@ -1,0 +1,31 @@
+{
+  "allowed": null,
+  "command": [],
+  "cross_check": "native_only",
+  "edges": [],
+  "fusion": {
+    "allowed": null,
+    "findings": [
+      {
+        "citation": "Zicbom/Zicboz: a CBO is ordered by FENCE with matching PRED/SUCC bits; the robust pattern is fence;cbo;fence",
+        "covered": false,
+        "detail": "No FENCE orders the CBO; its effect may reorder relative to the observer (weak outcome permitted).",
+        "feature": "cmo:flush"
+      }
+    ],
+    "formal_forbidden_claim": false,
+    "model": "extension-prose",
+    "reason": "1 orderable fusion feature(s) lack the documented barrier; the reordered outcome is permitted by the extension prose and needs a stress window + coverage instrumentation to exhibit (never a herd forbidden claim).",
+    "schema": "litmus-link.fusion.v1",
+    "status": "analyzed",
+    "verdict": "ordering-absent"
+  },
+  "model": "prose-spec",
+  "observation": "",
+  "raw_output": "",
+  "reason": "Extension-prose fusion analysis (informative, no herd verdict): 1 orderable fusion feature(s) lack the documented barrier; the reordered outcome is permitted by the extension prose and needs a stress window + coverage instrumentation to exhibit (never a herd forbidden claim).",
+  "schema": "litmus-link.solver.v1",
+  "status": "not_applicable",
+  "tool": "none",
+  "verdict": "unmodeled"
+}

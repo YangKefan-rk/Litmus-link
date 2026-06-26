@@ -1,0 +1,48 @@
+{
+  "allowed": false,
+  "command": [],
+  "cross_check": "herd7_absent",
+  "edges": [
+    {
+      "detail": "FENCE 'fence rw,rw' orders W->W.",
+      "dst": "p0_wy",
+      "kind": "po",
+      "preserved": true,
+      "rule": "rvwmo-4",
+      "src": "p0_wx"
+    },
+    {
+      "detail": "External communication edge is always part of global order.",
+      "dst": "p1_ry",
+      "kind": "rfe",
+      "preserved": true,
+      "rule": "comm:rfe",
+      "src": "p0_wy"
+    },
+    {
+      "detail": "FENCE 'fence rw,rw' orders R->R.",
+      "dst": "p1_rx",
+      "kind": "po",
+      "preserved": true,
+      "rule": "rvwmo-4",
+      "src": "p1_ry"
+    },
+    {
+      "detail": "External communication edge is always part of global order.",
+      "dst": "p0_wx",
+      "kind": "fre",
+      "preserved": true,
+      "rule": "comm:fre",
+      "src": "p1_rx"
+    }
+  ],
+  "fusion": null,
+  "model": "rvwmo-native",
+  "observation": "",
+  "raw_output": "",
+  "reason": "Every program-order edge in the cycle is a preserved (ppo) edge, so ppo u comm is cyclic; RVWMO forbids it. (herd7 not on PATH; no cross-check performed.)",
+  "schema": "litmus-link.solver.v1",
+  "status": "verified",
+  "tool": "native",
+  "verdict": "forbidden"
+}

@@ -1,0 +1,43 @@
+{
+  "allowed": null,
+  "command": [],
+  "cross_check": "native_only",
+  "edges": [],
+  "fusion": {
+    "allowed": null,
+    "findings": [
+      {
+        "citation": "V-spec, 'Vector Memory Consistency Model' (vector accesses obey RVWMO per element; FENCE orders them against other accesses)",
+        "covered": true,
+        "detail": "Vector element accesses each obey RVWMO as scalar accesses. A FENCE orders these element accesses against other harts' accesses.",
+        "feature": "vector:unit_store"
+      },
+      {
+        "citation": "Zicbom/Zicboz: a CBO is ordered by FENCE with matching PRED/SUCC bits; the robust pattern is fence;cbo;fence",
+        "covered": true,
+        "detail": "fence;cbo;fence wrap present: the CBO effect is ordered both before and after (robust pattern).",
+        "feature": "cmo:flush"
+      },
+      {
+        "citation": "Svpbmt + alias rule: a cacheable/NC alias needs fence iorw,iorw; cbo.flush; fence iorw,iorw to avoid losing coherence/order",
+        "covered": true,
+        "detail": "Documented barrier present.",
+        "feature": "attr:cacheable_nc_alias"
+      }
+    ],
+    "formal_forbidden_claim": false,
+    "model": "extension-prose",
+    "reason": "Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+    "schema": "litmus-link.fusion.v1",
+    "status": "analyzed",
+    "verdict": "ordering-documented"
+  },
+  "model": "prose-spec",
+  "observation": "",
+  "raw_output": "",
+  "reason": "Extension-prose fusion analysis (informative, no herd verdict): Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+  "schema": "litmus-link.solver.v1",
+  "status": "not_applicable",
+  "tool": "none",
+  "verdict": "unmodeled"
+}

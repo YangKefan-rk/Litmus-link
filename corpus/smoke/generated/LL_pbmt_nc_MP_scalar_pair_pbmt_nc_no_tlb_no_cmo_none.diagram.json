@@ -1,0 +1,44 @@
+{
+  "cycle": "MP + scalar_pair + pbmt_nc",
+  "events": [
+    {
+      "event_id": "p0_w",
+      "hart": 0,
+      "instruction": "sw x5,0(x6)",
+      "kind": "store",
+      "location": "x",
+      "register": "",
+      "role": "",
+      "value": ""
+    },
+    {
+      "event_id": "p1_r",
+      "hart": 1,
+      "instruction": "lw x5,0(x6)",
+      "kind": "load",
+      "location": "y",
+      "register": "",
+      "role": "",
+      "value": ""
+    }
+  ],
+  "exists": "(1:x5=1)",
+  "harts": [
+    "P0",
+    "P1"
+  ],
+  "name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none",
+  "png": "corpus/smoke/generated/LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none.diagram.png",
+  "relations": [
+    {
+      "dst": "p1_r",
+      "kind": "obs",
+      "label": "observation",
+      "local": false,
+      "src": "p0_w"
+    }
+  ],
+  "schema": "litmus-link.diagram.v1",
+  "solver_status": "not_applicable",
+  "verdict": "unmodeled"
+}

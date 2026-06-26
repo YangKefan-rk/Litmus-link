@@ -1,0 +1,333 @@
+{
+  "axes": {
+    "attribute": "cacheable_nc_alias",
+    "category": "cross",
+    "cmo": "flush",
+    "memory_event": "vector_store",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "unit_store"
+  },
+  "case_ir": {
+    "combination_name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+    "cycle": "MP + vector_store + cacheable_nc_alias + unit_store + flush",
+    "description": "Specification-constrained or hardware-observation case; no formal RVWMO forbidden claim is made.",
+    "display_name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+    "exists": "(1:x5=1)",
+    "expected_outcome": "prose-spec-constrained",
+    "harts": [
+      [
+        {
+          "event_id": "p0_vset",
+          "hart": 0,
+          "instruction": "vsetvli x10,x11,e32,m1,ta,ma",
+          "kind": "setup",
+          "location": "",
+          "register": "",
+          "role": "",
+          "value": ""
+        },
+        {
+          "event_id": "p0_vec",
+          "hart": 0,
+          "instruction": "vse32.v v8,(x6)",
+          "kind": "vector",
+          "location": "x",
+          "register": "",
+          "role": "",
+          "value": ""
+        },
+        {
+          "event_id": "p0_cmo0",
+          "hart": 0,
+          "instruction": "fence iorw,iorw",
+          "kind": "fence",
+          "location": "x",
+          "register": "",
+          "role": "",
+          "value": ""
+        },
+        {
+          "event_id": "p0_cmo1",
+          "hart": 0,
+          "instruction": "cbo.flush 0(x6)",
+          "kind": "cmo",
+          "location": "x",
+          "register": "",
+          "role": "",
+          "value": ""
+        },
+        {
+          "event_id": "p0_cmo2",
+          "hart": 0,
+          "instruction": "fence iorw,iorw",
+          "kind": "fence",
+          "location": "x",
+          "register": "",
+          "role": "",
+          "value": ""
+        }
+      ],
+      [
+        {
+          "event_id": "p1_r",
+          "hart": 1,
+          "instruction": "lw x5,0(x6)",
+          "kind": "load",
+          "location": "y",
+          "register": "x5",
+          "role": "",
+          "value": "1"
+        }
+      ]
+    ],
+    "init_lines": [
+      "0:x5=1; 0:x6=x; 0:x7=y;",
+      "1:x6=y; 1:x8=x;"
+    ],
+    "model": "prose-spec",
+    "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+    "relations": [
+      {
+        "dst": "p1_r",
+        "kind": "obs",
+        "label": "observation",
+        "local": false,
+        "src": "p0_vset"
+      }
+    ],
+    "schema": "litmus-link.case-ir.v1",
+    "skeleton": "MP",
+    "tags": [
+      "cross",
+      "vector_store",
+      "cacheable_nc_alias",
+      "unit_store",
+      "flush",
+      "no_tlb"
+    ],
+    "variant": "observation"
+  },
+  "combination": {
+    "attribute": "cacheable_nc_alias",
+    "category": "cross",
+    "cmo": "flush",
+    "memory_event": "vector_store",
+    "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+    "params": {
+      "footprint": "cross_page",
+      "sync": "full_alias_sync"
+    },
+    "profile": "smoke",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "unit_store"
+  },
+  "combination_name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+  "decision": {
+    "expected_kind": "prose-spec-constrained",
+    "hand_category": null,
+    "metadata": {
+      "alias_sync_required": "fence iorw,iorw; cbo.flush; fence iorw,iorw",
+      "formal_forbidden_claim": "false",
+      "oracle": "prose-spec-constrained"
+    },
+    "notes": [
+      "rule:alias_sync",
+      "sync:fence-iorw-cbo.flush-fence-iorw",
+      "rule:vector_ordering"
+    ],
+    "reason": "Combination is legal in the Litmus-link finite generation domain.",
+    "requires": [
+      "RV64I",
+      "Svpbmt",
+      "V",
+      "Zicbom"
+    ],
+    "rvwmo_class": "prose-spec",
+    "status": "generated"
+  },
+  "diagram": {
+    "cycle": "MP + vector_store + cacheable_nc_alias + unit_store + flush",
+    "events": [
+      {
+        "event_id": "p0_vset",
+        "hart": 0,
+        "instruction": "vsetvli x10,x11,e32,m1,ta,ma",
+        "kind": "setup",
+        "location": "",
+        "register": "",
+        "role": "",
+        "value": ""
+      },
+      {
+        "event_id": "p0_vec",
+        "hart": 0,
+        "instruction": "vse32.v v8,(x6)",
+        "kind": "vector",
+        "location": "x",
+        "register": "",
+        "role": "",
+        "value": ""
+      },
+      {
+        "event_id": "p0_cmo0",
+        "hart": 0,
+        "instruction": "fence iorw,iorw",
+        "kind": "fence",
+        "location": "x",
+        "register": "",
+        "role": "",
+        "value": ""
+      },
+      {
+        "event_id": "p0_cmo1",
+        "hart": 0,
+        "instruction": "cbo.flush 0(x6)",
+        "kind": "cmo",
+        "location": "x",
+        "register": "",
+        "role": "",
+        "value": ""
+      },
+      {
+        "event_id": "p0_cmo2",
+        "hart": 0,
+        "instruction": "fence iorw,iorw",
+        "kind": "fence",
+        "location": "x",
+        "register": "",
+        "role": "",
+        "value": ""
+      },
+      {
+        "event_id": "p1_r",
+        "hart": 1,
+        "instruction": "lw x5,0(x6)",
+        "kind": "load",
+        "location": "y",
+        "register": "x5",
+        "role": "",
+        "value": "1"
+      }
+    ],
+    "exists": "(1:x5=1)",
+    "harts": [
+      "P0",
+      "P1"
+    ],
+    "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+    "png": "corpus/smoke/generated/LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync.diagram.png",
+    "relations": [
+      {
+        "dst": "p1_r",
+        "kind": "obs",
+        "label": "observation",
+        "local": false,
+        "src": "p0_vset"
+      }
+    ],
+    "schema": "litmus-link.diagram.v1",
+    "solver_status": "not_applicable",
+    "verdict": "unmodeled"
+  },
+  "expected_kind": "prose-spec-constrained",
+  "generated_from": {
+    "category": "cross",
+    "profile": "smoke"
+  },
+  "legality_status": "generated",
+  "name": "LL_cross_MP_vector_store_cacheable_nc_alias_no_tlb_flush_unit_store_footprint-cross_page_sync-full_alias_sync",
+  "requires": [
+    "RV64I",
+    "Svpbmt",
+    "V",
+    "Zicbom"
+  ],
+  "rvwmo_class": "prose-spec",
+  "schema": "litmus-link.meta.v1",
+  "solver": {
+    "allowed": null,
+    "command": [],
+    "cross_check": "native_only",
+    "edges": [],
+    "fusion": {
+      "allowed": null,
+      "findings": [
+        {
+          "citation": "V-spec, 'Vector Memory Consistency Model' (vector accesses obey RVWMO per element; FENCE orders them against other accesses)",
+          "covered": true,
+          "detail": "Vector element accesses each obey RVWMO as scalar accesses. A FENCE orders these element accesses against other harts' accesses.",
+          "feature": "vector:unit_store"
+        },
+        {
+          "citation": "Zicbom/Zicboz: a CBO is ordered by FENCE with matching PRED/SUCC bits; the robust pattern is fence;cbo;fence",
+          "covered": true,
+          "detail": "fence;cbo;fence wrap present: the CBO effect is ordered both before and after (robust pattern).",
+          "feature": "cmo:flush"
+        },
+        {
+          "citation": "Svpbmt + alias rule: a cacheable/NC alias needs fence iorw,iorw; cbo.flush; fence iorw,iorw to avoid losing coherence/order",
+          "covered": true,
+          "detail": "Documented barrier present.",
+          "feature": "attr:cacheable_nc_alias"
+        }
+      ],
+      "formal_forbidden_claim": false,
+      "model": "extension-prose",
+      "reason": "Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+      "schema": "litmus-link.fusion.v1",
+      "status": "analyzed",
+      "verdict": "ordering-documented"
+    },
+    "model": "prose-spec",
+    "observation": "",
+    "raw_output": "",
+    "reason": "Extension-prose fusion analysis (informative, no herd verdict): Every orderable fusion feature carries the synchronisation its extension documents; the producer effect is ordered before observation (informative, model-extended -- not a herd verdict).",
+    "schema": "litmus-link.solver.v1",
+    "status": "not_applicable",
+    "tool": "none",
+    "verdict": "unmodeled"
+  },
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Message Passing: one hart publishes data then a flag while another observes the flag before reading the data.",
+        "value": "MP"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Vector store replaces or augments a scalar write event and stresses partial visibility.",
+        "value": "vector_store"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "Same PA is reachable through cacheable and NC mappings, requiring explicit synchronization.",
+        "value": "cacheable_nc_alias"
+      },
+      {
+        "feature": "vector",
+        "test_description": "Unit-stride vector store over contiguous elements.",
+        "value": "unit_store"
+      },
+      {
+        "feature": "cmo",
+        "test_description": "cbo.flush writes back dirty data and invalidates the cache block.",
+        "value": "flush"
+      },
+      {
+        "feature": "footprint",
+        "test_description": "Address footprint shape such as same-line, cross-line, cross-page, misaligned, or partial overlap.",
+        "value": "cross_page"
+      },
+      {
+        "feature": "sync",
+        "test_description": "Fence/CMO/fence.i synchronization sequence around the operation.",
+        "value": "full_alias_sync"
+      }
+    ],
+    "summary": "MP / unit_store / flush / cacheable_nc_alias / footprint=cross_page, sync=full_alias_sync multi-hart litmus coverage point."
+  },
+  "variant": "observation"
+}
