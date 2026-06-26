@@ -20,6 +20,7 @@ py-modules = [
   "asm_check",
   "cli",
   "descriptions",
+  "diagram",
   "generator",
   "gui",
   "litmus_ir",

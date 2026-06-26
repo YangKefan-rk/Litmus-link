@@ -48,6 +48,8 @@ def test_generation() -> None:
         check(bool(first_meta["test_description"]["summary"]), "metadata test description summary missing")
         check(bool(first_meta.get("case_ir", {}).get("relations")), "metadata case IR relations missing")
         check(first_meta.get("solver", {}).get("status") in {"verified", "solver_unavailable", "solver_error", "not_applicable"}, "metadata solver status missing")
+        check(first_meta.get("diagram", {}).get("schema") == "litmus-link.diagram.v1", "metadata diagram summary missing")
+        check((root / "smoke" / entries[0]).with_suffix(".diagram.png").exists(), "diagram PNG missing")
         full = write_audit("full-cross", root / "audit")
         baseline = json.loads(Path("specs/profiles/full-cross-baseline.json").read_text())
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
@@ -155,6 +157,7 @@ def test_cli() -> None:
         check(preview["sample"][0]["litmus"].startswith("RISCV "), "GUI preview should include rendered litmus")
         check(bool(preview["sample"][0]["analysis"]["cycle"]), "GUI preview should include cycle analysis")
         check("solver" in preview["sample"][0], "GUI preview should include solver result")
+        check("diagram" in preview["sample"][0], "GUI preview should include diagram result")
         mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 1})
         check(mp_preview["report"]["generated_litmus"] >= 6, "MP cacheable should expand to multiple litmus variants")
         check(len([item for item in mp_preview["sample"] if item.get("litmus")]) >= 6, "MP preview should include expanded variants")

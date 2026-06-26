@@ -7,8 +7,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import islice
 from pathlib import Path
+from tempfile import gettempdir
 from typing import Any, Dict, Iterable, Tuple
 
+from diagram import render_diagram
 from descriptions import feature_description_catalog
 from generator import audit_summary, generate_combinations, generate_profile, write_audit, write_audit_for_combinations
 from models import Combination, GENERATED
@@ -105,9 +107,12 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if rendered_cases:
             for case in rendered_cases:
                 solver = solve_generated_case(case).to_json()
-                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None, solver))
+                diagram = None
+                if case.case_ir is not None:
+                    diagram = render_diagram(case.case_ir, solver, Path(gettempdir()) / "litmus-link-preview-diagrams").summary
+                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None, solver, diagram))
         else:
-            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None, None))
+            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None, None, None))
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
     return {
         "profile": name,
@@ -124,6 +129,7 @@ def _preview_item(
     litmus: str,
     case_ir: Dict[str, Any] | None,
     solver: Dict[str, Any] | None,
+    diagram: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
     return {
         "name": name,
@@ -132,6 +138,7 @@ def _preview_item(
         "litmus": litmus,
         "case_ir": case_ir,
         "solver": solver,
+        "diagram": diagram,
         "analysis": _preview_analysis(combination, decision, litmus, case_ir, solver),
     }
 

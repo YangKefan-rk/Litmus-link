@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from diagram import render_diagram
 from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, GeneratedCase, HAND_REQUIRED, MISSING, count_by_status
 from profiles import profile_combinations
 from litmus_ir import case_count
@@ -67,7 +68,11 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
                 for case in render_cases(combination, decision):
                     solver_result = solve_generated_case(case)
                     solver_counts[solver_result.status] = solver_counts.get(solver_result.status, 0) + 1
-                    case = _with_solver(case, solver_result.to_json())
+                    solver_json = solver_result.to_json()
+                    diagram_json = None
+                    if case.case_ir is not None:
+                        diagram_json = render_diagram(case.case_ir, solver_json, out_dir).summary
+                    case = _with_artifacts(case, solver_json, diagram_json)
                     litmus_path = out_dir / f"{case.name}.litmus"
                     meta_path = out_dir / f"{case.name}.meta.json"
                     solver_path = out_dir / f"{case.name}.solver.json"
@@ -153,10 +158,10 @@ def _empty_solver_counts() -> Dict[str, int]:
     return {"verified": 0, "solver_unavailable": 0, "solver_error": 0, "not_applicable": 0}
 
 
-def _with_solver(case: GeneratedCase, solver: Dict[str, object]) -> GeneratedCase:
+def _with_artifacts(case: GeneratedCase, solver: Dict[str, object], diagram: Dict[str, object] | None) -> GeneratedCase:
     from dataclasses import replace
 
-    return replace(case, solver=solver)
+    return replace(case, solver=solver, diagram=diagram)
 
 
 def _report(profile: str, total: int, counts: Dict[str, int], source: str | None = None) -> Dict[str, object]:

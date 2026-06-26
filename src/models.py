@@ -142,6 +142,7 @@ class GeneratedCase:
     litmus: str
     case_ir: Optional["LitmusCaseIR"] = None
     solver: Optional[Mapping[str, Any]] = None
+    diagram: Optional[Mapping[str, Any]] = None
 
     @property
     def name(self) -> str:
@@ -172,6 +173,8 @@ class GeneratedCase:
             meta["combination_name"] = self.combination.name
         if self.solver is not None:
             meta["solver"] = dict(self.solver)
+        if self.diagram is not None:
+            meta["diagram"] = dict(self.diagram)
         return meta
 
 
