@@ -155,7 +155,7 @@ def _empty_counts() -> Dict[str, int]:
 
 
 def _empty_solver_counts() -> Dict[str, int]:
-    return {"verified": 0, "solver_unavailable": 0, "solver_error": 0, "not_applicable": 0}
+    return {"verified": 0, "conflict": 0, "not_applicable": 0}
 
 
 def _with_artifacts(case: GeneratedCase, solver: Dict[str, object], diagram: Dict[str, object] | None) -> GeneratedCase:

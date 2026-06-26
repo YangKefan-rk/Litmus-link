@@ -405,12 +405,13 @@ def _verdict_color(verdict: str) -> tuple[int, int, int]:
 def _solver_badge(solver: dict[str, Any] | None) -> str:
     status = (solver or {}).get("status", "not_applicable")
     verdict = (solver or {}).get("verdict", "unchecked")
+    cross = (solver or {}).get("cross_check", "")
     if status == "verified":
-        return f"verified: {verdict}"
-    if status == "solver_unavailable":
-        return "unchecked (herd7 missing)"
-    if status == "solver_error":
-        return "unchecked (solver error)"
+        if cross == "agree":
+            return f"{verdict} (native+herd7)"
+        return f"{verdict} (native)"
+    if status == "conflict":
+        return f"conflict: {verdict}"
     if status == "not_applicable":
         return "observation only"
     return f"{status}: {verdict}"

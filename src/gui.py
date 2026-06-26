@@ -207,19 +207,21 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
     if solver:
         status = solver.get("status")
         verdict = solver.get("verdict")
+        cross = solver.get("cross_check", "")
+        tool = "native RVWMO checker" + (" (confirmed by herd7/riscv.cat)" if cross == "agree" else "")
         if status == "verified" and verdict == "forbidden":
-            return f"Verified forbidden by herd7/riscv.cat: {exists}"
+            return f"Verified forbidden by {tool}: {exists}"
         if status == "verified" and verdict == "allowed":
-            return f"Verified allowed by herd7/riscv.cat: {exists}"
-        if status in {"solver_unavailable", "solver_error"}:
-            return f"Unchecked: {solver.get('reason', 'solver did not produce a verdict')}"
+            return f"Verified allowed by {tool}: {exists}"
+        if status == "conflict":
+            return f"Conflict between native checker and herd7 ({solver.get('reason', '')}); native verdict {verdict} reported as primary."
         if status == "not_applicable":
             return "No formal RVWMO forbidden assertion is emitted for this extension/prose-spec case."
     outcome = str(combination.params.get("outcome", ""))
     if outcome == "forbidden":
         return f"Requested forbidden outcome, but solver verification is still required: {exists}"
     if decision.get("expected_kind") == "rvwmo-herd":
-        return "RVWMO/herd decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
+        return "RVWMO decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
     return "No formal forbidden assertion is emitted; this is a hardware-observation/prose-spec outcome."
 
 
