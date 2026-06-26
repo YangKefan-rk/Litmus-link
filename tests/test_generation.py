@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
+from gui import preview_payload
 from models import Combination
 from profiles import profile_combinations
 from rule_file import RuleFileError, load_rule_file
@@ -113,6 +114,17 @@ def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> N
     litmus = next((tmp_path / "out").glob("*.litmus")).read_text()
     assert "vle32.v" in litmus
     assert "cbo.flush" in litmus
+
+
+def test_preview_payload_includes_litmus_and_analysis() -> None:
+    preview = preview_payload({"mode": "profile", "profile": "smoke", "sample_limit": 4})
+    generated = [item for item in preview["sample"] if item.get("litmus")]
+    assert generated
+    first = generated[0]
+    assert first["litmus"].startswith("RISCV ")
+    assert first["analysis"]["cycle"]
+    assert first["analysis"]["exists"]
+    assert "forbidden_outcome" in first["analysis"]
 
 
 def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -149,7 +150,9 @@ class _LitmusLinkQtWindow:
         self.primary_checks: Dict[str, list[Any]] = {}
         self.param_checks: Dict[str, list[Any]] = {}
         self.action_buttons: list[Any] = []
+        self.axis_group_widgets: Dict[str, Any] = {}
         self.param_group_widgets: Dict[str, Any] = {}
+        self.preview_items: list[Dict[str, Any]] = []
         self.active_thread = None
         self.active_worker = None
         self.elapsed_timer = QtCore.QTimer(self.window)
@@ -209,13 +212,13 @@ class _LitmusLinkQtWindow:
         layout = QtWidgets.QHBoxLayout(frame)
         layout.setContentsMargins(12, 10, 12, 10)
         steps = [
-            ("1", "Select Scope", "Choose a profile or custom axes."),
-            ("2", "Audit Rules", "Filter illegal and HAND-only cases."),
-            ("3", "Generate Litmus", "Write tests and metadata."),
-            ("4", "Inspect Output", "Open @all and audit-report.json."),
+            ("1", "Select Scope"),
+            ("2", "Audit Rules"),
+            ("3", "Generate Litmus"),
+            ("4", "Inspect Output"),
         ]
-        for index, (number, title, text) in enumerate(steps):
-            layout.addWidget(self._flow_step(number, title, text), 1)
+        for index, (number, title) in enumerate(steps):
+            layout.addWidget(self._flow_step(number, title), 1)
             if index < len(steps) - 1:
                 arrow = QtWidgets.QLabel("->")
                 arrow.setObjectName("FlowArrow")
@@ -223,7 +226,7 @@ class _LitmusLinkQtWindow:
                 layout.addWidget(arrow)
         return frame
 
-    def _flow_step(self, number: str, title: str, text: str) -> Any:
+    def _flow_step(self, number: str, title: str) -> Any:
         QtWidgets = self.QtWidgets
         step = QtWidgets.QFrame()
         step.setObjectName("FlowStep")
@@ -236,11 +239,7 @@ class _LitmusLinkQtWindow:
         copy = QtWidgets.QVBoxLayout()
         label = QtWidgets.QLabel(title)
         label.setObjectName("FlowTitle")
-        detail = QtWidgets.QLabel(text)
-        detail.setObjectName("FlowText")
-        detail.setWordWrap(True)
         copy.addWidget(label)
-        copy.addWidget(detail)
         layout.addWidget(badge)
         layout.addLayout(copy, 1)
         return step
@@ -271,11 +270,6 @@ class _LitmusLinkQtWindow:
         layout.setContentsMargins(8, 12, 8, 8)
         layout.setSpacing(10)
 
-        note = QtWidgets.QLabel("Use a built-in generation domain for quick smoke, focused, or large stress runs.")
-        note.setObjectName("Hint")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
         form = QtWidgets.QFormLayout()
         self.profile_combo = QtWidgets.QComboBox()
         for name, description in self.options["profiles"].items():
@@ -296,11 +290,6 @@ class _LitmusLinkQtWindow:
         layout.setContentsMargins(8, 12, 8, 8)
         layout.setSpacing(10)
 
-        note = QtWidgets.QLabel("Select axes directly. none/no_cmo/no_tlb act as master switches and clear unrelated parameters automatically.")
-        note.setObjectName("Hint")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
         form = QtWidgets.QFormLayout()
         self.rule_name = QtWidgets.QLineEdit("qt-custom")
         self.rule_limit = QtWidgets.QLineEdit("10000")
@@ -314,8 +303,10 @@ class _LitmusLinkQtWindow:
         layout.addLayout(form)
 
         self.axis_tabs = QtWidgets.QTabWidget()
+        self.axis_tabs.setObjectName("AxisTabs")
         self.axis_tabs.addTab(self._build_axis_page(self.PRIMARY_AXES, self.options["axes"], checked_first=True), "Core Axes")
-        self.axis_tabs.addTab(self._build_parameter_page(), "Parameter Axes")
+        for group_name, axes in self.PARAM_GROUPS.items():
+            self.axis_tabs.addTab(self._build_parameter_page(group_name, axes), _parameter_tab_title(group_name))
         layout.addWidget(self.axis_tabs, 1)
 
         advanced = QtWidgets.QGroupBox("Advanced rule preview")
@@ -324,15 +315,11 @@ class _LitmusLinkQtWindow:
         self.refresh_rule_button = QtWidgets.QPushButton("Refresh Rule Preview")
         self.refresh_rule_button.clicked.connect(self._sync_rule_preview)
         advanced_layout.addWidget(self.refresh_rule_button)
-        advanced_hint = QtWidgets.QLabel("The preview is optional. Generate uses the JSON shown here, including manual edits.")
-        advanced_hint.setObjectName("Hint")
-        advanced_hint.setWordWrap(True)
-        advanced_layout.addWidget(advanced_hint)
         layout.addWidget(advanced)
 
         return tab
 
-    def _build_parameter_page(self) -> Any:
+    def _build_parameter_page(self, group_name: str, axes: Iterable[str]) -> Any:
         QtWidgets = self.QtWidgets
         page = QtWidgets.QWidget()
         page_layout = QtWidgets.QVBoxLayout(page)
@@ -345,19 +332,17 @@ class _LitmusLinkQtWindow:
         scroll_layout.setContentsMargins(0, 0, 8, 0)
         scroll_layout.setSpacing(8)
 
-        for group_name, axes in self.PARAM_GROUPS.items():
-            group = QtWidgets.QGroupBox(group_name)
-            group_layout = QtWidgets.QVBoxLayout(group)
-            group_layout.setContentsMargins(10, 8, 10, 10)
-            group_hint = QtWidgets.QLabel(_parameter_group_hint(group_name))
-            group_hint.setObjectName("Hint")
-            group_hint.setWordWrap(True)
-            group_layout.addWidget(group_hint)
-            for axis in axes:
-                checks = self._add_check_group(group_layout, axis, PARAM_AXIS_VALUES.get(axis, []), checked_first=False)
-                self.param_checks[axis] = checks
-            self.param_group_widgets[group_name] = group
-            scroll_layout.addWidget(group)
+        group = QtWidgets.QGroupBox(group_name)
+        group.setObjectName("AxisGroup")
+        group.setProperty("axis_role", "parameter")
+        group.setProperty("group_state", "inactive")
+        group_layout = QtWidgets.QVBoxLayout(group)
+        group_layout.setContentsMargins(10, 8, 10, 10)
+        for axis in axes:
+            checks = self._add_check_group(group_layout, axis, PARAM_AXIS_VALUES.get(axis, []), checked_first=False, role="parameter")
+            self.param_checks[axis] = checks
+        self.param_group_widgets[group_name] = group
+        scroll_layout.addWidget(group)
 
         scroll_layout.addStretch(1)
         scroll.setWidget(scroll_content)
@@ -378,7 +363,7 @@ class _LitmusLinkQtWindow:
         scroll_layout.setSpacing(8)
 
         for axis in axes:
-            checks = self._add_check_group(scroll_layout, axis, values_by_axis.get(axis, []), checked_first=checked_first)
+            checks = self._add_check_group(scroll_layout, axis, values_by_axis.get(axis, []), checked_first=checked_first, role="core")
             if axis in self.PRIMARY_AXES:
                 self.primary_checks[axis] = checks
             else:
@@ -389,10 +374,14 @@ class _LitmusLinkQtWindow:
         page_layout.addWidget(scroll)
         return page
 
-    def _add_check_group(self, layout: Any, title: str, values: Iterable[str], checked_first: bool) -> list[Any]:
+    def _add_check_group(self, layout: Any, title: str, values: Iterable[str], checked_first: bool, role: str) -> list[Any]:
         QtWidgets = self.QtWidgets
         group = QtWidgets.QGroupBox(title)
+        group.setObjectName("AxisGroup")
+        group.setProperty("axis_role", role)
+        group.setProperty("group_state", "base")
         group.setCheckable(False)
+        self.axis_group_widgets[title] = group
         grid = QtWidgets.QGridLayout(group)
         grid.setContentsMargins(10, 8, 10, 10)
         grid.setHorizontalSpacing(14)
@@ -451,6 +440,10 @@ class _LitmusLinkQtWindow:
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
         self.summary_view.setPlainText("Choose a profile or custom rule, then run Preview Sample, Run Audit, or Generate Files.")
+        self.preview_list = QtWidgets.QListWidget()
+        self.preview_list.setObjectName("PreviewList")
+        self.preview_list.setAlternatingRowColors(True)
+        self.preview_list.itemDoubleClicked.connect(self._open_preview_detail)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.rule_json = QtWidgets.QPlainTextEdit()
@@ -459,6 +452,7 @@ class _LitmusLinkQtWindow:
         self.raw_json = QtWidgets.QPlainTextEdit()
         self.raw_json.setReadOnly(True)
         self.result_tabs.addTab(self.summary_view, "Summary")
+        self.result_tabs.addTab(self.preview_list, "Preview Litmus")
         self.result_tabs.addTab(self.log_view, "Log")
         self.result_tabs.addTab(self.rule_json, "Rule JSON")
         self.result_tabs.addTab(self.raw_json, "Raw JSON")
@@ -530,9 +524,11 @@ class _LitmusLinkQtWindow:
         cmo_enabled = bool(self._selected_non_none("cmo", "no_cmo"))
         tlb_enabled = bool(self._selected_non_none("tlb", "no_tlb"))
         memory_enabled = bool(self._selected_non_none("attribute", "cacheable")) or vector_enabled or cmo_enabled or tlb_enabled
-        self._set_core_axis_tooltips("vector", vector_enabled, "Vector is enabled.", "Vector is disabled; Vector parameters are cleared.")
-        self._set_core_axis_tooltips("cmo", cmo_enabled, "CMO is enabled.", "CMO is disabled; CMO sync parameters are cleared.")
-        self._set_core_axis_tooltips("tlb", tlb_enabled, "TLB/VM is enabled.", "TLB/VM is disabled; virtual-memory parameters are cleared.")
+        self._set_core_axis_visual("vector", vector_enabled)
+        self._set_core_axis_visual("cmo", cmo_enabled)
+        self._set_core_axis_visual("tlb", tlb_enabled)
+        self._set_core_axis_visual("attribute", memory_enabled)
+        self._set_core_axis_visual("skeleton", True)
         groups = {
             "Vector": vector_enabled,
             "Memory Footprint": memory_enabled,
@@ -545,39 +541,74 @@ class _LitmusLinkQtWindow:
             group = self.param_group_widgets.get(group_name)
             if group is None:
                 continue
-            group.setEnabled(enabled)
+            self._set_group_state(group, "active" if enabled else "inactive")
             if not enabled:
                 for axis in self.PARAM_GROUPS[group_name]:
                     for check in self.param_checks.get(axis, []):
                         check.setChecked(False)
+                        check.setEnabled(False)
+            else:
+                for axis in self.PARAM_GROUPS[group_name]:
+                    for check in self.param_checks.get(axis, []):
+                        check.setEnabled(True)
+        self._refresh_choice_states()
 
     def _selected_non_none(self, axis: str, none_value: str) -> list[str]:
         return [value for value in self._selected(self.primary_checks.get(axis, [])) if value != none_value]
 
-    def _set_core_axis_tooltips(self, axis: str, enabled: bool, active_text: str, inactive_text: str) -> None:
-        none_value = self.NONE_VALUES.get(axis)
-        for check in self.primary_checks.get(axis, []):
-            value = str(check.property("axis_value"))
-            check.setToolTip(inactive_text if value == none_value or not enabled else active_text)
+    def _set_core_axis_visual(self, axis: str, enabled: bool) -> None:
+        group = self.axis_group_widgets.get(axis)
+        if group is not None:
+            self._set_group_state(group, "active" if enabled else "inactive")
+
+    def _refresh_choice_states(self) -> None:
+        for axis, checks in {**self.primary_checks, **self.param_checks}.items():
+            none_value = self.NONE_VALUES.get(axis)
+            for check in checks:
+                value = str(check.property("axis_value"))
+                selected_none = none_value is not None and value == none_value and check.isChecked()
+                state = "off" if selected_none else "on" if check.isChecked() else "base"
+                check.setProperty("choice_state", state)
+                self._refresh_widget_style(check)
+
+    def _set_group_state(self, group: Any, state: str) -> None:
+        group.setProperty("group_state", state)
+        self._refresh_widget_style(group)
+
+    def _refresh_widget_style(self, widget: Any) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
 
     def _mark_rule_manual_edit(self) -> None:
         if not self.suspend_rule_sync:
             self.status_label.setText("Rule JSON edited manually")
 
     def _payload(self) -> Dict[str, Any]:
+        sample_limit = self._preview_sample_limit()
         if self.mode_tabs.currentIndex() == 0:
             return {
                 "mode": "profile",
                 "profile": self.profile_combo.currentData(),
                 "out": self.profile_out.text() or "out/qt-profile",
                 "summary_only": self.summary_only.isChecked(),
+                "sample_limit": sample_limit,
             }
         return {
             "mode": "rule",
             "rule": json.loads(self.rule_json.toPlainText()),
             "out": self.rule_out.text() or "out/qt-custom",
             "summary_only": self.summary_only.isChecked(),
+            "sample_limit": sample_limit,
         }
+
+    def _preview_sample_limit(self) -> int:
+        if self.mode_tabs.currentIndex() == 0:
+            return 200
+        try:
+            return min(max(int(self.rule_limit.text() or "10000"), 1), 1000)
+        except ValueError:
+            return 200
 
     def _run_action(self, action: str, label: str) -> None:
         if self.active_thread is not None:
@@ -633,6 +664,8 @@ class _LitmusLinkQtWindow:
         if isinstance(result, dict):
             self.summary_view.setPlainText(_summary_text(label, result, self._current_out_dir()))
             self.raw_json.setPlainText(json.dumps(result, indent=2, sort_keys=True))
+            if label == "Preview Sample":
+                self._populate_preview_list(result)
         else:
             self.summary_view.setPlainText(str(result))
             self.raw_json.setPlainText(json.dumps({"result": str(result)}, indent=2, sort_keys=True))
@@ -670,6 +703,29 @@ class _LitmusLinkQtWindow:
         self.raw_json.setPlainText(json.dumps({"error": message}, indent=2, sort_keys=True))
         self._append_log(f"ERROR: {message}")
         self.result_tabs.setCurrentWidget(self.summary_view)
+
+    def _populate_preview_list(self, result: Dict[str, Any]) -> None:
+        self.preview_list.clear()
+        self.preview_items = [item for item in result.get("sample", []) if item.get("litmus")]
+        for index, item in enumerate(self.preview_items, start=1):
+            decision = item.get("decision", {})
+            analysis = item.get("analysis", {})
+            title = item.get("name", f"case-{index}")
+            status = decision.get("status", "unknown")
+            cycle = analysis.get("cycle", "")
+            list_item = self.QtWidgets.QListWidgetItem(f"{index:03d}  {status}  {title}\n{cycle}")
+            list_item.setData(_user_role(self.QtCore), index - 1)
+            self.preview_list.addItem(list_item)
+        if not self.preview_items:
+            self.preview_list.addItem("No generated litmus cases in this preview sample.")
+
+    def _open_preview_detail(self, item: Any) -> None:
+        index = item.data(_user_role(self.QtCore))
+        if index is None or index < 0 or index >= len(self.preview_items):
+            return
+        dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.preview_items[index], self.window)
+        dialog.resize(980, 760)
+        _exec_dialog(dialog)
 
     def _current_out_dir(self) -> str:
         if self.mode_tabs.currentIndex() == 0:
@@ -729,21 +785,140 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     return "\n".join(lines)
 
 
-def _parameter_group_hint(group_name: str) -> str:
-    hints = {
-        "Vector": "Enabled only when Core Axes selects a real vector memory operation.",
-        "Memory Footprint": "Address layout for cache line, page, alias, and overlap stress.",
-        "CMO Sync": "Fence and CMO synchronization sequences; full alias sync requires cbo.flush.",
-        "Virtual Memory": "Enabled only when Core Axes selects a TLB/VM scenario.",
-        "RVWMO Shape": "Scalar relation modifiers such as dependency, width, and expected outcome class.",
-        "Stress": "Microarchitecture pressure modifiers applied around the litmus body.",
+class _LitmusPreviewDialog:
+    def __init__(self, QtWidgets: Any, QtCore: Any, item: Dict[str, Any], parent: Any) -> None:
+        self.QtWidgets = QtWidgets
+        self.QtCore = QtCore
+        self.item = item
+        self.dialog = QtWidgets.QDialog(parent)
+        self.dialog.setWindowTitle(str(item.get("name", "Litmus preview")))
+        self._build_ui()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.dialog, name)
+
+    def _build_ui(self) -> None:
+        QtWidgets = self.QtWidgets
+        layout = QtWidgets.QVBoxLayout(self.dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QtWidgets.QLabel(str(self.item.get("name", "Litmus preview")))
+        title.setObjectName("DialogTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        splitter = QtWidgets.QSplitter(_vertical(self.QtCore))
+        splitter.addWidget(self._build_topology_view())
+        splitter.addWidget(self._build_detail_tabs())
+        splitter.setSizes([390, 300])
+        layout.addWidget(splitter, 1)
+
+        close = QtWidgets.QPushButton("Close")
+        close.clicked.connect(self.dialog.accept)
+        layout.addWidget(close)
+
+    def _build_topology_view(self) -> Any:
+        QtWidgets = self.QtWidgets
+        scene = QtWidgets.QGraphicsScene()
+        scene.setSceneRect(0, 0, 900, 360)
+        analysis = self.item.get("analysis", {})
+        harts = list(analysis.get("harts", [])) or ["P0", "P1"]
+        locations = list(analysis.get("memory_locations", [])) or ["x", "y"]
+        cycle_tokens = list(analysis.get("cycle_tokens", [])) or ["po", "rf", "fr"]
+
+        hart_positions = _positions(len(harts), 110, 80, 220)
+        loc_positions = _positions(len(locations), 110, 655, 220)
+        for hart, (x, y) in zip(harts, hart_positions):
+            self._node(scene, x, y, 86, 46, hart)
+        for location, (x, y) in zip(locations, loc_positions):
+            self._box(scene, x, y, 96, 42, location)
+
+        for hx, hy in hart_positions:
+            for lx, ly in loc_positions[:2]:
+                scene.addLine(hx + 86, hy + 23, lx, ly + 21)
+
+        token_positions = _ring_positions(len(cycle_tokens), 450, 178, 210, 105)
+        for index, token in enumerate(cycle_tokens):
+            x, y = token_positions[index]
+            self._box(scene, x - 42, y - 18, 84, 36, token)
+            nx, ny = token_positions[(index + 1) % len(token_positions)]
+            scene.addLine(x, y, nx, ny)
+
+        scene.addText("Topology").setPos(24, 18)
+        scene.addText("Dependency / relation cycle").setPos(355, 18)
+        scene.addText("Observed locations").setPos(665, 18)
+        view = QtWidgets.QGraphicsView(scene)
+        view.setObjectName("TopologyView")
+        return view
+
+    def _node(self, scene: Any, x: float, y: float, w: float, h: float, text: str) -> None:
+        scene.addEllipse(x, y, w, h)
+        label = scene.addText(text)
+        label.setPos(x + 24, y + 11)
+
+    def _box(self, scene: Any, x: float, y: float, w: float, h: float, text: str) -> None:
+        scene.addRect(x, y, w, h)
+        label = scene.addText(text)
+        label.setPos(x + 8, y + 8)
+
+    def _build_detail_tabs(self) -> Any:
+        QtWidgets = self.QtWidgets
+        tabs = QtWidgets.QTabWidget()
+        tabs.addTab(self._text_view(self._analysis_text()), "Cycle")
+        tabs.addTab(self._text_view(str(self.item.get("analysis", {}).get("exists", ""))), "Exists")
+        tabs.addTab(self._text_view(str(self.item.get("litmus", ""))), "Litmus")
+        return tabs
+
+    def _text_view(self, text: str) -> Any:
+        view = self.QtWidgets.QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(text)
+        return view
+
+    def _analysis_text(self) -> str:
+        combination = self.item.get("combination", {})
+        decision = self.item.get("decision", {})
+        analysis = self.item.get("analysis", {})
+        cycle = analysis.get("cycle", "")
+        tokens = " -> ".join(analysis.get("cycle_tokens", []))
+        exists = analysis.get("exists", "")
+        forbidden = analysis.get("forbidden_outcome", "")
+        axes = combination.get("name", self.item.get("name", ""))
+        return "\n".join(
+            [
+                f"Case: {axes}",
+                f"Status: {decision.get('status', '-')}",
+                f"RVWMO class: {decision.get('rvwmo_class', '-')}",
+                f"Expected kind: {decision.get('expected_kind', '-')}",
+                "",
+                f"Cycle: {cycle}",
+                f"Dependency ring: {tokens}",
+                "",
+                f"Exists: {exists}",
+                f"Forbidden outcome: {forbidden}",
+            ]
+        )
+
+
+def _parameter_tab_title(group_name: str) -> str:
+    titles = {
+        "Memory Footprint": "Memory",
+        "CMO Sync": "CMO Params",
+        "Virtual Memory": "VM Params",
+        "RVWMO Shape": "RVWMO",
     }
-    return hints.get(group_name, "Additional generation parameters preserved in metadata.")
+    return titles.get(group_name, group_name)
 
 
 def _horizontal(QtCore: Any) -> Any:
     orientation = getattr(QtCore, "Qt").Orientation if hasattr(getattr(QtCore, "Qt"), "Orientation") else getattr(QtCore, "Qt")
     return orientation.Horizontal
+
+
+def _vertical(QtCore: Any) -> Any:
+    orientation = getattr(QtCore, "Qt").Orientation if hasattr(getattr(QtCore, "Qt"), "Orientation") else getattr(QtCore, "Qt")
+    return orientation.Vertical
 
 
 def _align_center(QtCore: Any) -> Any:
@@ -753,9 +928,36 @@ def _align_center(QtCore: Any) -> Any:
     return qt.AlignCenter
 
 
+def _user_role(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    if hasattr(qt, "ItemDataRole"):
+        return qt.ItemDataRole.UserRole
+    return qt.UserRole
+
+
+def _exec_dialog(dialog: Any) -> int:
+    exec_fn = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
+    return int(exec_fn())
+
+
+def _positions(count: int, x: float, top: float, bottom: float) -> list[tuple[float, float]]:
+    if count <= 1:
+        return [(x, (top + bottom) / 2)]
+    step = (bottom - top) / (count - 1)
+    return [(x, top + index * step) for index in range(count)]
+
+
+def _ring_positions(count: int, cx: float, cy: float, rx: float, ry: float) -> list[tuple[float, float]]:
+    count = max(count, 1)
+    return [
+        (cx + math.cos(2 * math.pi * index / count - math.pi / 2) * rx, cy + math.sin(2 * math.pi * index / count - math.pi / 2) * ry)
+        for index in range(count)
+    ]
+
+
 def _stylesheet() -> str:
     return """
-    QWidget { color: #182230; font-size: 13px; }
+    QWidget { background: #f3f6fb; color: #182230; font-size: 13px; }
     QLabel, QCheckBox { background: transparent; }
     QFrame#Header { background: #172033; border-radius: 8px; }
     QLabel#Title { color: #ffffff; font-size: 24px; font-weight: 700; }
@@ -764,16 +966,28 @@ def _stylesheet() -> str:
     QFrame#FlowStep { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; }
     QLabel#FlowBadge { background: #0f766e; color: #ffffff; border-radius: 15px; font-weight: 700; }
     QLabel#FlowTitle { color: #111827; font-weight: 700; }
-    QLabel#FlowText, QLabel#Hint, QLabel#OutputHint { color: #5b6778; }
+    QLabel#OutputHint { color: #5b6778; }
     QLabel#FlowArrow { color: #64748b; font-size: 18px; font-weight: 700; }
     QLabel#SectionTitle { color: #111827; font-size: 17px; font-weight: 700; }
-    QTabWidget::pane { border: 1px solid #d9e2ec; border-radius: 6px; background: #ffffff; }
-    QTabBar::tab { background: #e8eef6; padding: 8px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
-    QTabBar::tab:selected { background: #ffffff; color: #0f766e; font-weight: 700; }
-    QGroupBox { border: 1px solid #d9e2ec; border-radius: 6px; margin-top: 10px; padding-top: 10px; font-weight: 700; }
+    QTabWidget::pane { border: 1px solid #cfd9e6; border-radius: 7px; background: #ffffff; }
+    QTabBar::tab { background: #e7edf5; color: #475569; padding: 8px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+    QTabBar::tab:selected { background: #ffffff; color: #0f766e; font-weight: 700; border-top: 3px solid #0f766e; }
+    QTabWidget#AxisTabs QTabBar::tab:first { background: #e0f2fe; color: #075985; font-weight: 700; }
+    QTabWidget#AxisTabs QTabBar::tab:first:selected { background: #ffffff; color: #075985; border-top: 3px solid #0284c7; }
+    QGroupBox { border: 1px solid #d9e2ec; border-radius: 6px; margin-top: 10px; padding-top: 10px; font-weight: 700; background: #ffffff; }
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+    QGroupBox#AxisGroup[axis_role="core"] { border: 2px solid #91c5f8; background: #f0f8ff; }
+    QGroupBox#AxisGroup[axis_role="core"][group_state="active"] { border: 2px solid #0284c7; background: #e0f2fe; }
+    QGroupBox#AxisGroup[axis_role="core"][group_state="inactive"] { border: 1px solid #cbd5e1; background: #f8fafc; }
+    QGroupBox#AxisGroup[axis_role="parameter"] { border: 1px solid #d7dee8; background: #ffffff; }
+    QGroupBox#AxisGroup[axis_role="parameter"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
+    QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
+    QCheckBox { spacing: 7px; padding: 3px 6px; border-radius: 5px; }
+    QCheckBox[choice_state="on"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
+    QCheckBox[choice_state="off"] { background: #fee2e2; color: #7f1d1d; font-weight: 700; }
+    QCheckBox:disabled { color: #94a3b8; background: transparent; }
     QPushButton { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px 12px; font-weight: 700; }
     QPushButton:hover { background: #eef6ff; }
     QPushButton:disabled { color: #94a3b8; background: #f1f5f9; }

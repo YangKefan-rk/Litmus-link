@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +11,7 @@ from typing import Any, Dict, Iterable, Tuple
 
 from descriptions import feature_description_catalog
 from generator import audit_summary, generate_combinations, generate_profile, write_audit, write_audit_for_combinations
-from models import Combination
+from models import Combination, GENERATED
 from profiles import (
     ALIAS_MODES,
     ATTRIBUTES,
@@ -35,6 +36,7 @@ from profiles import (
 )
 from rule_file import RuleFileError, load_rule_data, rule_field_values
 from rules import evaluate
+from renderer import render_case
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
@@ -96,11 +98,16 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     iterator = iter(cached if cached is not None else combinations)
     for combination in islice(iterator, max(sample_limit, 0)):
         decision = evaluate(combination)
+        litmus = ""
+        if decision.status == GENERATED:
+            litmus = render_case(combination, decision).litmus
         sample.append(
             {
                 "name": combination.name,
                 "combination": combination.to_json(),
                 "decision": decision.to_json(),
+                "litmus": litmus,
+                "analysis": _preview_analysis(combination, decision.to_json(), litmus),
             }
         )
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
@@ -110,6 +117,80 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "report": audit_summary(name, summary_combinations, source=source),
         "sample": sample,
     }
+
+
+def _preview_analysis(combination: Combination, decision: Dict[str, Any], litmus: str) -> Dict[str, Any]:
+    exists = _extract_exists(litmus)
+    cycle = _cycle_text(combination, litmus)
+    tokens = _cycle_tokens(cycle)
+    forbidden = _forbidden_text(combination, decision, exists)
+    return {
+        "cycle": cycle,
+        "cycle_tokens": tokens,
+        "exists": exists,
+        "forbidden_outcome": forbidden,
+        "harts": _harts_from_litmus(litmus),
+        "memory_locations": _memory_locations_from_litmus(litmus),
+    }
+
+
+def _extract_exists(litmus: str) -> str:
+    match = re.search(r"\bexists\b\s*(.*)$", litmus, flags=re.DOTALL)
+    return " ".join(match.group(1).split()) if match else "No exists clause in rendered preview."
+
+
+def _cycle_text(combination: Combination, litmus: str) -> str:
+    quoted = re.findall(r'"([^"]+)"', litmus)
+    if quoted and _looks_like_cycle(quoted[0]):
+        return quoted[0]
+    skeleton_cycles = {
+        "MP": "po/W->W -> rfe -> fre -> po/R->R",
+        "LB": "po/R->W -> rfe -> po/R->W -> rfe",
+        "SB": "po/W->R -> fre -> po/W->R -> fre",
+        "WRC": "wse -> rfe -> po/R->W -> rfe -> fre",
+        "RWC": "rfe -> po/R->W -> wse -> rfe -> fre",
+        "IRIW": "wse -> rfe -> fre -> rfe -> fre",
+        "ISA2": "ppo/dependency-or-fence -> rf/fr/co observation",
+        "R": "read-shape rf/fr/dependency cycle",
+        "S": "store-shape co/propagation cycle",
+        "Co": "coherence per-location co/rf/fr cycle",
+    }
+    base = skeleton_cycles.get(combination.skeleton, f"{combination.skeleton} relation cycle")
+    features = [value for value in [combination.vector, combination.cmo, combination.tlb, combination.attribute] if value not in {"none", "no_cmo", "no_tlb", "cacheable"}]
+    return base + (" with " + ", ".join(features) if features else "")
+
+
+def _looks_like_cycle(text: str) -> bool:
+    tokens = {"po", "pod", "rfe", "rfi", "fre", "fri", "co", "wse", "rf", "fr", "ctrl", "addr", "data"}
+    lowered = text.lower()
+    return any(token in lowered for token in tokens)
+
+
+def _cycle_tokens(cycle: str) -> list[str]:
+    raw = re.split(r"\s*(?:->|,|\s+)\s*", cycle.strip())
+    return [token for token in raw if token]
+
+
+def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: str) -> str:
+    outcome = str(combination.params.get("outcome", ""))
+    if outcome == "forbidden":
+        return f"Forbidden outcome is the exists condition: {exists}"
+    if decision.get("expected_kind") == "rvwmo-herd":
+        return "RVWMO/herd decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
+    return "No formal forbidden assertion is emitted; this is a hardware-observation/prose-spec outcome."
+
+
+def _harts_from_litmus(litmus: str) -> list[str]:
+    harts = sorted(set(re.findall(r"(?:^|[\s{;])(\d+):", litmus)))
+    return [f"P{hart}" for hart in harts] or ["P0", "P1"]
+
+
+def _memory_locations_from_litmus(litmus: str) -> list[str]:
+    init_match = re.search(r"\{(.*?)\}", litmus, flags=re.DOTALL)
+    if not init_match:
+        return ["x", "y"]
+    locations = sorted(set(re.findall(r"=([A-Za-z_][A-Za-z0-9_]*)(?:[;\s]|$)", init_match.group(1))))
+    return [location for location in locations if not location.startswith("P")][:4] or ["x", "y"]
 
 
 def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

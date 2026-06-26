@@ -148,6 +148,8 @@ def test_cli() -> None:
         check("stress-large" in options["profiles"], "GUI options should include stress-large")
         preview = preview_payload({"mode": "rule", "rule": {"name": "gui-test", "axes": {"vector": ["unit_load"]}, "param_axes": {"sew": ["e32"]}, "limit": 10}})
         check(preview["report"]["total_combinations"] == 1, "GUI preview count mismatch")
+        check(preview["sample"][0]["litmus"].startswith("RISCV "), "GUI preview should include rendered litmus")
+        check(bool(preview["sample"][0]["analysis"]["cycle"]), "GUI preview should include cycle analysis")
         check(main(["qt-gui", "--check"]) == 0, "Qt GUI check should not require Qt")
         check("PyQt6" in qt_binding_status(), "Qt GUI status should include PyQt6")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")
