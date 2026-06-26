@@ -72,6 +72,8 @@ litmus-link qt-gui --check
 
 The Qt window opens on the machine where the command runs. If you run it over SSH on a server, use X forwarding/remote desktop, or run the repo locally on your workstation.
 
+The Qt GUI uses a four-step workflow: select a built-in profile or custom axes, run an audit, generate files, then inspect the output directory. Actions run in the background and update the status bar, progress indicator, log tab, and summary tab. Custom rules are synchronized automatically from the checkbox selections; the JSON tab remains available for advanced edits.
+
 ## Large Profiles
 
 The small profiles are for smoke tests and targeted debugging. The large profiles are intended to cover the multicore stress space across RVWMO skeletons, Vector memory, CMO, PBMT/NC aliases, TLB/VM transitions, and microarchitecture pressure axes.

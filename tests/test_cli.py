@@ -5,7 +5,7 @@ import sys
 
 from cli import main
 from gui import options_payload, preview_payload
-from qt_gui import qt_binding_status
+from qt_gui import _summary_text, qt_binding_status
 
 
 def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -68,6 +68,26 @@ def test_qt_gui_check(capsys) -> None:  # type: ignore[no-untyped-def]
     assert main(["qt-gui", "--check"]) == 0
     assert "PyQt6" in capsys.readouterr().out
     assert "PySide6" in qt_binding_status()
+
+
+def test_qt_summary_text_highlights_generated_artifacts() -> None:
+    summary = _summary_text(
+        "Generate Files",
+        {
+            "profile": "qt-custom",
+            "total_combinations": 4,
+            "generated": 3,
+            "excluded_illegal": 1,
+            "excluded_unsupported": 0,
+            "hand_required": 0,
+            "missing": 0,
+        },
+        "out/qt-custom",
+    )
+    assert "Generate Files complete" in summary
+    assert "litmus files: 3" in summary
+    assert "out/qt-custom/@all" in summary
+    assert "out/qt-custom/audit-report.json" in summary
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
