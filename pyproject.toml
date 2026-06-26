@@ -19,7 +19,9 @@ litmus-link = "cli:main"
 py-modules = [
   "asm_check",
   "cli",
+  "descriptions",
   "generator",
+  "gui",
   "models",
   "profiles",
   "renderer",

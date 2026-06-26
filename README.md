@@ -22,6 +22,7 @@ litmus-link validate out/smoke/@all
 litmus-link audit --profile full-cross --out out/audit
 litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
 litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
+litmus-link gui
 ```
 
 The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is recommended for future development and CI.
@@ -34,7 +35,26 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
+- `litmus-link gui` starts a local browser UI for configuring profiles, custom rule axes, parameter axes, audit, and generation.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
+
+## GUI
+
+Run the local graphical configuration UI with:
+
+```sh
+litmus-link gui
+```
+
+The GUI opens a local browser page on `127.0.0.1:8765`. It can:
+
+- select a built-in profile and run summary audit or generation;
+- graphically choose custom `skeleton`/`vector`/`cmo`/`tlb`/`attribute` axes;
+- choose parameter axes such as `sew`, `lmul`, `mask`, `footprint`, `sync`, `vm`, `pte`, and `stress`;
+- preview the generated rule JSON and sample combinations;
+- run audit or generate `.litmus` files through the same backend as the CLI.
+
+Use `litmus-link gui --no-open --port 9000` if you do not want the browser to open automatically or need a different port.
 
 ## Large Profiles
 
@@ -56,7 +76,7 @@ Every generated `.meta.json` includes a `test_description` section that explains
 
 ## User Rule Files
 
-Rule files let users define a bounded generation domain without editing Python. The input is JSON with `name`, optional `defaults`, cross-product `axes`, explicit `cases`, optional `exclude` patterns, and a `limit` guardrail. All expanded combinations still pass through the same ISA legality and RVWMO classification rules as built-in profiles.
+Rule files let users define a bounded generation domain without editing Python. The input is JSON with `name`, optional `defaults`, cross-product `axes`, optional `param_axes`, explicit `cases`, optional `exclude` patterns, and a `limit` guardrail. All expanded combinations still pass through the same ISA legality and RVWMO classification rules as built-in profiles.
 
 Use `litmus-link list axes` to see accepted values. A minimal rule file can be as small as:
 
@@ -66,6 +86,11 @@ Use `litmus-link list axes` to see accepted values. A minimal rule file can be a
   "axes": {
     "cmo": ["flush", "zero"],
     "attribute": ["cacheable", "pbmt_nc"]
+  },
+  "param_axes": {
+    "sew": ["e32", "e64"],
+    "footprint": ["same_line", "cross_page"],
+    "stress": ["none", "store_buffer_full"]
   },
   "limit": 20
 }

@@ -117,6 +117,27 @@ def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> N
     assert "cbo.flush" in litmus
 
 
+def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:
+    rule_file = tmp_path / "param-rules.json"
+    rule_file.write_text(
+        json.dumps(
+            {
+                "name": "custom-param-axis",
+                "axes": {"vector": ["unit_load"], "attribute": ["cacheable", "pbmt_nc"]},
+                "param_axes": {"sew": ["e32", "e64"], "footprint": ["same_line", "cross_page"]},
+                "param_defaults": {"stress": "load_queue_replay"},
+                "limit": 20,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rule_set = load_rule_file(rule_file)
+    assert len(rule_set.combinations) == 8
+    assert {combination.params["sew"] for combination in rule_set.combinations} == {"e32", "e64"}
+    assert {combination.params["footprint"] for combination in rule_set.combinations} == {"same_line", "cross_page"}
+    assert all(combination.params["stress"] == "load_queue_replay" for combination in rule_set.combinations)
+
+
 def test_long_parameterized_names_are_hashed() -> None:
     combination = Combination(
         "test",

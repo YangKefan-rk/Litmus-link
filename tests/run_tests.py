@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cli import main
 from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
+from gui import options_payload, preview_payload
 from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
 from profiles import profile_combinations
 from rule_file import load_rule_file
@@ -85,6 +86,22 @@ def test_generation() -> None:
         check(cross_report["generated"] == 1, "cross rule file should generate one test")
         litmus = next((root / "cross").glob("*.litmus")).read_text(encoding="utf-8")
         check("vle32.v" in litmus and "cbo.flush" in litmus, "cross rule litmus should include vector and CMO operations")
+        param_file = root / "param-rules.json"
+        param_file.write_text(
+            json.dumps(
+                {
+                    "name": "custom-param-axis",
+                    "axes": {"vector": ["unit_load"], "attribute": ["cacheable", "pbmt_nc"]},
+                    "param_axes": {"sew": ["e32", "e64"], "footprint": ["same_line", "cross_page"]},
+                    "param_defaults": {"stress": "load_queue_replay"},
+                    "limit": 20,
+                }
+            ),
+            encoding="utf-8",
+        )
+        param_set = load_rule_file(param_file)
+        check(len(param_set.combinations) == 8, "param_axes expansion count mismatch")
+        check({combination.params["sew"] for combination in param_set.combinations} == {"e32", "e64"}, "param_axes sew values missing")
         long_name = Combination(
             "test",
             "cross",
@@ -121,6 +138,10 @@ def test_cli() -> None:
         check(main(["generate", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "custom")]) == 0, "CLI rule-file generate failed")
         check(main(["audit", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "audit")]) == 0, "CLI rule-file audit failed")
         check(main(["audit", "--profile", "stress-large", "--summary-only", "--out", str(Path(tmp) / "audit-large")]) == 0, "CLI summary-only audit failed")
+        options = options_payload()
+        check("stress-large" in options["profiles"], "GUI options should include stress-large")
+        preview = preview_payload({"mode": "rule", "rule": {"name": "gui-test", "axes": {"vector": ["unit_load"]}, "param_axes": {"sew": ["e32"]}, "limit": 10}})
+        check(preview["report"]["total_combinations"] == 1, "GUI preview count mismatch")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")
         check(
             main(["generate", "--profile", "smoke", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "both-sources")]) == 2,

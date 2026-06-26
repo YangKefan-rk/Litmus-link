@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from cli import main
+from gui import options_payload, preview_payload
 
 
 def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -41,6 +42,25 @@ def test_cli_summary_only_audit(tmp_path: Path) -> None:
     assert main(["audit", "--profile", "stress-large", "--summary-only", "--out", str(out)]) == 0
     assert (out / "audit-report.json").exists()
     assert not (out / "covered.json").exists()
+
+
+def test_gui_options_and_preview() -> None:
+    options = options_payload()
+    assert "stress-large" in options["profiles"]
+    assert "sew" in options["param_axes"]
+    preview = preview_payload(
+        {
+            "mode": "rule",
+            "rule": {
+                "name": "gui-test",
+                "axes": {"vector": ["unit_load"], "attribute": ["cacheable"]},
+                "param_axes": {"sew": ["e32"], "footprint": ["same_line"]},
+                "limit": 10,
+            },
+        }
+    )
+    assert preview["report"]["total_combinations"] == 1
+    assert preview["sample"][0]["combination"]["params"]["sew"] == "e32"
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
