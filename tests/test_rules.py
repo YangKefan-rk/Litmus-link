@@ -44,6 +44,21 @@ def test_vector_params_require_vector_axis() -> None:
     assert "require a non-none vector" in decision.reason
 
 
+def test_vector_load_store_shape_must_match_memory_event() -> None:
+    load_as_store = evaluate(Combination("test", "vector_mem", "MP", "vector_store", "cacheable", vector="fof_load"))
+    store_as_load = evaluate(Combination("test", "vector_mem", "MP", "vector_load", "cacheable", vector="unit_store"))
+    assert load_as_store.status == EXCLUDED_UNSUPPORTED
+    assert store_as_load.status == EXCLUDED_UNSUPPORTED
+    assert "vector_store" in load_as_store.reason
+    assert "vector_load" in store_as_load.reason
+
+
+def test_cmo_shape_must_match_memory_event() -> None:
+    decision = evaluate(Combination("test", "cmo", "MP", "scalar_pair", "cacheable", cmo="flush"))
+    assert decision.status == EXCLUDED_UNSUPPORTED
+    assert "memory_event=cmo" in decision.reason
+
+
 def test_vm_params_require_tlb_axis() -> None:
     decision = evaluate(Combination("test", "rvwmo_base", "MP", "scalar_pair", "cacheable", params={"pte": "pa_remap"}))
     assert decision.status == EXCLUDED_UNSUPPORTED
@@ -53,6 +68,8 @@ def test_vm_params_require_tlb_axis() -> None:
 def test_alias_flush_sync_is_generated_with_sync_metadata() -> None:
     decision = evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params={"sync": "full_alias_sync"}))
     assert decision.status == GENERATED
+    assert decision.expected_kind == "prose-spec-constrained"
+    assert decision.metadata["formal_forbidden_claim"] == "false"
     assert decision.metadata["alias_sync_required"].startswith("fence")
 
 

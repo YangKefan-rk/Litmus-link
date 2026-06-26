@@ -12,6 +12,8 @@ NEGATIVE_CMOS = {"flush_offset4", "clean_csr_denied", "zero_csr_denied"}
 NEGATIVE_ATTRIBUTES = {"pbmt_reserved"}
 NEGATIVE_TLBS = {"nonleaf_pbmt"}
 ILLEGAL_VECTOR_FORMS = {"fof_strided", "fof_indexed"}
+VECTOR_LOAD_OPS = {operation for operation in VECTOR_OPS if not operation.endswith("store")}
+VECTOR_STORE_OPS = {operation for operation in VECTOR_OPS if operation.endswith("store")}
 VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "elem_order"}
 VM_PARAMS = {"vm", "shootdown", "pte"}
 
@@ -25,8 +27,10 @@ RULE_DESCRIPTIONS: Dict[str, str] = {
     "cbo_envcfg": "CBO execution depends on CBIE/CBCFE/CBZE privilege configuration.",
     "cbo_zero_non_atomic": "cbo.zero must not be treated as an atomic whole-block store.",
     "vector_fof_unit_only": "FOF vector loads are unit-stride only, plus legal unit-stride segment FOF loads.",
+    "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
     "vector_non_idempotent_fof": "FOF into non-idempotent memory is unsafe unless restart/trimming cannot occur.",
     "vector_ordering": "Vector memory follows RVWMO at instruction level; only indexed-ordered operations order elements.",
+    "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",
     "remote_sfence": "sfence.vma affects the local hart; remote shootdown must be explicitly modeled.",
     "fence_i_local": "fence.i synchronizes only the executing hart's instruction fetch stream.",
     "rvwmo_scope": "FENCE.I/SFENCE.VMA/PMA/CMO interactions are prose-spec or hardware-observation tests, not herd RVWMO assertions.",
@@ -104,6 +108,9 @@ def evaluate(combination: Combination) -> Decision:
     param_decision = _param_validity(combination, requires)
     if param_decision is not None:
         return param_decision
+    shape_decision = _shape_validity(combination, requires)
+    if shape_decision is not None:
+        return shape_decision
     if sync not in {"", *CMO_SYNC_SEQUENCES}:
         return Decision(
             EXCLUDED_UNSUPPORTED,
@@ -212,7 +219,7 @@ def evaluate(combination: Combination) -> Decision:
         )
 
     rvwmo_class = _rvwmo_class(combination)
-    expected_kind = "rvwmo-herd" if rvwmo_class == "rvwmo-herd" else "hardware-observation"
+    expected_kind = _expected_kind(rvwmo_class)
 
     if combination.attribute == "cacheable_nc_alias":
         notes.append("rule:alias_sync")
@@ -275,6 +282,16 @@ def _rvwmo_class(combination: Combination) -> str:
     return "hardware-observation"
 
 
+def _expected_kind(rvwmo_class: str) -> str:
+    if rvwmo_class == "rvwmo-herd":
+        return "rvwmo-herd"
+    if rvwmo_class == "rvwmo-instruction-level":
+        return "hardware-observation"
+    if rvwmo_class == "prose-spec":
+        return "prose-spec-constrained"
+    return "hardware-observation"
+
+
 def _tlb_notes(combination: Combination) -> List[str]:
     notes = ["rule:remote_sfence" if combination.tlb == "remote_sfence" else "rule:pbmte_sfence"]
     if combination.memory_event == "ifetch":
@@ -286,6 +303,9 @@ def _tlb_notes(combination: Combination) -> List[str]:
 
 def _decision_metadata(combination: Combination) -> Dict[str, str]:
     metadata: Dict[str, str] = {}
+    rvwmo_class = _rvwmo_class(combination)
+    metadata["oracle"] = _expected_kind(rvwmo_class)
+    metadata["formal_forbidden_claim"] = "true" if rvwmo_class == "rvwmo-herd" else "false"
     if combination.params.get("inval_mode") == "flush":
         metadata["inval_mode"] = "flush"
     elif combination.cmo == "inval":
@@ -373,4 +393,61 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             ["rule:cbo_envcfg"],
             "cmo",
         )
+    return None
+
+
+def _shape_validity(combination: Combination, requires: List[str]) -> Decision | None:
+    if combination.vector != "none":
+        if combination.memory_event not in {"vector_load", "vector_store"}:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "A non-none vector operation requires memory_event=vector_load or memory_event=vector_store.",
+                "prose-spec",
+                "hardware-observation",
+                requires,
+                ["rule:vector_event_shape"],
+                "vector",
+            )
+        if combination.vector in VECTOR_LOAD_OPS and combination.memory_event != "vector_load":
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                f"Vector load operation {combination.vector} cannot be emitted in a vector_store memory event.",
+                "prose-spec",
+                "hardware-observation",
+                requires,
+                ["rule:vector_event_shape"],
+                "vector",
+            )
+        if combination.vector in VECTOR_STORE_OPS and combination.memory_event != "vector_store":
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                f"Vector store operation {combination.vector} cannot be emitted in a vector_load memory event.",
+                "prose-spec",
+                "hardware-observation",
+                requires,
+                ["rule:vector_event_shape"],
+                "vector",
+            )
+
+    if combination.cmo != "no_cmo":
+        if combination.vector == "none" and combination.memory_event not in {"cmo", "ifetch"}:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "A CMO operation without Vector must use memory_event=cmo or memory_event=ifetch.",
+                "prose-spec",
+                "prose-spec-constrained",
+                requires,
+                ["rule:cmo_event_shape"],
+                "cmo",
+            )
+        if combination.vector != "none" and combination.memory_event not in {"vector_load", "vector_store"}:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "Vector+CMO cross scenarios must keep the vector load/store memory-event shape.",
+                "prose-spec",
+                "prose-spec-constrained",
+                requires,
+                ["rule:cmo_event_shape", "rule:vector_event_shape"],
+                "cross",
+            )
     return None
