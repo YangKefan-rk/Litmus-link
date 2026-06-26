@@ -47,5 +47,30 @@
     "V"
   ],
   "rvwmo_class": "rvwmo-instruction-level",
-  "schema": "litmus-link.meta.v1"
+  "schema": "litmus-link.meta.v1",
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Message Passing: one hart publishes data then a flag while another observes the flag before reading the data.",
+        "value": "MP"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Vector load replaces or augments a scalar read event across elements, lines, or pages.",
+        "value": "vector_load"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "Normal coherent cacheable main memory.",
+        "value": "cacheable"
+      },
+      {
+        "feature": "vector",
+        "test_description": "Unit-stride vector load over contiguous elements.",
+        "value": "unit_load"
+      }
+    ],
+    "summary": "MP / unit_load multi-hart litmus coverage point."
+  }
 }

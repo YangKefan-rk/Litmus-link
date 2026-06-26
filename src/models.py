@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+
+MAX_GENERATED_NAME_LEN = 180
 
 
 GENERATED = "generated"
@@ -53,7 +58,13 @@ class Combination:
             self.cmo,
             self.vector,
         ]
-        return sanitize_token("_".join(tokens))
+        for key, value in sorted(self.params.items()):
+            tokens.append(f"{sanitize_token(str(key))}-{sanitize_token(str(value))}")
+        name = sanitize_token("_".join(tokens))
+        if len(name) <= MAX_GENERATED_NAME_LEN:
+            return name
+        digest = hashlib.sha1(json.dumps(dict(self.params), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+        return sanitize_token("_".join(tokens[:8] + ["params", digest]))
 
     def axes(self) -> Dict[str, str]:
         return {
@@ -128,11 +139,14 @@ class GeneratedCase:
     litmus: str
 
     def meta(self) -> Dict[str, Any]:
+        from descriptions import describe_combination
+
         return {
             "schema": "litmus-link.meta.v1",
             "name": self.combination.name,
             "combination": self.combination.to_json(),
             "axes": self.combination.axes(),
+            "test_description": describe_combination(self.combination),
             "decision": self.decision.to_json(),
             "requires": list(self.decision.requires),
             "rvwmo_class": self.decision.rvwmo_class,

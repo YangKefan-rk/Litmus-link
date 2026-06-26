@@ -19,6 +19,13 @@ def test_cli_list_rules(capsys) -> None:  # type: ignore[no-untyped-def]
     assert "pbmt_leaf_only" in capsys.readouterr().out
 
 
+def test_cli_list_features(capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["list", "features"]) == 0
+    out = capsys.readouterr().out
+    assert "vector" in out
+    assert "pbmt_nc" in out
+
+
 def test_cli_rule_file_generate_and_audit(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     rule_file = tmp_path / "rules.json"
     rule_file.write_text(json.dumps({"name": "cli-custom", "axes": {"cmo": ["flush"]}}), encoding="utf-8")
@@ -27,6 +34,13 @@ def test_cli_rule_file_generate_and_audit(tmp_path: Path, capsys) -> None:  # ty
     assert (out / "LL_cmo_MP_cmo_cacheable_no_tlb_flush_none.litmus").exists()
     assert main(["audit", "--rule-file", str(rule_file), "--out", str(tmp_path / "audit")]) == 0
     assert "cli-custom" in capsys.readouterr().out
+
+
+def test_cli_summary_only_audit(tmp_path: Path) -> None:
+    out = tmp_path / "audit"
+    assert main(["audit", "--profile", "stress-large", "--summary-only", "--out", str(out)]) == 0
+    assert (out / "audit-report.json").exists()
+    assert not (out / "covered.json").exists()
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:

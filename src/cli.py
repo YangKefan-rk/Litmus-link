@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from asm_check import asm_check
+from descriptions import feature_description_catalog
 from generator import generate_combinations, generate_profile, write_audit, write_audit_for_combinations
 from profiles import HAND_CATEGORIES, axis_values, list_profiles
 from rule_file import RuleFileError, load_rule_file, rule_field_values
@@ -27,12 +28,13 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--profile")
     audit.add_argument("--rule-file", type=Path, help="JSON file describing user-defined generation axes or cases")
     audit.add_argument("--out", type=Path)
+    audit.add_argument("--summary-only", action="store_true", help="only write audit-report.json and coverage markdown; skip large detail JSON files")
 
     validate = sub.add_parser("validate", help="validate generated corpus")
     validate.add_argument("path", type=Path)
 
-    list_cmd = sub.add_parser("list", help="list known profiles, axes, rules, or hand categories")
-    list_cmd.add_argument("what", choices=["profiles", "axes", "rules", "hand"])
+    list_cmd = sub.add_parser("list", help="list known profiles, axes, rules, features, or hand categories")
+    list_cmd.add_argument("what", choices=["profiles", "axes", "rules", "features", "hand"])
 
     upstream = sub.add_parser("import-upstream", help="index an upstream litmus repository")
     upstream.add_argument("--src", required=True, type=Path)
@@ -59,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
             _require_profile_or_rule_file(args.profile, args.rule_file)
             if args.rule_file:
                 rule_set = load_rule_file(args.rule_file)
-                report = write_audit_for_combinations(rule_set.name, rule_set.combinations, out, source=str(args.rule_file))
+                report = write_audit_for_combinations(rule_set.name, rule_set.combinations, out, source=str(args.rule_file), summary_only=args.summary_only)
             else:
-                report = write_audit(args.profile, out)
+                report = write_audit(args.profile, out, summary_only=args.summary_only)
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0 if report.get("missing", 0) == 0 else 1
         if args.command == "validate":
@@ -101,6 +103,8 @@ def _print_list(what: str) -> None:
     elif what == "rules":
         for name, description in list_rules().items():
             print(f"{name}\t{description}")
+    elif what == "features":
+        print(json.dumps(feature_description_catalog(), indent=2, sort_keys=True))
     elif what == "hand":
         for category in HAND_CATEGORIES:
             print(category)

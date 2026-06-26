@@ -2,7 +2,7 @@ PYTHON ?= python3
 PROFILE ?= smoke
 OUT ?= out/$(PROFILE)
 
-.PHONY: test smoke audit validate clean asm-check
+.PHONY: test smoke audit audit-large validate clean asm-check
 
 test:
 	@if $(PYTHON) -c 'import pytest' >/dev/null 2>&1; then \
@@ -20,6 +20,10 @@ audit:
 	mkdir -p out/audit
 	PYTHONPATH=src $(PYTHON) -m cli audit --profile full-cross --out out/audit
 	test ! -s out/audit/missing.json
+
+audit-large:
+	mkdir -p out/audit-stress-large
+	PYTHONPATH=src $(PYTHON) -m cli audit --profile stress-large --summary-only --out out/audit-stress-large
 
 validate:
 	PYTHONPATH=src $(PYTHON) -m cli validate $(OUT)/@all

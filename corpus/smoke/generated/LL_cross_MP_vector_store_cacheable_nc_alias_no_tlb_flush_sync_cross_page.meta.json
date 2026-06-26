@@ -57,5 +57,35 @@
     "Zifencei"
   ],
   "rvwmo_class": "prose-spec",
-  "schema": "litmus-link.meta.v1"
+  "schema": "litmus-link.meta.v1",
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Message Passing: one hart publishes data then a flag while another observes the flag before reading the data.",
+        "value": "MP"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Vector store replaces or augments a scalar write event and stresses partial visibility.",
+        "value": "vector_store"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "Same PA is reachable through cacheable and NC mappings, requiring explicit synchronization.",
+        "value": "cacheable_nc_alias"
+      },
+      {
+        "feature": "vector",
+        "test_description": "Vector footprint crosses a page boundary.",
+        "value": "cross_page"
+      },
+      {
+        "feature": "cmo",
+        "test_description": "Alias-safe sequence: fence iorw,iorw; cbo.flush; fence iorw,iorw.",
+        "value": "flush_sync"
+      }
+    ],
+    "summary": "MP / cross_page / flush_sync / cacheable_nc_alias multi-hart litmus coverage point."
+  }
 }

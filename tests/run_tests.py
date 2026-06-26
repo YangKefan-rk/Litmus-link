@@ -5,8 +5,9 @@ import tempfile
 from pathlib import Path
 
 from cli import main
-from generator import audit_profile, generate_combinations, generate_profile, write_audit
+from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
 from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
+from profiles import profile_combinations
 from rule_file import load_rule_file
 from rules import evaluate
 from upstream import import_upstream
@@ -36,6 +37,8 @@ def test_generation() -> None:
         check(report["generated"] == 8, "smoke should generate 8 tests")
         entries = validate_path(root / "smoke" / "@all")
         check(len(entries) == 8, "validate should see 8 smoke tests")
+        first_meta = json.loads((root / "smoke" / entries[0]).with_suffix(".meta.json").read_text(encoding="utf-8"))
+        check(bool(first_meta["test_description"]["summary"]), "metadata test description summary missing")
         full = write_audit("full-cross", root / "audit")
         baseline = json.loads(Path("specs/profiles/full-cross-baseline.json").read_text())
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
@@ -43,6 +46,13 @@ def test_generation() -> None:
         rows, vector = audit_profile("vector_mem")
         check(rows and vector["excluded_illegal"] > 0, "vector profile should include illegal exclusions")
         check(vector["hand_required"] > 0, "vector profile should include HAND cases")
+        stress = audit_summary("stress-large", profile_combinations("stress-large"))
+        baseline = json.loads(Path("specs/profiles/stress-large-baseline.json").read_text())
+        check(stress == baseline, "stress-large audit changed from baseline")
+        summary_dir = root / "summary"
+        summary = write_audit("stress-large", summary_dir, summary_only=True)
+        check(summary["total_combinations"] == 557840, "summary-only stress-large count mismatch")
+        check(not (summary_dir / "covered.json").exists(), "summary-only audit should skip detail JSON")
         rule_file = root / "rules.json"
         rule_file.write_text(
             json.dumps(
@@ -75,6 +85,28 @@ def test_generation() -> None:
         check(cross_report["generated"] == 1, "cross rule file should generate one test")
         litmus = next((root / "cross").glob("*.litmus")).read_text(encoding="utf-8")
         check("vle32.v" in litmus and "cbo.flush" in litmus, "cross rule litmus should include vector and CMO operations")
+        long_name = Combination(
+            "test",
+            "cross",
+            "IRIW",
+            "vector_load",
+            "cacheable_nc_alias",
+            cmo="inval_as_flush",
+            vector="indexed_unordered_load",
+            params={
+                "alias": "cacheable_nc",
+                "elem_order": "ordered_elements",
+                "footprint": "cross_page",
+                "lmul": "m1",
+                "mask": "masked",
+                "sew": "e16",
+                "stress": "store_buffer_full",
+                "sync": "full_alias_sync",
+                "tail": "ta_mu",
+                "vl": "vl2",
+            },
+        ).name
+        check(len(long_name) <= 180 and "params_" in long_name, "long parameterized name should be hashed")
 
 
 def test_cli() -> None:
@@ -83,10 +115,12 @@ def test_cli() -> None:
         check(main(["generate", "--profile", "smoke", "--out", str(out)]) == 0, "CLI generate failed")
         check(main(["validate", str(out / "@all")]) == 0, "CLI validate failed")
         check(main(["list", "rules"]) == 0, "CLI list rules failed")
+        check(main(["list", "features"]) == 0, "CLI list features failed")
         rule_file = Path(tmp) / "rules.json"
         rule_file.write_text(json.dumps({"name": "cli-custom", "axes": {"cmo": ["flush"]}}), encoding="utf-8")
         check(main(["generate", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "custom")]) == 0, "CLI rule-file generate failed")
         check(main(["audit", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "audit")]) == 0, "CLI rule-file audit failed")
+        check(main(["audit", "--profile", "stress-large", "--summary-only", "--out", str(Path(tmp) / "audit-large")]) == 0, "CLI summary-only audit failed")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")
         check(
             main(["generate", "--profile", "smoke", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "both-sources")]) == 2,

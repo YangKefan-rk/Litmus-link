@@ -20,6 +20,7 @@ litmus-link list profiles
 litmus-link generate --profile smoke --out out/smoke
 litmus-link validate out/smoke/@all
 litmus-link audit --profile full-cross --out out/audit
+litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
 litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
 ```
 
@@ -31,8 +32,27 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link generate --rule-file <json> --out <dir>` generates from user-defined axes or explicit cases instead of a built-in profile.
 - `litmus-link validate <dir-or-@all>` validates index references, metadata, naming, and legality status.
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
-- `litmus-link list profiles|axes|rules|hand` prints available profiles, generation axes, legality rules, or HAND categories.
+- `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
+- `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
+
+## Large Profiles
+
+The small profiles are for smoke tests and targeted debugging. The large profiles are intended to cover the multicore stress space across RVWMO skeletons, Vector memory, CMO, PBMT/NC aliases, TLB/VM transitions, and microarchitecture pressure axes.
+
+| Profile | Total combinations | Generated `.litmus` | HAND-required | Excluded illegal |
+| --- | ---: | ---: | ---: | ---: |
+| `stress-large` | 557,840 | 73,440 | 355,760 | 128,640 |
+| `stress-all` | 6,113,560 | 1,599,840 | 2,659,600 | 1,854,120 |
+
+Use `stress-large` as the practical large profile. Use `stress-all` only when you intentionally want the multi-million combination domain. Start with summary audit before generating files:
+
+```sh
+litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
+litmus-link audit --profile stress-all --summary-only --out out/audit-stress-all
+```
+
+Every generated `.meta.json` includes a `test_description` section that explains the selected skeleton, feature axes, and stress knobs. Use `litmus-link list features` to inspect the description catalog.
 
 ## User Rule Files
 

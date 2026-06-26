@@ -47,5 +47,25 @@
     "Svpbmt"
   ],
   "rvwmo_class": "prose-spec",
-  "schema": "litmus-link.meta.v1"
+  "schema": "litmus-link.meta.v1",
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Message Passing: one hart publishes data then a flag while another observes the flag before reading the data.",
+        "value": "MP"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Scalar load/store baseline RVWMO event.",
+        "value": "scalar_pair"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "PBMT=NC idempotent main memory, still treated as RVWMO main memory.",
+        "value": "pbmt_nc"
+      }
+    ],
+    "summary": "MP / pbmt_nc multi-hart litmus coverage point."
+  }
 }

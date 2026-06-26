@@ -51,5 +51,30 @@
     "V"
   ],
   "rvwmo_class": "rvwmo-instruction-level",
-  "schema": "litmus-link.meta.v1"
+  "schema": "litmus-link.meta.v1",
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Load Buffering: two harts load before storing, stressing whether both loads may observe old values.",
+        "value": "LB"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Vector store replaces or augments a scalar write event and stresses partial visibility.",
+        "value": "vector_store"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "PBMT=NC idempotent main memory, still treated as RVWMO main memory.",
+        "value": "pbmt_nc"
+      },
+      {
+        "feature": "vector",
+        "test_description": "Unit-stride vector store over contiguous elements.",
+        "value": "unit_store"
+      }
+    ],
+    "summary": "LB / unit_store / pbmt_nc multi-hart litmus coverage point."
+  }
 }
