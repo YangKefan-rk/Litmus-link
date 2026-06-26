@@ -10,6 +10,7 @@ from descriptions import feature_description_catalog
 from generator import generate_combinations, generate_profile, write_audit, write_audit_for_combinations
 from gui import run_gui
 from profiles import HAND_CATEGORIES, axis_values, list_profiles
+from qt_gui import QtGuiError, qt_binding_status, run_qt_gui
 from rule_file import RuleFileError, load_rule_file, rule_field_values
 from rules import list_rules
 from upstream import import_upstream
@@ -51,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     gui.add_argument("--port", default=8765, type=int)
     gui.add_argument("--no-open", action="store_true", help="do not open a browser automatically")
 
+    qt_gui = sub.add_parser("qt-gui", help="start the optional PyQt/PySide desktop GUI")
+    qt_gui.add_argument("--check", action="store_true", help="only print Qt binding availability")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
@@ -90,7 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "gui":
             run_gui(args.host, args.port, open_browser=not args.no_open)
             return 0
-    except (ValueError, FileNotFoundError, ValidationError, RuleFileError) as exc:
+        if args.command == "qt-gui":
+            if args.check:
+                print(json.dumps(qt_binding_status(), indent=2, sort_keys=True))
+                return 0
+            return run_qt_gui()
+    except (ValueError, FileNotFoundError, ValidationError, RuleFileError, QtGuiError) as exc:
         print(f"litmus-link: error: {exc}", file=sys.stderr)
         return 2
     return 2

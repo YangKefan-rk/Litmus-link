@@ -36,6 +36,7 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
 - `litmus-link gui` starts a local browser UI for configuring profiles, custom rule axes, parameter axes, audit, and generation.
+- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
 
 ## GUI
@@ -55,6 +56,21 @@ The GUI opens a local browser page on `127.0.0.1:8765`. It can:
 - run audit or generate `.litmus` files through the same backend as the CLI.
 
 Use `litmus-link gui --no-open --port 9000` if you do not want the browser to open automatically or need a different port.
+
+For a desktop GUI without HTTP/browser, install one Qt binding and run:
+
+```sh
+python3 -m pip install PyQt6
+litmus-link qt-gui
+```
+
+Check Qt availability with:
+
+```sh
+litmus-link qt-gui --check
+```
+
+The Qt window opens on the machine where the command runs. If you run it over SSH on a server, use X forwarding/remote desktop, or run the repo locally on your workstation.
 
 ## Large Profiles
 

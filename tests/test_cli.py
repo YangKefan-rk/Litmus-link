@@ -5,6 +5,7 @@ import sys
 
 from cli import main
 from gui import options_payload, preview_payload
+from qt_gui import qt_binding_status
 
 
 def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -61,6 +62,12 @@ def test_gui_options_and_preview() -> None:
     )
     assert preview["report"]["total_combinations"] == 1
     assert preview["sample"][0]["combination"]["params"]["sew"] == "e32"
+
+
+def test_qt_gui_check(capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["qt-gui", "--check"]) == 0
+    assert "PyQt6" in capsys.readouterr().out
+    assert "PySide6" in qt_binding_status()
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ from generator import audit_profile, audit_summary, generate_combinations, gener
 from gui import options_payload, preview_payload
 from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
 from profiles import profile_combinations
+from qt_gui import qt_binding_status
 from rule_file import load_rule_file
 from rules import evaluate
 from upstream import import_upstream
@@ -142,6 +143,8 @@ def test_cli() -> None:
         check("stress-large" in options["profiles"], "GUI options should include stress-large")
         preview = preview_payload({"mode": "rule", "rule": {"name": "gui-test", "axes": {"vector": ["unit_load"]}, "param_axes": {"sew": ["e32"]}, "limit": 10}})
         check(preview["report"]["total_combinations"] == 1, "GUI preview count mismatch")
+        check(main(["qt-gui", "--check"]) == 0, "Qt GUI check should not require Qt")
+        check("PyQt6" in qt_binding_status(), "Qt GUI status should include PyQt6")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")
         check(
             main(["generate", "--profile", "smoke", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "both-sources")]) == 2,

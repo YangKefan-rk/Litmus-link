@@ -24,6 +24,7 @@ py-modules = [
   "gui",
   "models",
   "profiles",
+  "qt_gui",
   "renderer",
   "rule_file",
   "rules",
