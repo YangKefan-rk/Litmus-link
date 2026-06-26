@@ -37,6 +37,7 @@ from profiles import (
 from rule_file import RuleFileError, load_rule_data, rule_field_values
 from rules import evaluate
 from renderer import render_cases
+from solver import solve_generated_case
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
@@ -103,9 +104,10 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             rendered_cases = render_cases(combination, decision)
         if rendered_cases:
             for case in rendered_cases:
-                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None))
+                solver = solve_generated_case(case).to_json()
+                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None, solver))
         else:
-            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None))
+            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None, None))
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
     return {
         "profile": name,
@@ -115,27 +117,43 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _preview_item(combination: Combination, decision: Dict[str, Any], name: str, litmus: str, case_ir: Dict[str, Any] | None) -> Dict[str, Any]:
+def _preview_item(
+    combination: Combination,
+    decision: Dict[str, Any],
+    name: str,
+    litmus: str,
+    case_ir: Dict[str, Any] | None,
+    solver: Dict[str, Any] | None,
+) -> Dict[str, Any]:
     return {
         "name": name,
         "combination": combination.to_json(),
         "decision": decision,
         "litmus": litmus,
         "case_ir": case_ir,
-        "analysis": _preview_analysis(combination, decision, litmus, case_ir),
+        "solver": solver,
+        "analysis": _preview_analysis(combination, decision, litmus, case_ir, solver),
     }
 
 
-def _preview_analysis(combination: Combination, decision: Dict[str, Any], litmus: str, case_ir: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _preview_analysis(
+    combination: Combination,
+    decision: Dict[str, Any],
+    litmus: str,
+    case_ir: Dict[str, Any] | None = None,
+    solver: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     exists = str(case_ir.get("exists")) if case_ir else _extract_exists(litmus)
     cycle = str(case_ir.get("cycle")) if case_ir else _cycle_text(combination, litmus)
     tokens = [relation.get("label", relation.get("kind", "")) for relation in case_ir.get("relations", [])] if case_ir else _cycle_tokens(cycle)
-    forbidden = _forbidden_text(combination, decision, exists)
+    forbidden = _forbidden_text(combination, decision, exists, solver)
     return {
         "cycle": cycle,
         "cycle_tokens": tokens,
         "exists": exists,
         "forbidden_outcome": forbidden,
+        "solver_status": solver.get("status") if solver else "not_applicable",
+        "solver_verdict": solver.get("verdict") if solver else "unmodeled",
         "harts": [f"P{index}" for index, _hart in enumerate(case_ir.get("harts", []))] if case_ir else _harts_from_litmus(litmus),
         "memory_locations": _memory_locations_from_ir(case_ir) if case_ir else _memory_locations_from_litmus(litmus),
     }
@@ -178,10 +196,21 @@ def _cycle_tokens(cycle: str) -> list[str]:
     return [token for token in raw if token]
 
 
-def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: str) -> str:
+def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: str, solver: Dict[str, Any] | None = None) -> str:
+    if solver:
+        status = solver.get("status")
+        verdict = solver.get("verdict")
+        if status == "verified" and verdict == "forbidden":
+            return f"Verified forbidden by herd7/riscv.cat: {exists}"
+        if status == "verified" and verdict == "allowed":
+            return f"Verified allowed by herd7/riscv.cat: {exists}"
+        if status in {"solver_unavailable", "solver_error"}:
+            return f"Unchecked: {solver.get('reason', 'solver did not produce a verdict')}"
+        if status == "not_applicable":
+            return "No formal RVWMO forbidden assertion is emitted for this extension/prose-spec case."
     outcome = str(combination.params.get("outcome", ""))
     if outcome == "forbidden":
-        return f"Forbidden outcome is the exists condition: {exists}"
+        return f"Requested forbidden outcome, but solver verification is still required: {exists}"
     if decision.get("expected_kind") == "rvwmo-herd":
         return "RVWMO/herd decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
     return "No formal forbidden assertion is emitted; this is a hardware-observation/prose-spec outcome."

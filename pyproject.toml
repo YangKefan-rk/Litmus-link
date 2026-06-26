@@ -29,6 +29,7 @@ py-modules = [
   "renderer",
   "rule_file",
   "rules",
+  "solver",
   "upstream",
   "validator",
 ]

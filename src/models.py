@@ -141,6 +141,7 @@ class GeneratedCase:
     decision: Decision
     litmus: str
     case_ir: Optional["LitmusCaseIR"] = None
+    solver: Optional[Mapping[str, Any]] = None
 
     @property
     def name(self) -> str:
@@ -169,6 +170,8 @@ class GeneratedCase:
             meta["case_ir"] = self.case_ir.to_json()
             meta["variant"] = self.case_ir.variant
             meta["combination_name"] = self.combination.name
+        if self.solver is not None:
+            meta["solver"] = dict(self.solver)
         return meta
 
 

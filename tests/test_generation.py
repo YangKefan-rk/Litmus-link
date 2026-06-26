@@ -13,11 +13,15 @@ def test_smoke_generation_round_trip(tmp_path: Path) -> None:
     report = generate_profile("smoke", tmp_path)
     assert report["generated"] == 8
     assert report["generated_litmus"] > report["generated"]
+    assert report["solver"]["solver_unavailable"] + report["solver"]["verified"] > 0
     entries = validate_path(tmp_path / "@all")
     assert len(entries) == report["generated_litmus"]
     first_meta = json.loads((tmp_path / entries[0]).with_suffix(".meta.json").read_text())
+    first_solver = json.loads((tmp_path / entries[0]).with_suffix(".solver.json").read_text())
     assert first_meta["schema"] == "litmus-link.meta.v1"
     assert first_meta["case_ir"]["variant"]
+    assert first_meta["solver"] == first_solver
+    assert first_solver["status"] in {"verified", "solver_unavailable", "solver_error", "not_applicable"}
     assert first_meta["test_description"]["summary"]
     assert first_meta["test_description"]["features"]
 
@@ -125,6 +129,8 @@ def test_preview_payload_includes_litmus_and_analysis() -> None:
     first = generated[0]
     assert first["litmus"].startswith("RISCV ")
     assert first["case_ir"]["relations"]
+    assert first["solver"]["status"] in {"verified", "solver_unavailable", "solver_error", "not_applicable"}
+    assert first["analysis"]["solver_status"] == first["solver"]["status"]
     assert first["analysis"]["cycle"]
     assert first["analysis"]["exists"]
     assert "forbidden_outcome" in first["analysis"]

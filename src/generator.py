@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, MISSING, count_by_status
+from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, GeneratedCase, HAND_REQUIRED, MISSING, count_by_status
 from profiles import profile_combinations
 from litmus_ir import case_count
 from renderer import render_cases
 from rules import evaluate
+from solver import solve_generated_case
 
 
 def audit_profile(profile: str) -> Tuple[List[Tuple[object, Decision]], Dict[str, object]]:
@@ -55,6 +56,7 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
     counts = _empty_counts()
     total = 0
     generated_cases = 0
+    solver_counts = _empty_solver_counts()
 
     with _JsonArrayWriter(out_dir / "excluded.json") as excluded:
         for combination in combinations:
@@ -63,10 +65,15 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
             counts[decision.status] = counts.get(decision.status, 0) + 1
             if decision.status == GENERATED:
                 for case in render_cases(combination, decision):
+                    solver_result = solve_generated_case(case)
+                    solver_counts[solver_result.status] = solver_counts.get(solver_result.status, 0) + 1
+                    case = _with_solver(case, solver_result.to_json())
                     litmus_path = out_dir / f"{case.name}.litmus"
                     meta_path = out_dir / f"{case.name}.meta.json"
+                    solver_path = out_dir / f"{case.name}.solver.json"
                     litmus_path.write_text(case.litmus, encoding="utf-8")
                     meta_path.write_text(json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    solver_path.write_text(json.dumps(solver_result.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
                     generated_names.append(litmus_path.name)
                     generated_cases += 1
             else:
@@ -74,6 +81,7 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
 
     report = _report(profile, total, counts, source)
     report["generated_litmus"] = generated_cases
+    report["solver"] = solver_counts
 
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -139,6 +147,16 @@ def audit_summary(profile: str, combinations: Iterable[Combination], source: str
 
 def _empty_counts() -> Dict[str, int]:
     return {GENERATED: 0, EXCLUDED_ILLEGAL: 0, EXCLUDED_UNSUPPORTED: 0, HAND_REQUIRED: 0, MISSING: 0}
+
+
+def _empty_solver_counts() -> Dict[str, int]:
+    return {"verified": 0, "solver_unavailable": 0, "solver_error": 0, "not_applicable": 0}
+
+
+def _with_solver(case: GeneratedCase, solver: Dict[str, object]) -> GeneratedCase:
+    from dataclasses import replace
+
+    return replace(case, solver=solver)
 
 
 def _report(profile: str, total: int, counts: Dict[str, int], source: str | None = None) -> Dict[str, object]:
