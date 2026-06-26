@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 import time
@@ -27,25 +26,26 @@ def qt_binding_status() -> Dict[str, str]:
 
 
 def run_qt_gui() -> int:
-    QtWidgets, QtCore, binding = _load_qt_modules()
+    QtWidgets, QtCore, QtGui, binding = _load_qt_modules()
     os.environ.pop("SESSION_MANAGER", None)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName("Litmus-link")
     app.setStyleSheet(_stylesheet())
-    window = _LitmusLinkQtWindow(QtWidgets, QtCore, binding)
+    window = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
     window.resize(1440, 900)
     window.show()
     exec_fn = getattr(app, "exec", None) or getattr(app, "exec_", None)
     return int(exec_fn())
 
 
-def _load_qt_modules() -> Tuple[Any, Any, str]:
+def _load_qt_modules() -> Tuple[Any, Any, Any, str]:
     errors = []
     for binding in ["PyQt6", "PySide6", "PyQt5", "PySide2"]:
         try:
             widgets = __import__(f"{binding}.QtWidgets", fromlist=["QtWidgets"])
             core = __import__(f"{binding}.QtCore", fromlist=["QtCore"])
-            return widgets, core, binding
+            gui = __import__(f"{binding}.QtGui", fromlist=["QtGui"])
+            return widgets, core, gui, binding
         except Exception as exc:
             errors.append(f"{binding}: {type(exc).__name__}: {exc}")
     raise QtGuiError(
@@ -140,9 +140,10 @@ class _LitmusLinkQtWindow:
         "Stress": ["stress"],
     }
 
-    def __init__(self, QtWidgets: Any, QtCore: Any, binding: str) -> None:
+    def __init__(self, QtWidgets: Any, QtCore: Any, QtGui: Any, binding: str) -> None:
         self.QtWidgets = QtWidgets
         self.QtCore = QtCore
+        self.QtGui = QtGui
         self.binding = binding
         self.options = options_payload()
         self.window = QtWidgets.QWidget()
@@ -723,8 +724,8 @@ class _LitmusLinkQtWindow:
         index = item.data(_user_role(self.QtCore))
         if index is None or index < 0 or index >= len(self.preview_items):
             return
-        dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.preview_items[index], self.window)
-        dialog.resize(980, 760)
+        dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.QtGui, self.preview_items[index], self.window)
+        dialog.resize(1180, 860)
         _exec_dialog(dialog)
 
     def _current_out_dir(self) -> str:
@@ -786,9 +787,10 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
 
 
 class _LitmusPreviewDialog:
-    def __init__(self, QtWidgets: Any, QtCore: Any, item: Dict[str, Any], parent: Any) -> None:
+    def __init__(self, QtWidgets: Any, QtCore: Any, QtGui: Any, item: Dict[str, Any], parent: Any) -> None:
         self.QtWidgets = QtWidgets
         self.QtCore = QtCore
+        self.QtGui = QtGui
         self.item = item
         self.dialog = QtWidgets.QDialog(parent)
         self.dialog.setWindowTitle(str(item.get("name", "Litmus preview")))
@@ -809,65 +811,44 @@ class _LitmusPreviewDialog:
         layout.addWidget(title)
 
         splitter = QtWidgets.QSplitter(_vertical(self.QtCore))
-        splitter.addWidget(self._build_topology_view())
+        splitter.addWidget(self._build_diagram_view())
         splitter.addWidget(self._build_detail_tabs())
-        splitter.setSizes([390, 300])
+        splitter.setSizes([560, 260])
         layout.addWidget(splitter, 1)
 
         close = QtWidgets.QPushButton("Close")
         close.clicked.connect(self.dialog.accept)
         layout.addWidget(close)
 
-    def _build_topology_view(self) -> Any:
+    def _build_diagram_view(self) -> Any:
         QtWidgets = self.QtWidgets
-        scene = QtWidgets.QGraphicsScene()
-        scene.setSceneRect(0, 0, 900, 360)
-        analysis = self.item.get("analysis", {})
-        harts = list(analysis.get("harts", [])) or ["P0", "P1"]
-        locations = list(analysis.get("memory_locations", [])) or ["x", "y"]
-        cycle_tokens = list(analysis.get("cycle_tokens", [])) or ["po", "rf", "fr"]
-
-        hart_positions = _positions(len(harts), 110, 80, 220)
-        loc_positions = _positions(len(locations), 110, 655, 220)
-        for hart, (x, y) in zip(harts, hart_positions):
-            self._node(scene, x, y, 86, 46, hart)
-        for location, (x, y) in zip(locations, loc_positions):
-            self._box(scene, x, y, 96, 42, location)
-
-        for hx, hy in hart_positions:
-            for lx, ly in loc_positions[:2]:
-                scene.addLine(hx + 86, hy + 23, lx, ly + 21)
-
-        token_positions = _ring_positions(len(cycle_tokens), 450, 178, 210, 105)
-        for index, token in enumerate(cycle_tokens):
-            x, y = token_positions[index]
-            self._box(scene, x - 42, y - 18, 84, 36, token)
-            nx, ny = token_positions[(index + 1) % len(token_positions)]
-            scene.addLine(x, y, nx, ny)
-
-        scene.addText("Topology").setPos(24, 18)
-        scene.addText("Dependency / relation cycle").setPos(355, 18)
-        scene.addText("Observed locations").setPos(665, 18)
-        view = QtWidgets.QGraphicsView(scene)
-        view.setObjectName("TopologyView")
-        return view
-
-    def _node(self, scene: Any, x: float, y: float, w: float, h: float, text: str) -> None:
-        scene.addEllipse(x, y, w, h)
-        label = scene.addText(text)
-        label.setPos(x + 24, y + 11)
-
-    def _box(self, scene: Any, x: float, y: float, w: float, h: float, text: str) -> None:
-        scene.addRect(x, y, w, h)
-        label = scene.addText(text)
-        label.setPos(x + 8, y + 8)
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        diagram = self.item.get("diagram") or {}
+        png = Path(str(diagram.get("png", ""))) if diagram.get("png") else None
+        label = QtWidgets.QLabel()
+        label.setAlignment(_align_center(self.QtCore))
+        if png and png.exists():
+            pixmap = self.QtGui.QPixmap(str(png))
+            label.setPixmap(pixmap)
+            label.setMinimumSize(pixmap.size())
+        else:
+            label.setText(f"Diagram PNG is not available.\nExpected: {png or '<none>'}")
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(label)
+        layout.addWidget(scroll, 1)
+        return container
 
     def _build_detail_tabs(self) -> Any:
         QtWidgets = self.QtWidgets
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._text_view(self._analysis_text()), "Cycle")
-        tabs.addTab(self._text_view(str(self.item.get("analysis", {}).get("exists", ""))), "Exists")
+        tabs.addTab(self._text_view(self._analysis_text()), "Summary")
         tabs.addTab(self._text_view(str(self.item.get("litmus", ""))), "Litmus")
+        tabs.addTab(self._json_view(self.item.get("solver", {})), "Solver")
+        tabs.addTab(self._json_view(self.item.get("case_ir", {})), "IR")
+        tabs.addTab(self._json_view(self.item.get("diagram", {})), "Diagram")
         return tabs
 
     def _text_view(self, text: str) -> Any:
@@ -876,14 +857,20 @@ class _LitmusPreviewDialog:
         view.setPlainText(text)
         return view
 
+    def _json_view(self, data: Any) -> Any:
+        return self._text_view(json.dumps(data, indent=2, sort_keys=True))
+
     def _analysis_text(self) -> str:
         combination = self.item.get("combination", {})
         decision = self.item.get("decision", {})
         analysis = self.item.get("analysis", {})
+        solver = self.item.get("solver", {})
+        diagram = self.item.get("diagram", {})
         cycle = analysis.get("cycle", "")
         tokens = " -> ".join(analysis.get("cycle_tokens", []))
         exists = analysis.get("exists", "")
         forbidden = analysis.get("forbidden_outcome", "")
+        png = diagram.get("png", "")
         axes = combination.get("name", self.item.get("name", ""))
         return "\n".join(
             [
@@ -891,6 +878,8 @@ class _LitmusPreviewDialog:
                 f"Status: {decision.get('status', '-')}",
                 f"RVWMO class: {decision.get('rvwmo_class', '-')}",
                 f"Expected kind: {decision.get('expected_kind', '-')}",
+                f"Solver: {solver.get('status', '-')} / {solver.get('verdict', '-')}",
+                f"Diagram: {png or '-'}",
                 "",
                 f"Cycle: {cycle}",
                 f"Dependency ring: {tokens}",
@@ -938,21 +927,6 @@ def _user_role(QtCore: Any) -> Any:
 def _exec_dialog(dialog: Any) -> int:
     exec_fn = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
     return int(exec_fn())
-
-
-def _positions(count: int, x: float, top: float, bottom: float) -> list[tuple[float, float]]:
-    if count <= 1:
-        return [(x, (top + bottom) / 2)]
-    step = (bottom - top) / (count - 1)
-    return [(x, top + index * step) for index in range(count)]
-
-
-def _ring_positions(count: int, cx: float, cy: float, rx: float, ry: float) -> list[tuple[float, float]]:
-    count = max(count, 1)
-    return [
-        (cx + math.cos(2 * math.pi * index / count - math.pi / 2) * rx, cy + math.sin(2 * math.pi * index / count - math.pi / 2) * ry)
-        for index in range(count)
-    ]
 
 
 def _stylesheet() -> str:
