@@ -10,6 +10,7 @@ from typing import Any
 
 from models import GeneratedCase
 from rvwmo import check_rvwmo
+from fusion import analyze_fusion
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class SolverResult:
     reason: str
     cross_check: str = "native_only"
     edges: list[dict[str, Any]] = field(default_factory=list)
+    fusion: dict[str, Any] | None = None
     observation: str = ""
     raw_output: str = ""
     command: list[str] | None = None
@@ -37,6 +39,7 @@ class SolverResult:
             "reason": self.reason,
             "cross_check": self.cross_check,
             "edges": list(self.edges),
+            "fusion": self.fusion,
             "observation": self.observation,
             "raw_output": self.raw_output,
             "command": list(self.command or []),
@@ -46,13 +49,22 @@ class SolverResult:
 def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResult:
     case_ir = case.case_ir
     if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind != "rvwmo-herd":
+        # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
+        # made. For fusion (vector/CMO/PBMT/TLB) cases we still attach the
+        # extension-prose ordering analysis so consumers get something better
+        # than a bare "not modeled" -- but it never carries a herd verdict.
+        fusion = analyze_fusion(case_ir).to_json() if case_ir is not None else None
+        reason = "Only pure scalar RVWMO main-memory cases receive a formal verdict."
+        if fusion is not None and fusion.get("status") == "analyzed":
+            reason = "Extension-prose fusion analysis (informative, no herd verdict): " + fusion["reason"]
         return SolverResult(
             status="not_applicable",
             verdict="unmodeled",
             allowed=None,
             model=case_ir.model if case_ir is not None else case.decision.rvwmo_class,
             tool="none",
-            reason="Only pure scalar RVWMO main-memory cases receive a formal verdict.",
+            reason=reason,
+            fusion=fusion,
         )
 
     # Primary path: the native axiomatic RVWMO checker. It always renders a

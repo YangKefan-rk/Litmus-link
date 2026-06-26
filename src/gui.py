@@ -216,6 +216,9 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
         if status == "conflict":
             return f"Conflict between native checker and herd7 ({solver.get('reason', '')}); native verdict {verdict} reported as primary."
         if status == "not_applicable":
+            fusion = solver.get("fusion") or {}
+            if fusion.get("status") == "analyzed":
+                return f"Extension-prose ordering analysis ({fusion.get('verdict')}, informative -- not a herd verdict): {fusion.get('reason', '')}"
             return "No formal RVWMO forbidden assertion is emitted for this extension/prose-spec case."
     outcome = str(combination.params.get("outcome", ""))
     if outcome == "forbidden":

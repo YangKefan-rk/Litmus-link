@@ -413,6 +413,9 @@ def _solver_badge(solver: dict[str, Any] | None) -> str:
     if status == "conflict":
         return f"conflict: {verdict}"
     if status == "not_applicable":
+        fusion = (solver or {}).get("fusion") or {}
+        if fusion.get("status") == "analyzed":
+            return f"{fusion.get('verdict', 'prose-spec')} (ext-prose)"
         return "observation only"
     return f"{status}: {verdict}"
 
