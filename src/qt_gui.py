@@ -441,10 +441,18 @@ class _LitmusLinkQtWindow:
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
         self.summary_view.setPlainText("Choose a profile or custom rule, then run Preview Sample, Run Audit, or Generate Files.")
-        self.preview_list = QtWidgets.QListWidget()
-        self.preview_list.setObjectName("PreviewList")
-        self.preview_list.setAlternatingRowColors(True)
-        self.preview_list.itemDoubleClicked.connect(self._open_preview_detail)
+        self.preview_table = QtWidgets.QTableWidget()
+        self.preview_table.setObjectName("PreviewTable")
+        self.preview_table.setColumnCount(5)
+        self.preview_table.setHorizontalHeaderLabels(["#", "Status", "Shape", "Verdict", "Case"])
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setWordWrap(False)
+        self.preview_table.verticalHeader().setVisible(False)
+        self.preview_table.setEditTriggers(_no_edit_triggers(QtWidgets))
+        self.preview_table.setSelectionBehavior(_select_rows(QtWidgets))
+        self.preview_table.setSelectionMode(_single_selection(QtWidgets))
+        self.preview_table.itemDoubleClicked.connect(self._open_preview_detail)
+        _configure_preview_header(self.preview_table, QtWidgets)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.rule_json = QtWidgets.QPlainTextEdit()
@@ -453,7 +461,7 @@ class _LitmusLinkQtWindow:
         self.raw_json = QtWidgets.QPlainTextEdit()
         self.raw_json.setReadOnly(True)
         self.result_tabs.addTab(self.summary_view, "Summary")
-        self.result_tabs.addTab(self.preview_list, "Preview Litmus")
+        self.result_tabs.addTab(self.preview_table, "Preview Litmus")
         self.result_tabs.addTab(self.log_view, "Log")
         self.result_tabs.addTab(self.rule_json, "Rule JSON")
         self.result_tabs.addTab(self.raw_json, "Raw JSON")
@@ -706,19 +714,37 @@ class _LitmusLinkQtWindow:
         self.result_tabs.setCurrentWidget(self.summary_view)
 
     def _populate_preview_list(self, result: Dict[str, Any]) -> None:
-        self.preview_list.clear()
-        self.preview_items = [item for item in result.get("sample", []) if item.get("litmus")]
-        for index, item in enumerate(self.preview_items, start=1):
-            decision = item.get("decision", {})
-            analysis = item.get("analysis", {})
-            title = item.get("name", f"case-{index}")
+        QtWidgets = self.QtWidgets
+        table = self.preview_table
+        table.clearContents()
+        # Show every sampled case -- generated, hand-required, and illegal --
+        # so the count matches the audit summary instead of silently dropping
+        # everything without a rendered litmus body.
+        self.preview_items = list(result.get("sample", []))
+        table.setRowCount(len(self.preview_items))
+        for row, item in enumerate(self.preview_items):
+            decision = item.get("decision", {}) or {}
+            analysis = item.get("analysis", {}) or {}
             status = decision.get("status", "unknown")
-            cycle = analysis.get("cycle", "")
-            list_item = self.QtWidgets.QListWidgetItem(f"{index:03d}  {status}  {title}\n{cycle}")
-            list_item.setData(_user_role(self.QtCore), index - 1)
-            self.preview_list.addItem(list_item)
+            cells = [
+                str(row + 1),
+                _status_label(status),
+                _shape_label(item.get("combination", {}) or {}),
+                _verdict_label(item.get("solver"), decision),
+                str(item.get("name", f"case-{row + 1}")),
+            ]
+            for column, text in enumerate(cells):
+                cell = QtWidgets.QTableWidgetItem(text)
+                cell.setData(_user_role(self.QtCore), row)
+                if column == 1:
+                    _tint_cell(cell, self.QtGui, _status_color(status))
+                cell.setToolTip(analysis.get("cycle", "") or status)
+                table.setItem(row, column, cell)
         if not self.preview_items:
-            self.preview_list.addItem("No generated litmus cases in this preview sample.")
+            table.setRowCount(1)
+            empty = QtWidgets.QTableWidgetItem("No cases in this preview sample.")
+            table.setItem(0, 0, empty)
+        table.resizeColumnsToContents()
 
     def _open_preview_detail(self, item: Any) -> None:
         index = item.data(_user_role(self.QtCore))
@@ -861,33 +887,37 @@ class _LitmusPreviewDialog:
         return self._text_view(json.dumps(data, indent=2, sort_keys=True))
 
     def _analysis_text(self) -> str:
-        combination = self.item.get("combination", {})
-        decision = self.item.get("decision", {})
-        analysis = self.item.get("analysis", {})
-        solver = self.item.get("solver", {})
-        diagram = self.item.get("diagram", {})
+        combination = self.item.get("combination", {}) or {}
+        decision = self.item.get("decision", {}) or {}
+        analysis = self.item.get("analysis", {}) or {}
+        solver = self.item.get("solver", {}) or {}
+        diagram = self.item.get("diagram", {}) or {}
         cycle = analysis.get("cycle", "")
         tokens = " -> ".join(analysis.get("cycle_tokens", []))
         exists = analysis.get("exists", "")
         forbidden = analysis.get("forbidden_outcome", "")
         png = diagram.get("png", "")
         axes = combination.get("name", self.item.get("name", ""))
-        return "\n".join(
-            [
-                f"Case: {axes}",
-                f"Status: {decision.get('status', '-')}",
-                f"RVWMO class: {decision.get('rvwmo_class', '-')}",
-                f"Expected kind: {decision.get('expected_kind', '-')}",
-                f"Solver: {solver.get('status', '-')} / {solver.get('verdict', '-')}",
-                f"Diagram: {png or '-'}",
-                "",
-                f"Cycle: {cycle}",
-                f"Dependency ring: {tokens}",
-                "",
-                f"Exists: {exists}",
-                f"Forbidden outcome: {forbidden}",
-            ]
-        )
+        lines = [
+            f"Case: {axes}",
+            f"Status: {decision.get('status', '-')}",
+            f"RVWMO class: {decision.get('rvwmo_class', '-')}",
+            f"Expected kind: {decision.get('expected_kind', '-')}",
+            f"Solver: {solver.get('status', '-')} / {solver.get('verdict', '-')}",
+            f"Diagram: {png or '-'}",
+        ]
+        reason = decision.get("reason")
+        if reason:
+            lines.append(f"Reason: {reason}")
+        lines += [
+            "",
+            f"Cycle: {cycle}",
+            f"Dependency ring: {tokens}",
+            "",
+            f"Exists: {exists}",
+            f"Forbidden outcome: {forbidden}",
+        ]
+        return "\n".join(lines)
 
 
 def _parameter_tab_title(group_name: str) -> str:
@@ -929,6 +959,95 @@ def _exec_dialog(dialog: Any) -> int:
     return int(exec_fn())
 
 
+def _no_edit_triggers(QtWidgets: Any) -> Any:
+    abstract = QtWidgets.QAbstractItemView
+    triggers = getattr(abstract, "EditTrigger", abstract)
+    return triggers.NoEditTriggers
+
+
+def _select_rows(QtWidgets: Any) -> Any:
+    abstract = QtWidgets.QAbstractItemView
+    behavior = getattr(abstract, "SelectionBehavior", abstract)
+    return behavior.SelectRows
+
+
+def _single_selection(QtWidgets: Any) -> Any:
+    abstract = QtWidgets.QAbstractItemView
+    mode = getattr(abstract, "SelectionMode", abstract)
+    return mode.SingleSelection
+
+
+def _configure_preview_header(table: Any, QtWidgets: Any) -> None:
+    header = table.horizontalHeader()
+    resize = getattr(QtWidgets.QHeaderView, "ResizeMode", QtWidgets.QHeaderView)
+    # Stretch the final "Case" column; size the rest to their contents.
+    header.setStretchLastSection(True)
+    for column in range(table.columnCount() - 1):
+        header.setSectionResizeMode(column, resize.ResizeToContents)
+
+
+_STATUS_LABELS = {
+    "generated": "GEN",
+    "hand_required": "HAND",
+    "excluded_illegal": "ILLEGAL",
+    "excluded_unsupported": "UNSUPP",
+}
+_STATUS_COLORS = {
+    "generated": "#16a34a",
+    "hand_required": "#d97706",
+    "excluded_illegal": "#dc2626",
+    "excluded_unsupported": "#64748b",
+}
+
+
+def _status_label(status: str) -> str:
+    return _STATUS_LABELS.get(status, status.upper())
+
+
+def _status_color(status: str) -> str:
+    return _STATUS_COLORS.get(status, "#475569")
+
+
+def _tint_cell(cell: Any, QtGui: Any, color_hex: str) -> None:
+    cell.setForeground(QtGui.QColor(color_hex))
+    font = cell.font()
+    font.setBold(True)
+    cell.setFont(font)
+
+
+def _shape_label(combination: Dict[str, Any]) -> str:
+    skeleton = combination.get("skeleton", "?")
+    extras = []
+    for key, none_value in (("vector", "none"), ("cmo", "no_cmo"), ("tlb", "no_tlb")):
+        value = combination.get(key)
+        if value and value != none_value:
+            extras.append(value)
+    attribute = combination.get("attribute")
+    if attribute and attribute != "cacheable":
+        extras.append(attribute)
+    return f"{skeleton} + {', '.join(extras)}" if extras else skeleton
+
+
+def _verdict_label(solver: Dict[str, Any] | None, decision: Dict[str, Any]) -> str:
+    if solver:
+        status = solver.get("status")
+        if status == "verified":
+            return solver.get("verdict", "verified")
+        if status == "conflict":
+            return f"conflict:{solver.get('verdict', '?')}"
+        fusion = solver.get("fusion") or {}
+        if fusion.get("status") == "analyzed":
+            return f"{fusion.get('verdict', 'prose-spec')} (ext)"
+    status = decision.get("status", "")
+    if status == "hand_required":
+        return "hand-required"
+    if status == "excluded_illegal":
+        return "illegal"
+    if status == "excluded_unsupported":
+        return "unsupported"
+    return "-"
+
+
 def _stylesheet() -> str:
     return """
     QWidget { background: #f3f6fb; color: #182230; font-size: 13px; }
@@ -958,6 +1077,10 @@ def _stylesheet() -> str:
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
+    QTableWidget#PreviewTable { background: #ffffff; border: 1px solid #cfd9e6; border-radius: 7px; gridline-color: #e7edf5; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
+    QTableWidget#PreviewTable::item { padding: 5px 8px; }
+    QTableWidget#PreviewTable::item:selected { background: #e0f2fe; color: #0c4a6e; }
+    QHeaderView::section { background: #172033; color: #ffffff; padding: 6px 8px; border: none; border-right: 1px solid #2a3650; font-weight: 700; }
     QCheckBox { spacing: 7px; padding: 3px 6px; border-radius: 5px; }
     QCheckBox[choice_state="on"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
     QCheckBox[choice_state="off"] { background: #fee2e2; color: #7f1d1d; font-weight: 700; }
