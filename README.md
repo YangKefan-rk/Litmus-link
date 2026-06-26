@@ -118,4 +118,16 @@ See `specs/rule-files/README.md` and `specs/rule-files/example-vector-cmo.json` 
 
 ## Design Boundary
 
-Pure scalar main-memory tests can be checked against `herd7 -model riscv.cat`. Vector, CMO, PBMT, `FENCE.I`, and `SFENCE.VMA` interactions are emitted as specification-constrained or hardware-observation tests because those interactions are not fully formalized in the standard RVWMO herd model.
+Verification has two layers (see [`RVWMO-verification.md`](RVWMO-verification.md)):
+
+- **Pure scalar main-memory tests** get a formal allowed/forbidden verdict from
+  a native axiomatic RVWMO checker (`src/rvwmo.py`), which needs no external
+  tool. If `herd7` is installed (`make herd7`), it is run as optional
+  cross-validation (`herd7 -model riscv.cat`); agreement is recorded and any
+  conflict is surfaced rather than hidden.
+- **Vector, CMO, PBMT, `FENCE.I`, and `SFENCE.VMA` interactions** are *not*
+  formalized in the standard RVWMO herd model, so they never receive a formal
+  forbidden claim. Instead `src/fusion.py` reports an informative,
+  model-extended ordering analysis with citations to the relevant extension
+  prose (`ordering-documented` / `ordering-absent` / `prose-spec`), always with
+  `allowed = None`.
