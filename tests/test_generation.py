@@ -4,7 +4,7 @@ from pathlib import Path
 from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
 from models import Combination
 from profiles import profile_combinations
-from rule_file import load_rule_file
+from rule_file import RuleFileError, load_rule_file
 from validator import validate_path
 
 
@@ -42,13 +42,13 @@ def test_stress_large_names_are_unique_and_short() -> None:
         assert name not in names
         names.add(name)
         max_len = max(max_len, len(name))
-    assert len(names) == 557840
+    assert len(names) == 250360
     assert max_len == 180
 
 
 def test_summary_only_audit_skips_detail_json(tmp_path: Path) -> None:
     report = write_audit("stress-large", tmp_path, summary_only=True)
-    assert report["total_combinations"] == 557840
+    assert report["total_combinations"] == 250360
     assert (tmp_path / "audit-report.json").exists()
     assert (tmp_path / "cross-coverage.md").exists()
     assert not (tmp_path / "covered.json").exists()
@@ -86,20 +86,18 @@ def test_rule_file_generation(tmp_path: Path) -> None:
     assert validate_path(tmp_path / "out" / "@all")
 
 
-def test_rule_file_illegal_combinations_are_audited(tmp_path: Path) -> None:
+def test_rule_file_rejects_nonexistent_vector_forms(tmp_path: Path) -> None:
     rule_file = tmp_path / "illegal-rules.json"
     rule_file.write_text(
         json.dumps({"name": "custom-illegal", "axes": {"vector": ["fof_strided"]}, "limit": 10}),
         encoding="utf-8",
     )
-    rule_set = load_rule_file(rule_file)
-    report = generate_combinations(rule_set.name, rule_set.combinations, tmp_path / "out", source=str(rule_file))
-    assert report["total_combinations"] == 1
-    assert report["generated"] == 0
-    assert report["excluded_illegal"] == 1
-    assert (tmp_path / "out" / "@all").read_text() == ""
-    excluded = json.loads((tmp_path / "out" / "excluded.json").read_text())
-    assert excluded[0]["decision"]["status"] == "excluded_illegal"
+    try:
+        load_rule_file(rule_file)
+    except RuleFileError as exc:
+        assert "invalid vector value 'fof_strided'" in str(exc)
+    else:
+        raise AssertionError("fof_strided must be rejected before generation")
 
 
 def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> None:
@@ -145,7 +143,7 @@ def test_long_parameterized_names_are_hashed() -> None:
         "IRIW",
         "vector_load",
         "cacheable_nc_alias",
-        cmo="inval_as_flush",
+        cmo="flush",
         vector="indexed_unordered_load",
         params={
             "alias": "cacheable_nc",

@@ -31,8 +31,6 @@ VECTOR_OPS = [
     "segment_store",
     "fof_load",
     "fof_segment_load",
-    "fof_strided",
-    "fof_indexed",
 ]
 
 ATTRIBUTES = [
@@ -41,19 +39,13 @@ ATTRIBUTES = [
     "pbmt_io",
     "nc_alias",
     "cacheable_nc_alias",
-    "pbmt_reserved",
 ]
 
 CMO_OPS = [
     "clean",
     "flush",
     "inval",
-    "inval_as_flush",
     "zero",
-    "flush_sync",
-    "flush_offset4",
-    "clean_csr_denied",
-    "zero_csr_denied",
 ]
 
 TLB_OPS = [
@@ -64,7 +56,6 @@ TLB_OPS = [
     "ad_update",
     "asid_global",
     "satp_switch",
-    "nonleaf_pbmt",
 ]
 
 PROFILE_DESCRIPTIONS: Dict[str, str] = {
@@ -162,8 +153,8 @@ def _smoke() -> List[Combination]:
         Combination("smoke", "vector_mem", "LB", "vector_store", "pbmt_nc", vector="unit_store"),
         Combination("smoke", "vector_mem", "MP", "vector_load", "pbmt_nc", vector="fof_load"),
         Combination("smoke", "cmo", "MP", "cmo", "cacheable", cmo="flush"),
-        Combination("smoke", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush_sync"),
-        Combination("smoke", "cross", "MP", "vector_store", "cacheable_nc_alias", cmo="flush_sync", vector="cross_page"),
+        Combination("smoke", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params=_params(sync="full_alias_sync")),
+        Combination("smoke", "cross", "MP", "vector_store", "cacheable_nc_alias", cmo="flush", vector="unit_store", params=_params(footprint="cross_page", sync="full_alias_sync")),
     ]
 
 
@@ -180,12 +171,12 @@ def _vector_mem(profile: str) -> List[Combination]:
 
 
 def _cmo_pbmt(profile: str) -> List[Combination]:
-    attrs = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    attrs = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     return [Combination(profile, "cmo", "MP", "cmo", attribute, cmo=cmo) for cmo, attribute in product(CMO_OPS, attrs)]
 
 
 def _vm_tlb(profile: str) -> List[Combination]:
-    attrs = ["cacheable", "pbmt_nc", "pbmt_io", "pbmt_reserved"]
+    attrs = ["cacheable", "pbmt_nc", "pbmt_io"]
     return [Combination(profile, "vm_tlb", "MP", "pte_update", attribute, tlb=tlb) for tlb, attribute in product(TLB_OPS, attrs)]
 
 
@@ -197,15 +188,15 @@ def _cross(profile: str) -> List[Combination]:
         Combination(profile, "cross", "MP", "vector_load", "cacheable", cmo="zero", vector="unit_load"),
         Combination(profile, "cross", "MP", "cmo", "pbmt_nc", cmo="clean"),
         Combination(profile, "cross", "MP", "cmo", "pbmt_nc", cmo="flush"),
-        Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", cmo="flush_sync"),
-        Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", tlb="pte_remap", cmo="flush_sync"),
-        Combination(profile, "cross", "MP", "vector_load", "pbmt_nc", tlb="pte_remap", vector="cross_page"),
-        Combination(profile, "cross", "MP", "vector_load", "cacheable", cmo="flush", vector="cross_page"),
-        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", cmo="flush_sync", vector="cross_page"),
-        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", tlb="pte_remap", cmo="flush_sync", vector="cross_page"),
+        Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params=_params(sync="full_alias_sync")),
+        Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", tlb="pte_remap", cmo="flush", params=_params(sync="full_alias_sync")),
+        Combination(profile, "cross", "MP", "vector_load", "pbmt_nc", tlb="pte_remap", vector="unit_load", params=_params(footprint="cross_page")),
+        Combination(profile, "cross", "MP", "vector_load", "cacheable", cmo="flush", vector="unit_load", params=_params(footprint="cross_page")),
+        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", cmo="flush", vector="unit_load", params=_params(footprint="cross_page", sync="full_alias_sync")),
+        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", tlb="pte_remap", cmo="flush", vector="unit_load", params=_params(footprint="cross_page", sync="full_alias_sync")),
         Combination(profile, "cross", "MP", "vector_load", "pbmt_io", vector="fof_load"),
         Combination(profile, "cross", "MP", "cmo", "cacheable", tlb="permission_fault", cmo="flush"),
-        Combination(profile, "cross", "MP", "ifetch", "cacheable", tlb="remote_sfence", cmo="flush_sync"),
+        Combination(profile, "cross", "MP", "ifetch", "cacheable", tlb="remote_sfence", cmo="flush", params=_params(sync="fence_i_after")),
     ]
 
 
@@ -256,7 +247,7 @@ def _stress_vector(
     configs: Iterable[Mapping[str, str]] = STRESS_VECTOR_CONFIGS,
     footprints: Iterable[str] = VECTOR_FOOTPRINTS,
 ) -> Iterable[Combination]:
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, vector, attribute, config, footprint, stressor in product(
         SKELETONS,
         VECTOR_OPS,
@@ -283,7 +274,7 @@ def _stress_cmo_pbmt(
     aliases: Iterable[str] = ALIAS_MODES,
     footprints: Iterable[str] = ("same_line", "cross_line", "cross_page"),
 ) -> Iterable[Combination]:
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "nc_alias", "cacheable_nc_alias", "pbmt_reserved"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "nc_alias", "cacheable_nc_alias"]
     for skeleton, cmo, attribute, sync, alias, footprint, stressor in product(
         SKELETONS,
         CMO_OPS,
@@ -293,6 +284,8 @@ def _stress_cmo_pbmt(
         footprints,
         stressors,
     ):
+        if sync == "full_alias_sync" and cmo != "flush":
+            continue
         yield Combination(
             profile,
             "cmo",
@@ -312,7 +305,7 @@ def _stress_vm_tlb(
     pte_states: Iterable[str] = PTE_STATES,
     aliases: Iterable[str] = ALIAS_MODES,
 ) -> Iterable[Combination]:
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, tlb, attribute, vm, shootdown, pte_state, alias, stressor in product(
         SKELETONS,
         TLB_OPS,
@@ -340,8 +333,8 @@ def _stress_vector_cmo_pbmt(
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS,
 ) -> Iterable[Combination]:
     vectors = ["unit_load", "unit_store", "strided_load", "strided_store", "indexed_ordered_load", "indexed_unordered_load", "segment_load", "segment_store", "fof_load"]
-    cmos = ["clean", "flush", "inval", "inval_as_flush", "zero", "flush_sync"]
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    cmos = ["clean", "flush", "inval", "zero"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, vector, cmo, attribute, config, footprint, sync, alias, stressor in product(
         SKELETONS,
         vectors,
@@ -353,6 +346,8 @@ def _stress_vector_cmo_pbmt(
         ["none", "cacheable_nc"],
         stressors,
     ):
+        if sync == "full_alias_sync" and cmo != "flush":
+            continue
         yield Combination(
             profile,
             "cross",
@@ -371,7 +366,7 @@ def _stress_vector_tlb(
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS[:3],
 ) -> Iterable[Combination]:
     vectors = ["unit_load", "unit_store", "strided_load", "indexed_ordered_load", "indexed_unordered_load", "fof_load"]
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, vector, tlb, attribute, config, footprint, vm, shootdown, pte_state, stressor in product(
         SKELETONS,
         vectors,
@@ -401,7 +396,7 @@ def _stress_cmo_tlb(
     stressors: Iterable[str] = ("none", "dcache_replay"),
     syncs: Iterable[str] = ("none", "full_alias_sync"),
 ) -> Iterable[Combination]:
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias", "pbmt_reserved"]
+    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, cmo, tlb, attribute, sync, vm, shootdown, pte_state, alias, stressor in product(
         SKELETONS,
         CMO_OPS,
@@ -414,6 +409,8 @@ def _stress_cmo_tlb(
         ["none", "cacheable_nc"],
         stressors,
     ):
+        if sync == "full_alias_sync" and cmo != "flush":
+            continue
         yield Combination(
             profile,
             "cross",
@@ -428,7 +425,7 @@ def _stress_cmo_tlb(
 
 def _stress_quad_cross(profile: str, configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS[:2]) -> Iterable[Combination]:
     vectors = ["unit_load", "unit_store", "indexed_ordered_load", "indexed_unordered_store", "segment_load"]
-    cmos = ["clean", "flush", "zero", "flush_sync"]
+    cmos = ["clean", "flush", "zero"]
     tlbs = ["remote_sfence", "pte_remap", "permission_fault", "ad_update", "satp_switch"]
     attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
     for skeleton, vector, cmo, tlb, attribute, config, footprint, sync, vm, shootdown, pte_state, alias in product(
@@ -445,6 +442,8 @@ def _stress_quad_cross(profile: str, configs: Iterable[Mapping[str, str]] = STRE
         ["pa_remap", "pbmt_flip"],
         ["none", "cacheable_nc"],
     ):
+        if sync == "full_alias_sync" and cmo != "flush":
+            continue
         yield Combination(
             profile,
             "cross",

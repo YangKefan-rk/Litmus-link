@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from models import Combination, Decision, EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED
+from models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED
+from profiles import ATTRIBUTES, CMO_OPS, CMO_SYNC_SEQUENCES, SKELETONS, TLB_OPS, VECTOR_OPS
+
+
+MEMORY_EVENTS = {"scalar_pair", "vector_load", "vector_store", "cmo", "pte_update", "ifetch", "amo"}
+LEGACY_FAKE_CMOS = {"flush_sync", "inval_as_flush"}
+NEGATIVE_CMOS = {"flush_offset4", "clean_csr_denied", "zero_csr_denied"}
+NEGATIVE_ATTRIBUTES = {"pbmt_reserved"}
+NEGATIVE_TLBS = {"nonleaf_pbmt"}
+ILLEGAL_VECTOR_FORMS = {"fof_strided", "fof_indexed"}
+VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "elem_order"}
+VM_PARAMS = {"vm", "shootdown", "pte"}
 
 
 RULE_DESCRIPTIONS: Dict[str, str] = {
@@ -29,6 +40,10 @@ def list_rules() -> Dict[str, str]:
 def evaluate(combination: Combination) -> Decision:
     requires = _requires(combination)
     notes: List[str] = []
+
+    invalid = _axis_validity(combination, requires)
+    if invalid is not None:
+        return invalid
 
     if combination.attribute == "pbmt_reserved":
         return Decision(
@@ -74,7 +89,7 @@ def evaluate(combination: Combination) -> Decision:
             "exception",
         )
 
-    if combination.vector in {"fof_strided", "fof_indexed"}:
+    if combination.vector in ILLEGAL_VECTOR_FORMS:
         return Decision(
             EXCLUDED_ILLEGAL,
             "RISC-V Vector defines unit-stride FOF loads and unit-stride segment FOF loads, not strided/indexed FOF loads.",
@@ -83,6 +98,51 @@ def evaluate(combination: Combination) -> Decision:
             requires,
             ["rule:vector_fof_unit_only"],
             "vector",
+        )
+
+    sync = str(combination.params.get("sync", "none"))
+    param_decision = _param_validity(combination, requires)
+    if param_decision is not None:
+        return param_decision
+    if sync not in {"", *CMO_SYNC_SEQUENCES}:
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            f"Unknown sync sequence {sync!r}; use one of {', '.join(CMO_SYNC_SEQUENCES)}.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:rvwmo_scope"],
+            "cmo",
+        )
+    if sync == "full_alias_sync" and combination.cmo != "flush":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "full_alias_sync is defined as fence iorw,iorw; cbo.flush; fence iorw,iorw and therefore requires cmo=flush.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:alias_sync"],
+            "cmo",
+        )
+    if combination.memory_event == "ifetch" and combination.cmo == "no_cmo" and sync not in {"", "none", "fence_i_after"}:
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "Ifetch-only synchronization currently supports no extra sync or fence_i_after; CMO fences require a CMO operation.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:fence_i_local", "rule:rvwmo_scope"],
+            "ifetch",
+        )
+    if sync not in {"none", ""} and combination.cmo == "no_cmo" and combination.memory_event != "ifetch":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "CMO synchronization parameters require a CMO operation or an ifetch observation sequence.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:rvwmo_scope"],
+            "cmo",
         )
 
     if combination.vector in {"fof_load", "fof_segment_load"} and combination.attribute == "pbmt_io":
@@ -94,6 +154,17 @@ def evaluate(combination: Combination) -> Decision:
             requires,
             ["rule:vector_non_idempotent_fof"],
             "vector",
+        )
+
+    if combination.attribute == "pbmt_io" and combination.cmo == "no_cmo" and combination.vector == "none" and combination.tlb == "no_tlb":
+        return Decision(
+            HAND_REQUIRED,
+            "PBMT=IO/non-idempotent memory is platform-specific and must not be emitted as an ordinary main-memory RVWMO assertion.",
+            "platform-specific",
+            "platform-specific",
+            requires,
+            ["rule:rvwmo_scope"],
+            "pbmt_nc",
         )
 
     if combination.memory_event == "amo" and combination.attribute == "pbmt_nc":
@@ -145,14 +216,14 @@ def evaluate(combination: Combination) -> Decision:
 
     if combination.attribute == "cacheable_nc_alias":
         notes.append("rule:alias_sync")
-        if combination.cmo == "flush_sync":
+        if combination.params.get("sync") == "full_alias_sync":
             notes.append("sync:fence-iorw-cbo.flush-fence-iorw")
         else:
             notes.append("coherence-risk:alias-without-full-sync")
 
     if combination.cmo == "zero":
         notes.append("rule:cbo_zero_non_atomic")
-    if combination.cmo == "inval_as_flush":
+    if combination.params.get("inval_mode") == "flush":
         notes.append("inval_mode=flush")
     if combination.vector != "none":
         notes.append("rule:vector_ordering")
@@ -175,15 +246,15 @@ def _requires(combination: Combination) -> List[str]:
         requires.append("A")
     if combination.vector != "none":
         requires.append("V")
-    if combination.cmo in {"clean", "flush", "inval", "inval_as_flush", "flush_sync", "flush_offset4", "clean_csr_denied"}:
+    if combination.cmo in {"clean", "flush", "inval"} or combination.cmo.endswith("offset4") or combination.cmo == "clean_csr_denied":
         requires.append("Zicbom")
-    if combination.cmo in {"zero", "zero_csr_denied"}:
+    if combination.cmo == "zero" or combination.cmo == "zero_csr_denied":
         requires.append("Zicboz")
     if combination.attribute.startswith("pbmt") or "nc_alias" in combination.attribute:
         requires.append("Svpbmt")
     if combination.tlb != "no_tlb":
         requires.extend(["S-mode", "Sv39", "sfence.vma"])
-    if combination.memory_event == "ifetch" or combination.cmo == "flush_sync":
+    if combination.memory_event == "ifetch" or combination.params.get("sync") == "fence_i_after":
         requires.append("Zifencei")
     return sorted(set(requires))
 
@@ -215,14 +286,91 @@ def _tlb_notes(combination: Combination) -> List[str]:
 
 def _decision_metadata(combination: Combination) -> Dict[str, str]:
     metadata: Dict[str, str] = {}
-    if combination.cmo == "inval_as_flush":
+    if combination.params.get("inval_mode") == "flush":
         metadata["inval_mode"] = "flush"
     elif combination.cmo == "inval":
         metadata["inval_mode"] = "inval"
-    elif combination.cmo.endswith("csr_denied"):
-        metadata["inval_mode"] = "trap"
     if combination.attribute == "pbmt_nc":
         metadata["effective_memory_type"] = "NC main memory, idempotent, RVWMO"
     if combination.attribute == "cacheable_nc_alias":
         metadata["alias_sync_required"] = "fence iorw,iorw; cbo.flush; fence iorw,iorw"
     return metadata
+
+
+def _axis_validity(combination: Combination, requires: List[str]) -> Decision | None:
+    checks = [
+        ("skeleton", combination.skeleton, set(SKELETONS)),
+        ("memory_event", combination.memory_event, MEMORY_EVENTS),
+        ("attribute", combination.attribute, {"cacheable", *ATTRIBUTES, *NEGATIVE_ATTRIBUTES}),
+        ("tlb", combination.tlb, {"no_tlb", *TLB_OPS, *NEGATIVE_TLBS}),
+        ("cmo", combination.cmo, {"no_cmo", *CMO_OPS, *NEGATIVE_CMOS, *LEGACY_FAKE_CMOS}),
+        ("vector", combination.vector, {"none", "cross_page", *VECTOR_OPS, *ILLEGAL_VECTOR_FORMS}),
+    ]
+    for axis, value, allowed in checks:
+        if value not in allowed:
+            return Decision(
+                EXCLUDED_ILLEGAL,
+                f"Unknown {axis} value {value!r}; it is not part of the executable Litmus-link generation domain.",
+                "negative-exception",
+                "negative-exception",
+                requires,
+                ["rule:axis_value_domain"],
+                axis,
+            )
+    if combination.cmo in LEGACY_FAKE_CMOS:
+        return Decision(
+            EXCLUDED_ILLEGAL,
+            f"{combination.cmo} is not a RISC-V CMO instruction. Use a real CMO op plus metadata params such as sync or inval_mode.",
+            "negative-exception",
+            "negative-exception",
+            requires,
+            ["rule:cbo_instruction_domain"],
+            "cmo",
+        )
+    if combination.vector == "cross_page":
+        return Decision(
+            EXCLUDED_ILLEGAL,
+            "cross_page is an address-footprint parameter, not a vector instruction form.",
+            "negative-exception",
+            "negative-exception",
+            requires,
+            ["rule:vector_instruction_domain"],
+            "vector",
+        )
+    return None
+
+
+def _param_validity(combination: Combination, requires: List[str]) -> Decision | None:
+    vector_params = sorted(VECTOR_PARAMS.intersection(combination.params))
+    if vector_params and combination.vector == "none":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            f"Vector parameters {', '.join(vector_params)} require a non-none vector operation.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:parameter_scope"],
+            "vector",
+        )
+    vm_params = sorted(VM_PARAMS.intersection(combination.params))
+    if vm_params and combination.tlb == "no_tlb":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            f"Virtual-memory parameters {', '.join(vm_params)} require a non-none TLB/VM axis.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:parameter_scope"],
+            "vm",
+        )
+    if combination.params.get("inval_mode") == "flush" and combination.cmo != "inval":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "inval_mode=flush describes platform behavior of cbo.inval and therefore requires cmo=inval.",
+            "prose-spec",
+            "hardware-observation",
+            requires,
+            ["rule:cbo_envcfg"],
+            "cmo",
+        )
+    return None

@@ -78,7 +78,7 @@ def options_payload() -> Dict[str, Any]:
         "axes": {
             "skeleton": list(SKELETONS),
             "attribute": list(ATTRIBUTES),
-            "vector": ["none", "cross_page", *VECTOR_OPS],
+            "vector": ["none", *VECTOR_OPS],
             "cmo": ["no_cmo", *CMO_OPS],
             "tlb": ["no_tlb", *TLB_OPS],
         },

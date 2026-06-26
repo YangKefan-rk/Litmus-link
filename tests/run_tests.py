@@ -7,10 +7,10 @@ from pathlib import Path
 from cli import main
 from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
 from gui import options_payload, preview_payload
-from models import EXCLUDED_ILLEGAL, GENERATED, HAND_REQUIRED, Combination
+from models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
 from profiles import profile_combinations
 from qt_gui import qt_binding_status
-from rule_file import load_rule_file
+from rule_file import RuleFileError, load_rule_file
 from rules import evaluate
 from upstream import import_upstream
 from validator import validate_path
@@ -26,10 +26,13 @@ def test_rules() -> None:
     check(evaluate(Combination("test", "vm_tlb", "MP", "pte_update", "pbmt_nc", tlb="nonleaf_pbmt")).status == EXCLUDED_ILLEGAL, "non-leaf PBMT must be illegal")
     check(evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable", cmo="flush_offset4")).status == EXCLUDED_ILLEGAL, "CBO non-zero offset must be illegal")
     check(evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable", cmo="clean_csr_denied")).status == HAND_REQUIRED, "CSR-denied CBO must be HAND")
-    check(evaluate(Combination("test", "vector", "MP", "vector_load", "cacheable", vector="fof_strided")).status == EXCLUDED_ILLEGAL, "strided FOF must be illegal")
-    decision = evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush_sync"))
+    decision = evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params={"sync": "full_alias_sync"}))
     check(decision.status == GENERATED, "alias flush sync should generate")
     check("alias_sync_required" in decision.metadata, "alias sync metadata missing")
+    check(evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush_sync")).status == EXCLUDED_ILLEGAL, "fake CMO op must be illegal")
+    check(evaluate(Combination("test", "vector_mem", "MP", "vector_load", "cacheable", vector="cross_page")).status == EXCLUDED_ILLEGAL, "cross_page must be a footprint parameter")
+    check(evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable", cmo="flush", params={"sew": "e32"})).status == EXCLUDED_UNSUPPORTED, "vector params require vector axis")
+    check(evaluate(Combination("test", "rvwmo_base", "MP", "scalar_pair", "cacheable", params={"pte": "pa_remap"})).status == EXCLUDED_UNSUPPORTED, "VM params require TLB axis")
 
 
 def test_generation() -> None:
@@ -53,7 +56,7 @@ def test_generation() -> None:
         check(stress == baseline, "stress-large audit changed from baseline")
         summary_dir = root / "summary"
         summary = write_audit("stress-large", summary_dir, summary_only=True)
-        check(summary["total_combinations"] == 557840, "summary-only stress-large count mismatch")
+        check(summary["total_combinations"] == 250360, "summary-only stress-large count mismatch")
         check(not (summary_dir / "covered.json").exists(), "summary-only audit should skip detail JSON")
         rule_file = root / "rules.json"
         rule_file.write_text(
@@ -75,10 +78,12 @@ def test_generation() -> None:
         validate_path(root / "custom" / "@all")
         illegal_file = root / "illegal-rules.json"
         illegal_file.write_text(json.dumps({"name": "custom-illegal", "axes": {"vector": ["fof_strided"]}, "limit": 10}), encoding="utf-8")
-        illegal_set = load_rule_file(illegal_file)
-        illegal_report = generate_combinations(illegal_set.name, illegal_set.combinations, root / "illegal", source=str(illegal_file))
-        check(illegal_report["generated"] == 0, "illegal rule file should not generate tests")
-        check(illegal_report["excluded_illegal"] == 1, "illegal rule file should be audited as illegal")
+        try:
+            load_rule_file(illegal_file)
+        except RuleFileError as exc:
+            check("invalid vector value 'fof_strided'" in str(exc), "nonexistent FOF form should be rejected")
+        else:
+            raise AssertionError("fof_strided should not be accepted as a vector axis")
         cross_file = root / "cross-rules.json"
         cross_file.write_text(json.dumps({"name": "custom-cross", "axes": {"vector": ["unit_load"], "cmo": ["flush"]}, "limit": 10}), encoding="utf-8")
         cross_set = load_rule_file(cross_file)
@@ -109,7 +114,7 @@ def test_generation() -> None:
             "IRIW",
             "vector_load",
             "cacheable_nc_alias",
-            cmo="inval_as_flush",
+            cmo="flush",
             vector="indexed_unordered_load",
             params={
                 "alias": "cacheable_nc",

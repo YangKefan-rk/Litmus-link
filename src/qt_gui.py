@@ -128,7 +128,16 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
 
 class _LitmusLinkQtWindow:
     PRIMARY_AXES = ["skeleton", "attribute", "vector", "cmo", "tlb"]
-    PARAM_AXES = ["sew", "lmul", "mask", "tail", "footprint", "vl", "elem_order", "sync", "vm", "shootdown", "pte", "alias", "stress"]
+    NONE_VALUES = {"vector": "none", "cmo": "no_cmo", "tlb": "no_tlb"}
+    PARAM_AXES = ["sew", "lmul", "mask", "tail", "footprint", "vl", "elem_order", "sync", "vm", "shootdown", "pte", "alias", "dep", "width", "outcome", "stress"]
+    PARAM_GROUPS = {
+        "Vector": ["sew", "lmul", "mask", "tail", "vl", "elem_order"],
+        "Memory Footprint": ["footprint", "alias"],
+        "CMO Sync": ["sync"],
+        "Virtual Memory": ["vm", "shootdown", "pte"],
+        "RVWMO Shape": ["dep", "width", "outcome"],
+        "Stress": ["stress"],
+    }
 
     def __init__(self, QtWidgets: Any, QtCore: Any, binding: str) -> None:
         self.QtWidgets = QtWidgets
@@ -136,12 +145,15 @@ class _LitmusLinkQtWindow:
         self.binding = binding
         self.options = options_payload()
         self.window = QtWidgets.QWidget()
-        self.window.setWindowTitle(f"Litmus-link Qt GUI ({binding})")
+        self.window.setWindowTitle(f"Litmus-link Qt Generator ({binding})")
         self.primary_checks: Dict[str, list[Any]] = {}
         self.param_checks: Dict[str, list[Any]] = {}
         self.action_buttons: list[Any] = []
+        self.param_group_widgets: Dict[str, Any] = {}
         self.active_thread = None
         self.active_worker = None
+        self.elapsed_timer = QtCore.QTimer(self.window)
+        self.elapsed_timer.timeout.connect(self._update_elapsed)
         self.started_at = 0.0
         self.suspend_rule_sync = False
         self.worker_class = _make_worker_class(QtCore)
@@ -180,10 +192,10 @@ class _LitmusLinkQtWindow:
         header.setObjectName("Header")
         layout = QtWidgets.QVBoxLayout(header)
         layout.setContentsMargins(18, 14, 18, 14)
-        title = QtWidgets.QLabel("Litmus-link Generator")
+        title = QtWidgets.QLabel("Litmus-link Qt Generator")
         title.setObjectName("Title")
         subtitle = QtWidgets.QLabel(
-            "Configure RISC-V litmus domains, audit ISA/RVWMO legality, then generate traceable .litmus files."
+            "Configure legal RISC-V Vector, CMO, PBMT/NC, and TLB cross domains before writing traceable .litmus files."
         )
         subtitle.setObjectName("Subtitle")
         layout.addWidget(title)
@@ -284,7 +296,7 @@ class _LitmusLinkQtWindow:
         layout.setContentsMargins(8, 12, 8, 8)
         layout.setSpacing(10)
 
-        note = QtWidgets.QLabel("Select axes directly. The rule JSON updates automatically and can still be edited by hand.")
+        note = QtWidgets.QLabel("Select axes directly. none/no_cmo/no_tlb act as master switches and clear unrelated parameters automatically.")
         note.setObjectName("Hint")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -303,7 +315,7 @@ class _LitmusLinkQtWindow:
 
         self.axis_tabs = QtWidgets.QTabWidget()
         self.axis_tabs.addTab(self._build_axis_page(self.PRIMARY_AXES, self.options["axes"], checked_first=True), "Core Axes")
-        self.axis_tabs.addTab(self._build_axis_page(self.PARAM_AXES, PARAM_AXIS_VALUES, checked_first=False), "Parameter Axes")
+        self.axis_tabs.addTab(self._build_parameter_page(), "Parameter Axes")
         layout.addWidget(self.axis_tabs, 1)
 
         advanced = QtWidgets.QGroupBox("Advanced rule preview")
@@ -319,6 +331,38 @@ class _LitmusLinkQtWindow:
         layout.addWidget(advanced)
 
         return tab
+
+    def _build_parameter_page(self) -> Any:
+        QtWidgets = self.QtWidgets
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QtWidgets.QWidget()
+        scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 8, 0)
+        scroll_layout.setSpacing(8)
+
+        for group_name, axes in self.PARAM_GROUPS.items():
+            group = QtWidgets.QGroupBox(group_name)
+            group_layout = QtWidgets.QVBoxLayout(group)
+            group_layout.setContentsMargins(10, 8, 10, 10)
+            group_hint = QtWidgets.QLabel(_parameter_group_hint(group_name))
+            group_hint.setObjectName("Hint")
+            group_hint.setWordWrap(True)
+            group_layout.addWidget(group_hint)
+            for axis in axes:
+                checks = self._add_check_group(group_layout, axis, PARAM_AXIS_VALUES.get(axis, []), checked_first=False)
+                self.param_checks[axis] = checks
+            self.param_group_widgets[group_name] = group
+            scroll_layout.addWidget(group)
+
+        scroll_layout.addStretch(1)
+        scroll.setWidget(scroll_content)
+        page_layout.addWidget(scroll)
+        return page
 
     def _build_axis_page(self, axes: Iterable[str], values_by_axis: Dict[str, Iterable[str]], checked_first: bool) -> Any:
         QtWidgets = self.QtWidgets
@@ -359,11 +403,37 @@ class _LitmusLinkQtWindow:
             check.setProperty("axis_value", str(value))
             if checked_first and index == 0:
                 check.setChecked(True)
-            check.stateChanged.connect(lambda _state, self=self: self._sync_rule_preview())
+            check.stateChanged.connect(lambda _state, check=check, axis=title, self=self: self._handle_check_changed(axis, check))
             grid.addWidget(check, index // 3, index % 3)
             checks.append(check)
         layout.addWidget(group)
         return checks
+
+    def _handle_check_changed(self, axis: str, check: Any) -> None:
+        if self.suspend_rule_sync:
+            return
+        none_value = self.NONE_VALUES.get(axis)
+        if none_value is not None:
+            self.suspend_rule_sync = True
+            try:
+                checks = self.primary_checks.get(axis, [])
+                value = str(check.property("axis_value"))
+                if check.isChecked() and value == none_value:
+                    for other in checks:
+                        if other is not check:
+                            other.setChecked(False)
+                elif check.isChecked():
+                    for other in checks:
+                        if str(other.property("axis_value")) == none_value:
+                            other.setChecked(False)
+                elif not self._selected(checks):
+                    for other in checks:
+                        if str(other.property("axis_value")) == none_value:
+                            other.setChecked(True)
+                            break
+            finally:
+                self.suspend_rule_sync = False
+        self._sync_rule_preview()
 
     def _build_result_panel(self) -> Any:
         QtWidgets = self.QtWidgets
@@ -449,10 +519,46 @@ class _LitmusLinkQtWindow:
             return
         self.suspend_rule_sync = True
         try:
+            self._apply_none_switches()
             self.rule_json.setPlainText(json.dumps(self._build_rule(), indent=2, sort_keys=True))
         finally:
             self.suspend_rule_sync = False
         self._update_output_hint()
+
+    def _apply_none_switches(self) -> None:
+        vector_enabled = bool(self._selected_non_none("vector", "none"))
+        cmo_enabled = bool(self._selected_non_none("cmo", "no_cmo"))
+        tlb_enabled = bool(self._selected_non_none("tlb", "no_tlb"))
+        memory_enabled = bool(self._selected_non_none("attribute", "cacheable")) or vector_enabled or cmo_enabled or tlb_enabled
+        self._set_core_axis_tooltips("vector", vector_enabled, "Vector is enabled.", "Vector is disabled; Vector parameters are cleared.")
+        self._set_core_axis_tooltips("cmo", cmo_enabled, "CMO is enabled.", "CMO is disabled; CMO sync parameters are cleared.")
+        self._set_core_axis_tooltips("tlb", tlb_enabled, "TLB/VM is enabled.", "TLB/VM is disabled; virtual-memory parameters are cleared.")
+        groups = {
+            "Vector": vector_enabled,
+            "Memory Footprint": memory_enabled,
+            "CMO Sync": cmo_enabled,
+            "Virtual Memory": tlb_enabled,
+            "RVWMO Shape": True,
+            "Stress": True,
+        }
+        for group_name, enabled in groups.items():
+            group = self.param_group_widgets.get(group_name)
+            if group is None:
+                continue
+            group.setEnabled(enabled)
+            if not enabled:
+                for axis in self.PARAM_GROUPS[group_name]:
+                    for check in self.param_checks.get(axis, []):
+                        check.setChecked(False)
+
+    def _selected_non_none(self, axis: str, none_value: str) -> list[str]:
+        return [value for value in self._selected(self.primary_checks.get(axis, [])) if value != none_value]
+
+    def _set_core_axis_tooltips(self, axis: str, enabled: bool, active_text: str, inactive_text: str) -> None:
+        none_value = self.NONE_VALUES.get(axis)
+        for check in self.primary_checks.get(axis, []):
+            value = str(check.property("axis_value"))
+            check.setToolTip(inactive_text if value == none_value or not enabled else active_text)
 
     def _mark_rule_manual_edit(self) -> None:
         if not self.suspend_rule_sync:
@@ -508,9 +614,12 @@ class _LitmusLinkQtWindow:
         self.progress_bar.setRange(0, 0)
         self.log_view.clear()
         self.raw_json.clear()
+        self.summary_view.setPlainText(f"{label} is running. Progress messages are shown in the Log tab.")
         self._append_log(f"Started: {label}")
         for button in self.action_buttons:
             button.setEnabled(False)
+        self.refresh_rule_button.setEnabled(False)
+        self.elapsed_timer.start(250)
         self.result_tabs.setCurrentWidget(self.log_view)
 
     def _handle_finished(self, label: str, result: object) -> None:
@@ -519,6 +628,7 @@ class _LitmusLinkQtWindow:
         self.progress_bar.setValue(1)
         self.status_label.setText(f"{label} finished")
         self.elapsed_label.setText(f"Elapsed: {elapsed:.1f}s")
+        self.elapsed_timer.stop()
         self._append_log(f"Finished: {label} in {elapsed:.1f}s")
         if isinstance(result, dict):
             self.summary_view.setPlainText(_summary_text(label, result, self._current_out_dir()))
@@ -529,6 +639,7 @@ class _LitmusLinkQtWindow:
         self.result_tabs.setCurrentWidget(self.summary_view)
         for button in self.action_buttons:
             button.setEnabled(True)
+        self.refresh_rule_button.setEnabled(True)
 
     def _handle_failed(self, label: str, message: str) -> None:
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
@@ -536,9 +647,11 @@ class _LitmusLinkQtWindow:
         self.progress_bar.setValue(0)
         self.status_label.setText(f"{label} failed")
         self.elapsed_label.setText(f"Elapsed: {elapsed:.1f}s")
+        self.elapsed_timer.stop()
         self._show_error(f"{label} failed", message)
         for button in self.action_buttons:
             button.setEnabled(True)
+        self.refresh_rule_button.setEnabled(True)
 
     def _clear_worker(self) -> None:
         self.active_thread = None
@@ -547,6 +660,10 @@ class _LitmusLinkQtWindow:
     def _append_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {message}")
+
+    def _update_elapsed(self) -> None:
+        if self.started_at:
+            self.elapsed_label.setText(f"Elapsed: {time.monotonic() - self.started_at:.1f}s")
 
     def _show_error(self, title: str, message: str) -> None:
         self.summary_view.setPlainText(f"{title}\n\n{message}")
@@ -612,6 +729,18 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     return "\n".join(lines)
 
 
+def _parameter_group_hint(group_name: str) -> str:
+    hints = {
+        "Vector": "Enabled only when Core Axes selects a real vector memory operation.",
+        "Memory Footprint": "Address layout for cache line, page, alias, and overlap stress.",
+        "CMO Sync": "Fence and CMO synchronization sequences; full alias sync requires cbo.flush.",
+        "Virtual Memory": "Enabled only when Core Axes selects a TLB/VM scenario.",
+        "RVWMO Shape": "Scalar relation modifiers such as dependency, width, and expected outcome class.",
+        "Stress": "Microarchitecture pressure modifiers applied around the litmus body.",
+    }
+    return hints.get(group_name, "Additional generation parameters preserved in metadata.")
+
+
 def _horizontal(QtCore: Any) -> Any:
     orientation = getattr(QtCore, "Qt").Orientation if hasattr(getattr(QtCore, "Qt"), "Orientation") else getattr(QtCore, "Qt")
     return orientation.Horizontal
@@ -626,7 +755,8 @@ def _align_center(QtCore: Any) -> Any:
 
 def _stylesheet() -> str:
     return """
-    QWidget { background: #f6f8fb; color: #182230; font-size: 13px; }
+    QWidget { color: #182230; font-size: 13px; }
+    QLabel, QCheckBox { background: transparent; }
     QFrame#Header { background: #172033; border-radius: 8px; }
     QLabel#Title { color: #ffffff; font-size: 24px; font-weight: 700; }
     QLabel#Subtitle { color: #cbd5e1; font-size: 13px; }

@@ -80,8 +80,8 @@ The small profiles are for smoke tests and targeted debugging. The large profile
 
 | Profile | Total combinations | Generated `.litmus` | HAND-required | Excluded illegal |
 | --- | ---: | ---: | ---: | ---: |
-| `stress-large` | 557,840 | 73,440 | 355,760 | 128,640 |
-| `stress-all` | 6,113,560 | 1,599,840 | 2,659,600 | 1,854,120 |
+| `stress-large` | 250,360 | 39,840 | 205,640 | 4,880 |
+| `stress-all` | 3,890,180 | 1,492,560 | 2,309,140 | 88,480 |
 
 Use `stress-large` as the practical large profile. Use `stress-all` only when you intentionally want the multi-million combination domain. Start with summary audit before generating files:
 
@@ -106,8 +106,8 @@ Use `litmus-link list axes` to see accepted values. A minimal rule file can be a
     "attribute": ["cacheable", "pbmt_nc"]
   },
   "param_axes": {
-    "sew": ["e32", "e64"],
     "footprint": ["same_line", "cross_page"],
+    "sync": ["none", "post_fence"],
     "stress": ["none", "store_buffer_full"]
   },
   "limit": 20

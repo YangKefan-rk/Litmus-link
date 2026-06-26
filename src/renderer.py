@@ -151,19 +151,23 @@ def _vector_instruction(combination: Combination) -> str:
         "segment_store": "vsseg2e32.v v8,(x6)",
         "fof_load": "vle32ff.v v8,(x6)",
         "fof_segment_load": "vlseg2e32ff.v v8,(x6)",
-        "cross_page": "vse32.v v8,(x6)" if combination.memory_event == "vector_store" else "vle32.v v8,(x6)",
     }
     return table.get(combination.vector, "vle32.v v8,(x6)")
 
 
 def _cmo_lines(combination: Combination) -> list[str]:
-    if combination.cmo == "flush_sync":
+    if combination.cmo == "flush" and combination.params.get("sync") == "full_alias_sync":
         return ["fence iorw,iorw", "cbo.flush 0(x6)", "fence iorw,iorw"]
     op = {
         "clean": "cbo.clean 0(x6)",
         "flush": "cbo.flush 0(x6)",
         "inval": "cbo.inval 0(x6)",
-        "inval_as_flush": "cbo.inval 0(x6)",
         "zero": "cbo.zero 0(x6)",
     }.get(combination.cmo, "fence rw,rw")
+    if combination.params.get("sync") == "pre_fence":
+        return ["fence iorw,iorw", op]
+    if combination.params.get("sync") == "post_fence":
+        return [op, "fence iorw,iorw"]
+    if combination.params.get("sync") == "fence_i_after":
+        return [op, "fence.i"]
     return [op]

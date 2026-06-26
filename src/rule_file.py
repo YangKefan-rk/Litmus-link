@@ -50,7 +50,7 @@ KNOWN_VALUES = {
     "attribute": set(ATTRIBUTES),
     "tlb": {"no_tlb", *TLB_OPS},
     "cmo": {"no_cmo", *CMO_OPS},
-    "vector": {"none", "cross_page", *VECTOR_OPS},
+    "vector": {"none", *VECTOR_OPS},
 }
 
 DEFAULTS = {

@@ -1,10 +1,10 @@
 {
-  "excluded_illegal": 1854120,
+  "excluded_illegal": 88480,
   "excluded_unsupported": 0,
-  "generated": 1599840,
-  "hand_required": 2659600,
+  "generated": 1492560,
+  "hand_required": 2309140,
   "missing": 0,
   "profile": "stress-all",
   "schema": "litmus-link.audit.v1",
-  "total_combinations": 6113560
+  "total_combinations": 3890180
 }

@@ -80,7 +80,7 @@ Example with explicit cases:
   "defaults": {"skeleton": "MP", "attribute": "cacheable"},
   "cases": [
     {"vector": "fof_load", "params": {"fault_element": 3}},
-    {"cmo": "flush_sync", "attribute": "cacheable_nc_alias"}
+    {"cmo": "flush", "attribute": "cacheable_nc_alias", "params": {"sync": "full_alias_sync"}}
   ],
   "limit": 10
 }

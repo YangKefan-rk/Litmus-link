@@ -33,7 +33,6 @@ FEATURE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "pbmt_io": "PBMT=IO or non-idempotent memory; platform-specific and usually HAND-required.",
         "nc_alias": "Non-cacheable mapping aliases another mapping of the same physical storage.",
         "cacheable_nc_alias": "Same PA is reachable through cacheable and NC mappings, requiring explicit synchronization.",
-        "pbmt_reserved": "Reserved PBMT encoding for negative/exception coverage only.",
     },
     "vector": {
         "unit_load": "Unit-stride vector load over contiguous elements.",
@@ -48,20 +47,12 @@ FEATURE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "segment_store": "Segment vector store with interleaved multi-field writes.",
         "fof_load": "Fault-only-first unit-stride load: element0 traps, later faults trim vl.",
         "fof_segment_load": "Legal segment fault-only-first load with vl trimming behavior.",
-        "fof_strided": "Illegal strided FOF form; excluded by ISA legality rules.",
-        "fof_indexed": "Illegal indexed FOF form; excluded by ISA legality rules.",
-        "cross_page": "Vector footprint crosses a page boundary.",
     },
     "cmo": {
         "clean": "cbo.clean pushes dirty data toward the coherence point while keeping the line valid.",
         "flush": "cbo.flush writes back dirty data and invalidates the cache block.",
         "inval": "cbo.inval invalidates a cache block without assuming writeback unless configured otherwise.",
-        "inval_as_flush": "cbo.inval modeled in a platform mode where it behaves as flush.",
         "zero": "cbo.zero writes zeros but is not an atomic whole-block store.",
-        "flush_sync": "Alias-safe sequence: fence iorw,iorw; cbo.flush; fence iorw,iorw.",
-        "flush_offset4": "Illegal CBO non-zero offset negative case.",
-        "clean_csr_denied": "CSR-denied clean operation requiring trap setup.",
-        "zero_csr_denied": "CSR-denied zero operation requiring trap setup.",
     },
     "tlb": {
         "local_sfence": "Local sfence.vma orders this hart's PTE writes against its later translations.",
@@ -71,7 +62,6 @@ FEATURE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "ad_update": "A/D bit update races with hardware page-table walks and software PTE modification.",
         "asid_global": "ASID/global mapping scenario stresses selective invalidation scope.",
         "satp_switch": "satp context switch stresses translation-root replacement and required fencing.",
-        "nonleaf_pbmt": "Illegal non-leaf PBMT bits negative exception case.",
     },
 }
 
