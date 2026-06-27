@@ -158,9 +158,15 @@ def test_cli() -> None:
         check(bool(preview["sample"][0]["analysis"]["cycle"]), "GUI preview should include cycle analysis")
         check("solver" in preview["sample"][0], "GUI preview should include solver result")
         check("diagram" in preview["sample"][0], "GUI preview should include diagram result")
-        mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 1})
-        check(mp_preview["report"]["generated_litmus"] >= 6, "MP cacheable should expand to multiple litmus variants")
-        check(len([item for item in mp_preview["sample"] if item.get("litmus")]) >= 6, "MP preview should include expanded variants")
+        mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 6})
+        from corpus_riscv import corpus_available as _corpus_available
+        if _corpus_available():
+            check(mp_preview["report"]["generated_litmus"] > 500, "MP cacheable should expand to the full real corpus family")
+            check(len([item for item in mp_preview["sample"] if item.get("litmus")]) == 6, "MP preview should sample the corpus family")
+            check(all(item["solver"]["model"] == "rvwmo-herd7" for item in mp_preview["sample"] if item.get("litmus")), "MP corpus preview should carry herd7 verdicts")
+        else:
+            check(mp_preview["report"]["generated_litmus"] >= 6, "MP cacheable should expand to multiple litmus variants")
+            check(len([item for item in mp_preview["sample"] if item.get("litmus")]) >= 6, "MP preview should include expanded variants")
         check(main(["qt-gui", "--check"]) == 0, "Qt GUI check should not require Qt")
         check("PyQt6" in qt_binding_status(), "Qt GUI status should include PyQt6")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")

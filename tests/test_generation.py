@@ -142,20 +142,34 @@ def test_preview_payload_includes_litmus_and_analysis() -> None:
     assert "forbidden_outcome" in first["analysis"]
 
 
-def test_mp_cacheable_expands_to_multiple_variants() -> None:
+def test_mp_cacheable_expands_to_corpus_family() -> None:
+    from corpus_riscv import corpus_available
+
+    sample_limit = 6
     preview = preview_payload(
         {
             "mode": "rule",
             "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
-            "sample_limit": 1,
+            "sample_limit": sample_limit,
         }
     )
-    generated = [item for item in preview["sample"] if item.get("litmus")]
-    variants = {item["case_ir"]["variant"] for item in generated}
     assert preview["report"]["total_combinations"] == 1
-    assert preview["report"]["generated_litmus"] >= 6
-    assert len(generated) >= 6
-    assert {"base", "fence_rw_rw", "addr_dep"}.issubset(variants)
+    generated = [item for item in preview["sample"] if item.get("litmus")]
+    if corpus_available():
+        # Real RVWMO corpus: MP+cacheable expands to its full tool-generated
+        # family (hundreds of tests), each judged per-outcome by herd7 -- not
+        # the old fake 6-variant sweep.
+        assert preview["report"]["generated_litmus"] > 500
+        assert len(generated) == sample_limit
+        assert all(item["litmus"].startswith("RISCV ") for item in generated)
+        assert all(item["solver"]["model"] == "rvwmo-herd7" for item in generated)
+    else:
+        # Fallback when the corpus/tools are absent: the in-process scalar
+        # variant sweep still expands one combination into >= 6 variants.
+        assert preview["report"]["generated_litmus"] >= 6
+        assert len(generated) >= 6
+        variants = {item["case_ir"]["variant"] for item in generated}
+        assert {"base", "fence_rw_rw", "addr_dep"}.issubset(variants)
 
 
 def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:

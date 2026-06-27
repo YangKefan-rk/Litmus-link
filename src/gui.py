@@ -40,6 +40,9 @@ from rule_file import RuleFileError, load_rule_data, rule_field_values
 from rules import evaluate
 from renderer import render_cases
 from solver import solve_generated_case
+from litmus_ir import case_count
+from corpus_riscv import corpus_available, skeleton_counts, tests_for_skeleton, judge as corpus_judge
+from corpus_ir import corpus_to_ir
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
@@ -96,30 +99,188 @@ def options_payload() -> Dict[str, Any]:
 def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     name, combinations, source = _combinations_from_payload(payload)
     sample_limit = int(payload.get("sample_limit", 10))
-    sample = []
+    use_corpus = source == "gui" and corpus_available()
     cached = list(combinations) if isinstance(combinations, list) else None
-    iterator = iter(cached if cached is not None else combinations)
-    for combination in islice(iterator, max(sample_limit, 0)):
-        decision = evaluate(combination)
-        rendered_cases = []
-        if decision.status == GENERATED:
-            rendered_cases = render_cases(combination, decision)
-        if rendered_cases:
-            for case in rendered_cases:
-                solver = solve_generated_case(case).to_json()
-                diagram = None
-                if case.case_ir is not None:
-                    diagram = render_diagram(case.case_ir, solver, Path(gettempdir()) / "litmus-link-preview-diagrams").summary
-                sample.append(_preview_item(combination, decision.to_json(), case.name, case.litmus, case.case_ir.to_json() if case.case_ir else None, solver, diagram))
-        else:
-            sample.append(_preview_item(combination, decision.to_json(), combination.name, "", None, None, None))
+
+    sample: list = []
+    if use_corpus:
+        # Total-item budget: bounds herd7 runs regardless of how many skeletons
+        # are checked. Corpus combinations expand into real tool-generated tests.
+        budget = max(sample_limit, 0)
+        for combination in (cached if cached is not None else []):
+            if budget <= 0:
+                break
+            if _is_scalar_corpus_combination(combination):
+                items = _corpus_preview_items(combination, min(budget, 8))
+            else:
+                items = _render_preview_items(combination)
+            for item in items:
+                if budget <= 0:
+                    break
+                sample.append(item)
+                budget -= 1
+    else:
+        iterator = iter(cached if cached is not None else combinations)
+        for combination in islice(iterator, max(sample_limit, 0)):
+            sample.extend(_render_preview_items(combination))
+
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
+    report = (
+        _gui_corpus_report(name, summary_combinations, source)
+        if use_corpus
+        else audit_summary(name, summary_combinations, source=source)
+    )
+    return {"profile": name, "source": source, "report": report, "sample": sample}
+
+
+_DIAGRAM_DIR = Path(gettempdir()) / "litmus-link-preview-diagrams"
+
+
+def _is_scalar_corpus_combination(combination: Combination) -> bool:
+    """True for a pure scalar RVWMO main-memory family we can serve from the
+    real corpus: no vector/CMO/TLB extension, cacheable, no body-changing params."""
+    if combination.vector != "none" or combination.cmo != "no_cmo" or combination.tlb != "no_tlb":
+        return False
+    if combination.attribute != "cacheable":
+        return False
+    if combination.params:
+        return False
+    return skeleton_counts().get(combination.skeleton, 0) > 0
+
+
+def _render_preview_items(combination: Combination) -> list:
+    """Original (non-corpus) preview path: evaluate -> render -> solve -> draw."""
+    decision = evaluate(combination)
+    rendered_cases = render_cases(combination, decision) if decision.status == GENERATED else []
+    if not rendered_cases:
+        return [_preview_item(combination, decision.to_json(), combination.name, "", None, None, None)]
+    items = []
+    for case in rendered_cases:
+        solver = solve_generated_case(case).to_json()
+        diagram = None
+        if case.case_ir is not None:
+            diagram = render_diagram(case.case_ir, solver, _DIAGRAM_DIR).summary
+        items.append(
+            _preview_item(
+                combination,
+                decision.to_json(),
+                case.name,
+                case.litmus,
+                case.case_ir.to_json() if case.case_ir else None,
+                solver,
+                diagram,
+            )
+        )
+    return items
+
+
+def _safe_corpus_judge(test):
+    try:
+        return corpus_judge(test)
+    except Exception:
+        return None
+
+
+def _corpus_solver_json(verdict) -> Dict[str, Any]:
+    if verdict is None or verdict.outcome == "unknown":
+        return {
+            "schema": "litmus-link.solver.v1",
+            "status": "not_applicable",
+            "verdict": "unmodeled",
+            "allowed": None,
+            "model": "rvwmo-herd7",
+            "tool": "herd7",
+            "reason": "herd7 verdict unavailable for this test.",
+            "cross_check": "herd7_only",
+            "edges": [],
+            "fusion": None,
+            "observation": "",
+            "raw_output": "",
+            "command": [],
+        }
+    forbidden = verdict.outcome == "forbidden"
     return {
-        "profile": name,
-        "source": source,
-        "report": audit_summary(name, summary_combinations, source=source),
-        "sample": sample,
+        "schema": "litmus-link.solver.v1",
+        "status": "verified",
+        "verdict": "forbidden" if forbidden else "allowed",
+        "allowed": verdict.allowed,
+        "model": "rvwmo-herd7",
+        "tool": "herd7",
+        "reason": (
+            f"herd7 + riscv.cat: exists outcome {'FORBIDDEN (Never observed)' if forbidden else 'OBSERVABLE'} "
+            f"[{verdict.observation} +{verdict.positive}/-{verdict.negative}]"
+        ),
+        "cross_check": "herd7_only",
+        "edges": [],
+        "fusion": None,
+        "observation": verdict.observation,
+        "raw_output": "",
+        "command": [],
     }
+
+
+def _corpus_decision_json(test) -> Dict[str, Any]:
+    return {
+        "status": GENERATED,
+        "reason": f"Real RVWMO litmus from the {test.skeleton} family (tool-generated corpus).",
+        "rvwmo_class": "rvwmo-herd7",
+        "expected_kind": "rvwmo-herd7",
+        "requires": ["RV64I"],
+        "notes": [f"corpus:{test.family}", "verdict:herd7"],
+        "hand_category": "",
+        "metadata": {"corpus": "true", "cycle": test.cycle},
+    }
+
+
+def _corpus_preview_items(combination: Combination, limit: int) -> list:
+    items = []
+    for test in tests_for_skeleton(combination.skeleton, limit=limit):
+        verdict = _safe_corpus_judge(test)
+        ir = corpus_to_ir(test, verdict)
+        solver = _corpus_solver_json(verdict)
+        diagram = render_diagram(ir, solver, _DIAGRAM_DIR).summary
+        items.append(
+            _preview_item(
+                combination,
+                _corpus_decision_json(test),
+                test.name,
+                test.text,
+                ir.to_json(),
+                solver,
+                diagram,
+            )
+        )
+    return items
+
+
+def _gui_corpus_report(name: str, combinations: Iterable[Combination], source: str | None) -> Dict[str, Any]:
+    counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
+    total = 0
+    generated_litmus = 0
+    for combination in combinations:
+        total += 1
+        if _is_scalar_corpus_combination(combination):
+            counts[GENERATED] += 1
+            generated_litmus += skeleton_counts().get(combination.skeleton, 0)
+            continue
+        decision = evaluate(combination)
+        counts[decision.status] = counts.get(decision.status, 0) + 1
+        if decision.status == GENERATED:
+            generated_litmus += case_count(combination, decision)
+    report = {
+        "schema": "litmus-link.audit.v1",
+        "profile": name,
+        "total_combinations": total,
+        "generated": counts.get(GENERATED, 0),
+        "generated_litmus": generated_litmus,
+        "excluded_illegal": counts.get("excluded_illegal", 0),
+        "excluded_unsupported": counts.get("excluded_unsupported", 0),
+        "hand_required": counts.get("hand_required", 0),
+        "missing": counts.get("missing", 0),
+    }
+    if source:
+        report["source"] = source
+    return report
 
 
 def _preview_item(
@@ -208,6 +369,13 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
         status = solver.get("status")
         verdict = solver.get("verdict")
         cross = solver.get("cross_check", "")
+        if solver.get("model") == "rvwmo-herd7":
+            # Verdict is a property of the OUTCOME, decided by the real herd7.
+            if status == "verified" and verdict == "forbidden":
+                return f"herd7 + riscv.cat: the exists outcome is FORBIDDEN (never observed) under RVWMO: {exists}"
+            if status == "verified" and verdict == "allowed":
+                return f"herd7 + riscv.cat: the exists outcome is OBSERVABLE (architecturally allowed) under RVWMO: {exists}"
+            return "herd7 verdict unavailable for this corpus test."
         tool = "native RVWMO checker" + (" (confirmed by herd7/riscv.cat)" if cross == "agree" else "")
         if status == "verified" and verdict == "forbidden":
             return f"Verified forbidden by {tool}: {exists}"
