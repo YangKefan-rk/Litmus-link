@@ -128,9 +128,9 @@ def build_litmus_ir_cases(combination: Combination, decision: Decision) -> list[
 def _is_scalar_rvwmo(combination: Combination, decision: Decision) -> bool:
     return (
         decision.status == "generated"
-        and decision.rvwmo_class == "rvwmo-herd"
+        and decision.rvwmo_class in {"rvwmo-herd", "rvwmo-nc"}
         and combination.memory_event == "scalar_pair"
-        and combination.attribute == "cacheable"
+        and combination.attribute in {"cacheable", "pbmt_nc"}
         and combination.vector == "none"
         and combination.cmo == "no_cmo"
         and combination.tlb == "no_tlb"

@@ -267,14 +267,13 @@ def _requires(combination: Combination) -> List[str]:
 
 
 def _rvwmo_class(combination: Combination) -> str:
-    if (
-        combination.attribute == "cacheable"
-        and combination.tlb == "no_tlb"
-        and combination.cmo == "no_cmo"
-        and combination.vector == "none"
-        and combination.memory_event == "scalar_pair"
-    ):
-        return "rvwmo-herd"
+    if _is_scalar_main_memory(combination):
+        # Svpbmt defines NC as non-cacheable *main memory*, idempotent and
+        # RVWMO-ordered. RVWMO's PPO rules never reference cacheability, so an
+        # NC scalar test has the SAME forbidden/allowed verdict as its cacheable
+        # twin -- only the justification carries one extra Svpbmt prose
+        # dependency. herd7 runs the identical plain body and agrees.
+        return "rvwmo-herd" if combination.attribute == "cacheable" else "rvwmo-nc"
     if combination.vector != "none" and combination.cmo == "no_cmo" and combination.tlb == "no_tlb":
         return "rvwmo-instruction-level"
     if combination.cmo != "no_cmo" or combination.attribute != "cacheable":
@@ -282,9 +281,19 @@ def _rvwmo_class(combination: Combination) -> str:
     return "hardware-observation"
 
 
+def _is_scalar_main_memory(combination: Combination) -> bool:
+    return (
+        combination.attribute in {"cacheable", "pbmt_nc"}
+        and combination.tlb == "no_tlb"
+        and combination.cmo == "no_cmo"
+        and combination.vector == "none"
+        and combination.memory_event == "scalar_pair"
+    )
+
+
 def _expected_kind(rvwmo_class: str) -> str:
-    if rvwmo_class == "rvwmo-herd":
-        return "rvwmo-herd"
+    if rvwmo_class in {"rvwmo-herd", "rvwmo-nc"}:
+        return rvwmo_class
     if rvwmo_class == "rvwmo-instruction-level":
         return "hardware-observation"
     if rvwmo_class == "prose-spec":
@@ -305,7 +314,7 @@ def _decision_metadata(combination: Combination) -> Dict[str, str]:
     metadata: Dict[str, str] = {}
     rvwmo_class = _rvwmo_class(combination)
     metadata["oracle"] = _expected_kind(rvwmo_class)
-    metadata["formal_forbidden_claim"] = "true" if rvwmo_class == "rvwmo-herd" else "false"
+    metadata["formal_forbidden_claim"] = "true" if rvwmo_class in {"rvwmo-herd", "rvwmo-nc"} else "false"
     if combination.params.get("inval_mode") == "flush":
         metadata["inval_mode"] = "flush"
     elif combination.cmo == "inval":

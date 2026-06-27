@@ -48,7 +48,7 @@ class SolverResult:
 
 def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResult:
     case_ir = case.case_ir
-    if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind != "rvwmo-herd":
+    if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc"}:
         # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
         # made. For fusion (vector/CMO/PBMT/TLB) cases we still attach the
         # extension-prose ordering analysis so consumers get something better
@@ -72,6 +72,17 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
     native = check_rvwmo(case_ir)
     edges = [edge.to_json() for edge in native.edges]
 
+    # NC scalar tests are RVWMO-decidable too (Svpbmt: NC is non-cacheable main
+    # memory, RVWMO-ordered) -- same verdict as the cacheable twin, plus one
+    # Svpbmt prose dependency we record here.
+    reason_base = native.reason
+    if case.decision.expected_kind == "rvwmo-nc":
+        reason_base = (
+            native.reason
+            + " (PBMT=NC is non-cacheable main memory and obeys RVWMO per Svpbmt, so this"
+            + " verdict equals the cacheable twin; the plain body lets herd7 cross-check it.)"
+        )
+
     # Optional cross-validation against herd7 if it happens to be installed.
     herd_check = _run_herd(case, herd)
     if herd_check is None:
@@ -81,7 +92,7 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
             allowed=native.allowed,
             model="rvwmo-native",
             tool="native",
-            reason=native.reason + " (herd7 not on PATH; no cross-check performed.)",
+            reason=reason_base + " (herd7 not on PATH; no cross-check performed.)",
             cross_check="herd7_absent",
             edges=edges,
         )
@@ -94,7 +105,7 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
             allowed=native.allowed,
             model="rvwmo-native",
             tool="native",
-            reason=native.reason + f" (herd7 cross-check unavailable: {herd_status}.)",
+            reason=reason_base + f" (herd7 cross-check unavailable: {herd_status}.)",
             cross_check=f"herd7_{herd_status}",
             edges=edges,
             raw_output=raw,
@@ -108,7 +119,7 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
             allowed=native.allowed,
             model="rvwmo-native+riscv.cat",
             tool="native+herd7",
-            reason=native.reason + " Confirmed by herd7/riscv.cat.",
+            reason=reason_base + " Confirmed by herd7/riscv.cat.",
             cross_check="agree",
             edges=edges,
             observation=herd_parsed.get("observation", ""),

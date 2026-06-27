@@ -13,7 +13,7 @@ def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ign
     assert main(["generate", "--profile", "smoke", "--out", str(out)]) == 0
     assert main(["validate", str(out / "@all")]) == 0
     captured = capsys.readouterr()
-    assert "validated 13 litmus files" in captured.out
+    assert "validated 18 litmus files" in captured.out
 
 
 def test_cli_list_rules(capsys) -> None:  # type: ignore[no-untyped-def]

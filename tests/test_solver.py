@@ -54,3 +54,31 @@ def test_solver_not_applicable_for_fusion() -> None:
     assert result.status == "not_applicable"
     assert result.allowed is None
 
+
+def _nc_case(variant: str):
+    combination = Combination("test", "pbmt_nc", "MP", "scalar_pair", "pbmt_nc", params={"variant": variant})
+    return render_cases(combination, evaluate(combination))[0]
+
+
+def test_solver_nc_scalar_gets_native_verdict() -> None:
+    # PBMT=NC is non-cacheable main memory and obeys RVWMO (Svpbmt), so an NC
+    # scalar case must receive a real native verdict, not "not_applicable".
+    case = _nc_case("fence_rw_rw")
+    result = solve_generated_case(case)
+    assert result.status == "verified"
+    assert result.verdict == "forbidden"
+    assert result.allowed is False
+    assert result.edges, "NC scalar case should carry per-edge ppo reasoning"
+
+
+def test_solver_nc_verdict_equals_cacheable_twin() -> None:
+    # The soundness claim: RVWMO's PPO rules never reference cacheability, so an
+    # NC scalar test has the same forbidden/allowed verdict as its cacheable
+    # twin for every ordering variant.
+    for variant in ["base", "fence_rw_rw", "fence_w_w_r_rw", "addr_dep", "ctrl_dep", "ctrl_fencei"]:
+        cacheable = solve_generated_case(_scalar_case(variant))
+        nc = solve_generated_case(_nc_case(variant))
+        assert nc.allowed == cacheable.allowed, f"NC/cacheable verdict mismatch for {variant}"
+        assert nc.verdict == cacheable.verdict, f"NC/cacheable verdict mismatch for {variant}"
+
+
