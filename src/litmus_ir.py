@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
@@ -13,6 +14,17 @@ DEFAULT_SCALAR_VARIANTS = [
     "addr_dep",
     "ctrl_dep",
     "ctrl_fencei",
+]
+
+# Vector memory ordering reduces per-element to RVWMO, and a FENCE orders those
+# element accesses by its predecessor/successor sets exactly like scalar
+# accesses. So vector cycles get the FENCE-orderable variants only -- address /
+# control dependencies feeding vector-register element-address computation are a
+# subtlety we do not assert a verdict on.
+VECTOR_CYCLE_VARIANTS = [
+    "base",
+    "fence_rw_rw",
+    "fence_w_w_r_rw",
 ]
 
 
@@ -112,9 +124,11 @@ class LitmusCaseIR:
 
 
 def case_count(combination: Combination, decision: Decision) -> int:
-    if not _is_scalar_rvwmo(combination, decision):
-        return 1
-    return len(_scalar_variant_ids(combination))
+    if _is_scalar_rvwmo(combination, decision):
+        return len(_scalar_variant_ids(combination))
+    if _is_vector_rvwmo(combination, decision):
+        return len(_vector_variant_ids(combination))
+    return 1
 
 
 def build_litmus_ir_cases(combination: Combination, decision: Decision) -> list[LitmusCaseIR]:
@@ -122,6 +136,10 @@ def build_litmus_ir_cases(combination: Combination, decision: Decision) -> list[
         variants = _scalar_variant_ids(combination)
         expanded = len(variants) > 1
         return [_scalar_case(combination, variant, expanded) for variant in variants]
+    if _is_vector_rvwmo(combination, decision):
+        variants = _vector_variant_ids(combination)
+        expanded = len(variants) > 1
+        return [_vector_mp_case(combination, variant, _case_name(combination, variant, expanded)) for variant in variants]
     return [_observation_case(combination, decision)]
 
 
@@ -147,6 +165,96 @@ def _scalar_variant_ids(combination: Combination) -> list[str]:
         if key in combination.params:
             tokens.append(f"{key}-{combination.params[key]}")
     return ["_".join(tokens) or "base"]
+
+
+def _is_vector_rvwmo(combination: Combination, decision: Decision) -> bool:
+    return (
+        decision.status == "generated"
+        and decision.rvwmo_class == "rvwmo-vector"
+        and combination.memory_event in {"vector_load", "vector_store"}
+    )
+
+
+def _vector_variant_ids(combination: Combination) -> list[str]:
+    if "variant" in combination.params:
+        return [str(combination.params["variant"])]
+    return list(VECTOR_CYCLE_VARIANTS)
+
+
+def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
+    events = [_event(f"{prefix}_vset", hart, "setup", "vsetvli x10,x0,e32,m1,ta,ma")]
+    extra_init: list[str] = []
+    if "indexed" in combination.vector:
+        events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v4"))
+    if "strided" in combination.vector:
+        extra_init.append(f"{hart}:x9=4;")
+    return events, extra_init
+
+
+def _rebase_vector(instruction: str, base_reg: str) -> str:
+    return re.sub(r"\(x\d+\)", f"({base_reg})", instruction, count=1)
+
+
+def _vector_mp_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    # Vector message passing: the data-carrying access is a vector load/store,
+    # the flag stays scalar. The RVV spec reduces vector memory ordering to
+    # per-element RVWMO, and a FENCE orders those element accesses exactly like
+    # scalar -- so the data-carrying event keeps kind store/load and the cycle
+    # verdict equals the scalar MP twin.
+    init = ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;"]
+    if combination.memory_event == "vector_store":
+        setup, extra_init = _vector_setup(combination, 0, "p0")
+        vinstr = _rebase_vector(_vector_instruction(combination), "x6")
+        p0 = [
+            *setup,
+            _event("p0_vbcast", 0, "setup", "vmv.v.x v8,x5"),
+            _event("p0_wx", 0, "store", vinstr, "x", value="1", role="data-write"),
+            *_ordering_events(0, variant, "p0", "writer"),
+            _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1", role="flag-write"),
+        ]
+        p1 = [
+            _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1", role="flag-read"),
+            *_ordering_events(1, variant, "p1", "reader"),
+            _event("p1_rx", 1, "load", "lw x7,0(x8)", "x", register="x7", value="0", role="data-read"),
+        ]
+        if extra_init:
+            init[0] = init[0] + " " + " ".join(extra_init)
+    else:
+        setup, extra_init = _vector_setup(combination, 1, "p1")
+        vinstr = _rebase_vector(_vector_instruction(combination), "x8")
+        p0 = [
+            _event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1", role="data-write"),
+            *_ordering_events(0, variant, "p0", "writer"),
+            _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1", role="flag-write"),
+        ]
+        p1 = [
+            *setup,
+            _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1", role="flag-read"),
+            *_ordering_events(1, variant, "p1", "reader"),
+            _event("p1_rx", 1, "load", vinstr, "x", register="v8", value="0", role="data-read"),
+            _event("p1_extract", 1, "extract", "vmv.x.s x7,v8", register="x7", role="vector-extract"),
+        ]
+        if extra_init:
+            init[1] = init[1] + " " + " ".join(extra_init)
+
+    relations = [
+        _relation("p0_wx", "p0_wy", "po", _variant_po_label("PodWW", variant), True),
+        _relation("p0_wy", "p1_ry", "rfe", "Rfe"),
+        _relation("p1_ry", "p1_rx", "po", _variant_po_label("PodRR", variant), True),
+        _relation("p1_rx", "p0_wx", "fre", "Fre"),
+    ]
+    return _case(
+        combination,
+        name,
+        variant,
+        _cycle_label("PodWW -> Rfe -> PodRR -> Fre", variant),
+        init,
+        [p0, p1],
+        relations,
+        "(1:x5=1 /\\ 1:x7=0)",
+        f"Vector message passing ({combination.vector}): per-element RVWMO reduction; FENCE orders the vector element accesses exactly like scalar.",
+        tags=["vector", "rvwmo", combination.skeleton, variant, combination.vector],
+    )
 
 
 def _scalar_case(combination: Combination, variant: str, expanded: bool) -> LitmusCaseIR:
@@ -230,6 +338,7 @@ def _case(
     relations: list[LitmusRelation],
     exists: str,
     description: str,
+    tags: list[str] | None = None,
 ) -> LitmusCaseIR:
     expected = _expected_outcome(combination)
     return LitmusCaseIR(
@@ -246,7 +355,7 @@ def _case(
         expected_outcome=expected,
         model="rvwmo",
         description=description,
-        tags=["scalar", "rvwmo", combination.skeleton, variant],
+        tags=tags if tags is not None else ["scalar", "rvwmo", combination.skeleton, variant],
     )
 
 

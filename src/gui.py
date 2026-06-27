@@ -223,7 +223,7 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
     outcome = str(combination.params.get("outcome", ""))
     if outcome == "forbidden":
         return f"Requested forbidden outcome, but solver verification is still required: {exists}"
-    if decision.get("expected_kind") in {"rvwmo-herd", "rvwmo-nc"}:
+    if decision.get("expected_kind") in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"}:
         return "RVWMO decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
     return "No formal forbidden assertion is emitted; this is a hardware-observation/prose-spec outcome."
 

@@ -48,7 +48,7 @@ class SolverResult:
 
 def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResult:
     case_ir = case.case_ir
-    if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc"}:
+    if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"}:
         # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
         # made. For fusion (vector/CMO/PBMT/TLB) cases we still attach the
         # extension-prose ordering analysis so consumers get something better
@@ -81,6 +81,13 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
             native.reason
             + " (PBMT=NC is non-cacheable main memory and obeys RVWMO per Svpbmt, so this"
             + " verdict equals the cacheable twin; the plain body lets herd7 cross-check it.)"
+        )
+    elif case.decision.expected_kind == "rvwmo-vector":
+        reason_base = (
+            native.reason
+            + " (RVV reduces vector memory ordering to per-element RVWMO, and a FENCE orders"
+            + " those element accesses exactly like scalar, so this verdict equals the scalar MP"
+            + " twin; herd7's RISC-V front-end does not parse vector ops, so it is native-only.)"
         )
 
     # Optional cross-validation against herd7 if it happens to be installed.

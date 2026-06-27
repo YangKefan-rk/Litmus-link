@@ -275,6 +275,11 @@ def _rvwmo_class(combination: Combination) -> str:
         # dependency. herd7 runs the identical plain body and agrees.
         return "rvwmo-herd" if combination.attribute == "cacheable" else "rvwmo-nc"
     if combination.vector != "none" and combination.cmo == "no_cmo" and combination.tlb == "no_tlb":
+        # Vector memory ordering reduces per-element to RVWMO. For a clean MP
+        # cycle over main memory we render a real cycle case with a native
+        # verdict; other skeletons stay observation/instruction-level.
+        if combination.skeleton == "MP" and combination.attribute in {"cacheable", "pbmt_nc"}:
+            return "rvwmo-vector"
         return "rvwmo-instruction-level"
     if combination.cmo != "no_cmo" or combination.attribute != "cacheable":
         return "prose-spec"
@@ -292,7 +297,7 @@ def _is_scalar_main_memory(combination: Combination) -> bool:
 
 
 def _expected_kind(rvwmo_class: str) -> str:
-    if rvwmo_class in {"rvwmo-herd", "rvwmo-nc"}:
+    if rvwmo_class in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"}:
         return rvwmo_class
     if rvwmo_class == "rvwmo-instruction-level":
         return "hardware-observation"
@@ -314,7 +319,7 @@ def _decision_metadata(combination: Combination) -> Dict[str, str]:
     metadata: Dict[str, str] = {}
     rvwmo_class = _rvwmo_class(combination)
     metadata["oracle"] = _expected_kind(rvwmo_class)
-    metadata["formal_forbidden_claim"] = "true" if rvwmo_class in {"rvwmo-herd", "rvwmo-nc"} else "false"
+    metadata["formal_forbidden_claim"] = "true" if rvwmo_class in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"} else "false"
     if combination.params.get("inval_mode") == "flush":
         metadata["inval_mode"] = "flush"
     elif combination.cmo == "inval":

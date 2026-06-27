@@ -48,7 +48,9 @@ def test_solver_native_allows_base_mp() -> None:
 
 
 def test_solver_not_applicable_for_fusion() -> None:
-    combination = Combination("test", "vector_mem", "MP", "vector_load", "cacheable", vector="unit_load")
+    # LB vector stays an observation/fusion case (MP vector cacheable now gets a
+    # real cycle verdict), so the solver makes no formal claim here.
+    combination = Combination("test", "vector_mem", "LB", "vector_load", "cacheable", vector="unit_load")
     case = render_cases(combination, evaluate(combination))[0]
     result = solve_generated_case(case)
     assert result.status == "not_applicable"
@@ -80,5 +82,38 @@ def test_solver_nc_verdict_equals_cacheable_twin() -> None:
         nc = solve_generated_case(_nc_case(variant))
         assert nc.allowed == cacheable.allowed, f"NC/cacheable verdict mismatch for {variant}"
         assert nc.verdict == cacheable.verdict, f"NC/cacheable verdict mismatch for {variant}"
+
+
+def _vector_mp_case(variant: str, vector: str = "unit_store", memory_event: str = "vector_store"):
+    combination = Combination("test", "vector_mem", "MP", memory_event, "cacheable", vector=vector, params={"variant": variant})
+    return render_cases(combination, evaluate(combination))[0]
+
+
+def test_solver_vector_mp_gets_native_verdict() -> None:
+    # RVV reduces vector memory ordering to per-element RVWMO; a FENCE orders the
+    # element accesses like scalar, so a vector-MP cycle gets a real verdict.
+    forbidden = solve_generated_case(_vector_mp_case("fence_rw_rw"))
+    assert forbidden.status == "verified"
+    assert forbidden.verdict == "forbidden"
+    assert forbidden.allowed is False
+    assert forbidden.edges, "vector cycle case should carry per-edge ppo reasoning"
+    allowed = solve_generated_case(_vector_mp_case("base"))
+    assert allowed.verdict == "allowed"
+
+
+def test_solver_vector_verdict_equals_scalar_twin() -> None:
+    # Soundness: the vector-MP verdict equals the scalar-MP twin for every FENCE
+    # variant, for both vector loads and vector stores, regardless of the vector
+    # form (the intra-instruction element order does not affect cross-hart
+    # ordering, which the FENCE governs).
+    forms = [("unit_store", "vector_store"), ("unit_load", "vector_load"),
+             ("indexed_unordered_load", "vector_load"), ("strided_store", "vector_store")]
+    for variant in ["base", "fence_rw_rw", "fence_w_w_r_rw"]:
+        scalar = solve_generated_case(_scalar_case(variant))
+        for vector, memory_event in forms:
+            vec = solve_generated_case(_vector_mp_case(variant, vector, memory_event))
+            assert vec.allowed == scalar.allowed, f"vector/scalar mismatch for {variant}/{vector}"
+            assert vec.verdict == scalar.verdict, f"vector/scalar mismatch for {variant}/{vector}"
+
 
 

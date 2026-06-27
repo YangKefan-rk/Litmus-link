@@ -58,7 +58,9 @@ def test_fence_i_does_not_order_cmo_data_effect() -> None:
 
 
 def test_fusion_bare_vector_is_ordering_absent() -> None:
-    case = _case(memory_event="vector_load", attribute="cacheable", vector="unit_load")
+    # Use a non-MP skeleton: MP vector cacheable now gets a real cycle verdict,
+    # while LB/SB vector stays an observation that fusion analyses.
+    case = _case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="unit_load")
     result = analyze_fusion(case)
     assert result.verdict == "ordering-absent"
     vec = next(f for f in result.findings if f.feature.startswith("vector"))
@@ -67,8 +69,8 @@ def test_fusion_bare_vector_is_ordering_absent() -> None:
 
 
 def test_fusion_indexed_ordered_vs_unordered_detail_differs() -> None:
-    ordered = analyze_fusion(_case(memory_event="vector_load", attribute="cacheable", vector="indexed_ordered_load"))
-    unordered = analyze_fusion(_case(memory_event="vector_load", attribute="cacheable", vector="indexed_unordered_load"))
+    ordered = analyze_fusion(_case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="indexed_ordered_load"))
+    unordered = analyze_fusion(_case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="indexed_unordered_load"))
     o = next(f for f in ordered.findings if f.feature.startswith("vector"))
     u = next(f for f in unordered.findings if f.feature.startswith("vector"))
     assert "keep program order" in o.detail
