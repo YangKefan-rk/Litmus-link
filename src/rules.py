@@ -19,22 +19,28 @@ VM_PARAMS = {"vm", "shootdown", "pte"}
 
 
 RULE_DESCRIPTIONS: Dict[str, str] = {
-    "pbmt_leaf_only": "PBMT bits are valid only in Sv39/Sv48/Sv57 leaf PTEs; non-leaf PBMT must be zero.",
-    "pbmt_reserved": "PBMT value 3 is reserved and can only be used for negative page-fault cases.",
-    "pbmte_sfence": "Changing PBMTE requires sfence.vma x0,x0 before relying on PBMT interpretation.",
+    "pbmt_leaf_only": "PBMT bits are valid only in Sv39/Sv48/Sv57 leaf PTEs; non-leaf (table) PBMT must be zero or the walk faults (spike mmu.cc:546-547; XiangShan MMUBundle.scala:765).",
+    "pbmt_reserved": "PBMT value 3 is reserved; it page-faults rather than mapping memory (spike mmu.cc:544,662; XiangShan MMUBundle.scala:758-765).",
+    "pbmte_sfence": "PBMT bits are ignored unless menvcfg.PBMTE=1; relying on PBMT after changing PBMTE needs sfence.vma x0,x0 (spike csrs.h:497-506).",
     "alias_sync": "cacheable/NC alias requires fence iorw,iorw; cbo.flush; fence iorw,iorw to prevent loss of coherence/order.",
-    "cbo_offset_zero": "CBO assembly offset must evaluate to zero.",
-    "cbo_envcfg": "CBO execution depends on CBIE/CBCFE/CBZE privilege configuration.",
-    "cbo_zero_non_atomic": "cbo.zero must not be treated as an atomic whole-block store.",
-    "vector_fof_unit_only": "FOF vector loads are unit-stride only, plus legal unit-stride segment FOF loads.",
+    "cbo_offset_zero": "CBO operands use the base register directly with no immediate; the offset is fixed-zero in the encoding (spike cbo_*.h use RS1; MASK_CBO_*=0xfff07fff).",
+    "cbo_envcfg": "CBO execution is gated by menvcfg/senvcfg/henvcfg CBIE/CBCFE/CBZE; a zero field at sub-M privilege traps illegal-instruction (virtual-instruction under V) (spike decode_macros.h:197-205; XiangShan NewCSR.scala:1462-1482).",
+    "cbo_zero_non_atomic": "cbo.zero must not be treated as an atomic whole-block store; the model writes it byte-by-byte (spike mmu.h:306-315).",
+    "vector_fof_unit_only": "Fault-only-first is unit-stride LOAD only (incl. unit-stride segment); strided-FOF, indexed-FOF and FOF stores have no encoding (spike has only vle*ff.h; XiangShan VSplit.scala:156,518; DecodeUnit.scala:1061,1072).",
     "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
     "vector_non_idempotent_fof": "FOF into non-idempotent memory is unsafe unless restart/trimming cannot occur.",
-    "vector_ordering": "Vector memory follows RVWMO at instruction level; only indexed-ordered operations order elements.",
+    "vector_ordering": "Vector memory follows RVWMO per element; ordered-indexed keeps inter-element program order, unordered-indexed does not (spec contract; not modeled locally).",
     "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",
-    "remote_sfence": "sfence.vma affects the local hart; remote shootdown must be explicitly modeled.",
-    "fence_i_local": "fence.i synchronizes only the executing hart's instruction fetch stream.",
+    "remote_sfence": "sfence.vma flushes the local hart only; remote shootdown is a software IPI and must be explicitly modeled (spike mmu.cc:61-64; XiangShan Fence.scala:67-74).",
+    "fence_i_local": "fence.i synchronizes only the executing hart's instruction fetch stream; cross-hart needs a software IPI (spike mmu.cc:46-49; XiangShan Fence.scala:66,77).",
     "rvwmo_scope": "FENCE.I/SFENCE.VMA/PMA/CMO interactions are prose-spec or hardware-observation tests, not herd RVWMO assertions.",
+    "axis_value_domain": "The axis value is not part of the executable Litmus-link generation domain.",
+    "cbo_instruction_domain": "Only real RISC-V CMO instructions (cbo.clean/flush/inval/zero) are emitted; pseudo-CMOs are expressed via params, not fake opcodes.",
+    "vector_instruction_domain": "Vector axis values must be real vector instruction forms, not address-footprint parameters.",
+    "parameter_scope": "A parameter only applies when its owning axis is active (vector params need a vector op; VM params need a TLB axis).",
+    "pma_atomicity": "A/Zalrsc atomic support is PMA-dependent; on this target LR/AMO to an NC/IO/mmio page raises an access fault (XiangShan AtomicsUnit.scala:293-307).",
 }
+
 
 
 def list_rules() -> Dict[str, str]:
@@ -163,6 +169,20 @@ def evaluate(combination: Combination) -> Decision:
             "vector",
         )
 
+    if combination.memory_event == "amo" and combination.attribute in {"pbmt_nc", "pbmt_io"}:
+        return Decision(
+            EXCLUDED_ILLEGAL,
+            "LR/AMO to PBMT=NC/IO is a negative-exception case: RVWMO/A makes atomic support "
+            "PMA-dependent, and on this target (XiangShan/nanhu AtomicsUnit.scala:293-307) an "
+            "LR/AMO to an NC/IO/mmio page raises an access fault because the PMA does not advertise "
+            "atomics. It is therefore not a generable ordering test.",
+            "negative-exception",
+            "negative-exception",
+            requires,
+            ["rule:pma_atomicity"],
+            "exception",
+        )
+
     if combination.attribute == "pbmt_io" and combination.cmo == "no_cmo" and combination.vector == "none" and combination.tlb == "no_tlb":
         return Decision(
             HAND_REQUIRED,
@@ -171,17 +191,6 @@ def evaluate(combination: Combination) -> Decision:
             "platform-specific",
             requires,
             ["rule:rvwmo_scope"],
-            "pbmt_nc",
-        )
-
-    if combination.memory_event == "amo" and combination.attribute == "pbmt_nc":
-        return Decision(
-            HAND_REQUIRED,
-            "AMO on PBMT=NC depends on the platform atomicity PMA and must be hand-classified.",
-            "platform-specific",
-            "platform-specific",
-            requires,
-            ["rule:pma_atomicity"],
             "pbmt_nc",
         )
 

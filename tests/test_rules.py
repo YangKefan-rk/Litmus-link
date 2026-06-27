@@ -1,5 +1,7 @@
 from models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
-from rules import evaluate
+from rules import evaluate, RULE_DESCRIPTIONS
+import re
+from pathlib import Path
 
 
 def test_pbmt_reserved_is_illegal() -> None:
@@ -77,3 +79,28 @@ def test_full_alias_sync_requires_flush() -> None:
     decision = evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="clean", params={"sync": "full_alias_sync"}))
     assert decision.status == EXCLUDED_UNSUPPORTED
     assert "requires cmo=flush" in decision.reason
+
+
+def test_amo_on_nc_is_illegal_access_fault() -> None:
+    # XiangShan/nanhu AtomicsUnit faults LR/AMO to NC/IO/mmio pages; A's atomic
+    # support is PMA-dependent and this target's PMA does not advertise it.
+    decision = evaluate(Combination("test", "amo_mem", "MP", "amo", "pbmt_nc"))
+    assert decision.status == EXCLUDED_ILLEGAL
+    assert decision.hand_category == "exception"
+    assert "rule:pma_atomicity" in decision.notes
+
+
+def test_amo_on_io_is_illegal_access_fault() -> None:
+    decision = evaluate(Combination("test", "amo_mem", "MP", "amo", "pbmt_io"))
+    assert decision.status == EXCLUDED_ILLEGAL
+    assert "access fault" in decision.reason
+
+
+def test_every_referenced_rule_has_a_description() -> None:
+    # Guard against the latent bug where a rule: note has no RULE_DESCRIPTIONS
+    # entry, so list_rules()/the GUI cannot describe it.
+    src = Path("src/rules.py").read_text()
+    referenced = set(re.findall(r'"rule:([a-z_0-9]+)"', src))
+    missing = referenced - set(RULE_DESCRIPTIONS)
+    assert not missing, f"rule keys referenced but undescribed: {sorted(missing)}"
+
