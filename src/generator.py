@@ -66,20 +66,9 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
             counts[decision.status] = counts.get(decision.status, 0) + 1
             if decision.status == GENERATED:
                 for case in render_cases(combination, decision):
-                    solver_result = solve_generated_case(case)
-                    solver_counts[solver_result.status] = solver_counts.get(solver_result.status, 0) + 1
-                    solver_json = solver_result.to_json()
-                    diagram_json = None
-                    if case.case_ir is not None:
-                        diagram_json = render_diagram(case.case_ir, solver_json, out_dir).summary
-                    case = _with_artifacts(case, solver_json, diagram_json)
-                    litmus_path = out_dir / f"{case.name}.litmus"
-                    meta_path = out_dir / f"{case.name}.meta.json"
-                    solver_path = out_dir / f"{case.name}.solver.json"
-                    litmus_path.write_text(case.litmus, encoding="utf-8")
-                    meta_path.write_text(json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-                    solver_path.write_text(json.dumps(solver_result.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-                    generated_names.append(litmus_path.name)
+                    status, fname = write_one_generated_case(case, out_dir)
+                    solver_counts[status] = solver_counts.get(status, 0) + 1
+                    generated_names.append(fname)
                     generated_cases += 1
             else:
                 excluded.write({"combination": combination.to_json(), "decision": decision.to_json()})
@@ -162,6 +151,29 @@ def _with_artifacts(case: GeneratedCase, solver: Dict[str, object], diagram: Dic
     from dataclasses import replace
 
     return replace(case, solver=solver, diagram=diagram)
+
+
+def write_one_generated_case(case: GeneratedCase, out_dir: Path) -> tuple[str, str]:
+    """Solve, draw, and write the .litmus/.meta.json/.solver.json for one case.
+
+    Returns (solver_status, litmus_filename). Shared by the profile/CLI generate
+    loop and the GUI corpus generate path so they stay byte-identical.
+    """
+    solver_result = solve_generated_case(case)
+    solver_json = solver_result.to_json()
+    diagram_json = None
+    if case.case_ir is not None:
+        diagram_json = render_diagram(case.case_ir, solver_json, out_dir).summary
+    case = _with_artifacts(case, solver_json, diagram_json)
+    litmus_path = out_dir / f"{case.name}.litmus"
+    litmus_path.write_text(case.litmus, encoding="utf-8")
+    (out_dir / f"{case.name}.meta.json").write_text(
+        json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (out_dir / f"{case.name}.solver.json").write_text(
+        json.dumps(solver_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return solver_result.status, litmus_path.name
 
 
 def _report(profile: str, total: int, counts: Dict[str, int], source: str | None = None) -> Dict[str, object]:
