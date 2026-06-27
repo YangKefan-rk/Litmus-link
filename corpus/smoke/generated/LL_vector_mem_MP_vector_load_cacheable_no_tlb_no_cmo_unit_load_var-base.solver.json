@@ -1,0 +1,48 @@
+{
+  "allowed": true,
+  "command": [],
+  "cross_check": "herd7_absent",
+  "edges": [
+    {
+      "detail": "No fence or dependency preserves the W->W program-order edge.",
+      "dst": "p0_wy",
+      "kind": "po",
+      "preserved": false,
+      "rule": "no-ppo-rule",
+      "src": "p0_wx"
+    },
+    {
+      "detail": "External communication edge is always part of global order.",
+      "dst": "p1_ry",
+      "kind": "rfe",
+      "preserved": true,
+      "rule": "comm:rfe",
+      "src": "p0_wy"
+    },
+    {
+      "detail": "No fence or dependency preserves the R->R program-order edge.",
+      "dst": "p1_rx",
+      "kind": "po",
+      "preserved": false,
+      "rule": "no-ppo-rule",
+      "src": "p1_ry"
+    },
+    {
+      "detail": "External communication edge is always part of global order.",
+      "dst": "p0_wx",
+      "kind": "fre",
+      "preserved": true,
+      "rule": "comm:fre",
+      "src": "p1_rx"
+    }
+  ],
+  "fusion": null,
+  "model": "rvwmo-native",
+  "observation": "",
+  "raw_output": "",
+  "reason": "Cycle is broken: program-order edge(s) p0_wx->p0_wy, p1_ry->p1_rx are not preserved by RVWMO PPO. (RVV reduces vector memory ordering to per-element RVWMO, and a FENCE orders those element accesses exactly like scalar, so this verdict equals the scalar MP twin; herd7's RISC-V front-end does not parse vector ops, so it is native-only.) (herd7 not on PATH; no cross-check performed.)",
+  "schema": "litmus-link.solver.v1",
+  "status": "verified",
+  "tool": "native",
+  "verdict": "allowed"
+}
