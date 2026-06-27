@@ -1,0 +1,347 @@
+{
+  "axes": {
+    "attribute": "pbmt_nc",
+    "category": "pbmt_nc",
+    "cmo": "no_cmo",
+    "memory_event": "scalar_pair",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "none"
+  },
+  "case_ir": {
+    "combination_name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none",
+    "cycle": "PodWW -> Rfe -> PodRR -> Fre [fence_rw_rw]",
+    "description": "Message passing: reader observes the flag write but may still observe old data unless ordering forbids it.",
+    "display_name": "MP.fence_rw_rw",
+    "exists": "(1:x5=1 /\\ 1:x7=0)",
+    "expected_outcome": "solver_required",
+    "harts": [
+      [
+        {
+          "event_id": "p0_wx",
+          "hart": 0,
+          "instruction": "sw x5,0(x6)",
+          "kind": "store",
+          "location": "x",
+          "register": "",
+          "role": "data-write",
+          "value": "1"
+        },
+        {
+          "event_id": "p0_fence_rw_rw",
+          "hart": 0,
+          "instruction": "fence rw,rw",
+          "kind": "fence",
+          "location": "",
+          "register": "",
+          "role": "writer",
+          "value": ""
+        },
+        {
+          "event_id": "p0_wy",
+          "hart": 0,
+          "instruction": "sw x5,0(x7)",
+          "kind": "store",
+          "location": "y",
+          "register": "",
+          "role": "flag-write",
+          "value": "1"
+        }
+      ],
+      [
+        {
+          "event_id": "p1_ry",
+          "hart": 1,
+          "instruction": "lw x5,0(x6)",
+          "kind": "load",
+          "location": "y",
+          "register": "x5",
+          "role": "flag-read",
+          "value": "1"
+        },
+        {
+          "event_id": "p1_fence_rw_rw",
+          "hart": 1,
+          "instruction": "fence rw,rw",
+          "kind": "fence",
+          "location": "",
+          "register": "",
+          "role": "reader",
+          "value": ""
+        },
+        {
+          "event_id": "p1_rx",
+          "hart": 1,
+          "instruction": "lw x7,0(x8)",
+          "kind": "load",
+          "location": "x",
+          "register": "x7",
+          "role": "data-read",
+          "value": "0"
+        }
+      ]
+    ],
+    "init_lines": [
+      "0:x5=1; 0:x6=x; 0:x7=y;",
+      "1:x6=y; 1:x8=x;"
+    ],
+    "model": "rvwmo",
+    "name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none_var-fence_rw_rw",
+    "relations": [
+      {
+        "dst": "p0_wy",
+        "kind": "po",
+        "label": "PodWW+fence.rw.rw",
+        "local": true,
+        "src": "p0_wx"
+      },
+      {
+        "dst": "p1_ry",
+        "kind": "rfe",
+        "label": "Rfe",
+        "local": false,
+        "src": "p0_wy"
+      },
+      {
+        "dst": "p1_rx",
+        "kind": "po",
+        "label": "PodRR+fence.rw.rw",
+        "local": true,
+        "src": "p1_ry"
+      },
+      {
+        "dst": "p0_wx",
+        "kind": "fre",
+        "label": "Fre",
+        "local": false,
+        "src": "p1_rx"
+      }
+    ],
+    "schema": "litmus-link.case-ir.v1",
+    "skeleton": "MP",
+    "tags": [
+      "scalar",
+      "rvwmo",
+      "MP",
+      "fence_rw_rw"
+    ],
+    "variant": "fence_rw_rw"
+  },
+  "combination": {
+    "attribute": "pbmt_nc",
+    "category": "pbmt_nc",
+    "cmo": "no_cmo",
+    "memory_event": "scalar_pair",
+    "name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none",
+    "params": {},
+    "profile": "smoke",
+    "skeleton": "MP",
+    "tlb": "no_tlb",
+    "vector": "none"
+  },
+  "combination_name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none",
+  "decision": {
+    "expected_kind": "rvwmo-nc",
+    "hand_category": null,
+    "metadata": {
+      "effective_memory_type": "NC main memory, idempotent, RVWMO",
+      "formal_forbidden_claim": "true",
+      "oracle": "rvwmo-nc"
+    },
+    "notes": [],
+    "reason": "Combination is legal in the Litmus-link finite generation domain.",
+    "requires": [
+      "RV64I",
+      "Svpbmt"
+    ],
+    "rvwmo_class": "rvwmo-nc",
+    "status": "generated"
+  },
+  "diagram": {
+    "cycle": "PodWW -> Rfe -> PodRR -> Fre [fence_rw_rw]",
+    "events": [
+      {
+        "event_id": "p0_wx",
+        "hart": 0,
+        "instruction": "sw x5,0(x6)",
+        "kind": "store",
+        "location": "x",
+        "register": "",
+        "role": "data-write",
+        "value": "1"
+      },
+      {
+        "event_id": "p0_fence_rw_rw",
+        "hart": 0,
+        "instruction": "fence rw,rw",
+        "kind": "fence",
+        "location": "",
+        "register": "",
+        "role": "writer",
+        "value": ""
+      },
+      {
+        "event_id": "p0_wy",
+        "hart": 0,
+        "instruction": "sw x5,0(x7)",
+        "kind": "store",
+        "location": "y",
+        "register": "",
+        "role": "flag-write",
+        "value": "1"
+      },
+      {
+        "event_id": "p1_ry",
+        "hart": 1,
+        "instruction": "lw x5,0(x6)",
+        "kind": "load",
+        "location": "y",
+        "register": "x5",
+        "role": "flag-read",
+        "value": "1"
+      },
+      {
+        "event_id": "p1_fence_rw_rw",
+        "hart": 1,
+        "instruction": "fence rw,rw",
+        "kind": "fence",
+        "location": "",
+        "register": "",
+        "role": "reader",
+        "value": ""
+      },
+      {
+        "event_id": "p1_rx",
+        "hart": 1,
+        "instruction": "lw x7,0(x8)",
+        "kind": "load",
+        "location": "x",
+        "register": "x7",
+        "role": "data-read",
+        "value": "0"
+      }
+    ],
+    "exists": "(1:x5=1 /\\ 1:x7=0)",
+    "harts": [
+      "P0",
+      "P1"
+    ],
+    "name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none_var-fence_rw_rw",
+    "png": "corpus/smoke/generated/LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none_var-fence_rw_rw.diagram.png",
+    "relations": [
+      {
+        "dst": "p0_wy",
+        "kind": "po",
+        "label": "PodWW+fence.rw.rw",
+        "local": true,
+        "src": "p0_wx"
+      },
+      {
+        "dst": "p1_ry",
+        "kind": "rfe",
+        "label": "Rfe",
+        "local": false,
+        "src": "p0_wy"
+      },
+      {
+        "dst": "p1_rx",
+        "kind": "po",
+        "label": "PodRR+fence.rw.rw",
+        "local": true,
+        "src": "p1_ry"
+      },
+      {
+        "dst": "p0_wx",
+        "kind": "fre",
+        "label": "Fre",
+        "local": false,
+        "src": "p1_rx"
+      }
+    ],
+    "schema": "litmus-link.diagram.v1",
+    "solver_status": "verified",
+    "verdict": "forbidden"
+  },
+  "expected_kind": "rvwmo-nc",
+  "generated_from": {
+    "category": "pbmt_nc",
+    "profile": "smoke"
+  },
+  "legality_status": "generated",
+  "name": "LL_pbmt_nc_MP_scalar_pair_pbmt_nc_no_tlb_no_cmo_none_var-fence_rw_rw",
+  "requires": [
+    "RV64I",
+    "Svpbmt"
+  ],
+  "rvwmo_class": "rvwmo-nc",
+  "schema": "litmus-link.meta.v1",
+  "solver": {
+    "allowed": false,
+    "command": [],
+    "cross_check": "herd7_absent",
+    "edges": [
+      {
+        "detail": "FENCE 'fence rw,rw' orders W->W.",
+        "dst": "p0_wy",
+        "kind": "po",
+        "preserved": true,
+        "rule": "rvwmo-4",
+        "src": "p0_wx"
+      },
+      {
+        "detail": "External communication edge is always part of global order.",
+        "dst": "p1_ry",
+        "kind": "rfe",
+        "preserved": true,
+        "rule": "comm:rfe",
+        "src": "p0_wy"
+      },
+      {
+        "detail": "FENCE 'fence rw,rw' orders R->R.",
+        "dst": "p1_rx",
+        "kind": "po",
+        "preserved": true,
+        "rule": "rvwmo-4",
+        "src": "p1_ry"
+      },
+      {
+        "detail": "External communication edge is always part of global order.",
+        "dst": "p0_wx",
+        "kind": "fre",
+        "preserved": true,
+        "rule": "comm:fre",
+        "src": "p1_rx"
+      }
+    ],
+    "fusion": null,
+    "model": "rvwmo-native",
+    "observation": "",
+    "raw_output": "",
+    "reason": "Every program-order edge in the cycle is a preserved (ppo) edge, so ppo u comm is cyclic; RVWMO forbids it. (PBMT=NC is non-cacheable main memory and obeys RVWMO per Svpbmt, so this verdict equals the cacheable twin; the plain body lets herd7 cross-check it.) (herd7 not on PATH; no cross-check performed.)",
+    "schema": "litmus-link.solver.v1",
+    "status": "verified",
+    "tool": "native",
+    "verdict": "forbidden"
+  },
+  "test_description": {
+    "features": [
+      {
+        "feature": "skeleton",
+        "test_description": "Message Passing: one hart publishes data then a flag while another observes the flag before reading the data.",
+        "value": "MP"
+      },
+      {
+        "feature": "memory_event",
+        "test_description": "Scalar load/store baseline RVWMO event.",
+        "value": "scalar_pair"
+      },
+      {
+        "feature": "attribute",
+        "test_description": "PBMT=NC idempotent main memory, still treated as RVWMO main memory.",
+        "value": "pbmt_nc"
+      }
+    ],
+    "summary": "MP / pbmt_nc multi-hart litmus coverage point."
+  },
+  "variant": "fence_rw_rw"
+}

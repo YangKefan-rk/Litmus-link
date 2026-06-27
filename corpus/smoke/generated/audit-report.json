@@ -2,15 +2,15 @@
   "excluded_illegal": 0,
   "excluded_unsupported": 0,
   "generated": 8,
-  "generated_litmus": 13,
+  "generated_litmus": 18,
   "hand_required": 0,
   "missing": 0,
   "profile": "smoke",
   "schema": "litmus-link.audit.v1",
   "solver": {
     "conflict": 0,
-    "not_applicable": 7,
-    "verified": 6
+    "not_applicable": 6,
+    "verified": 12
   },
   "total_combinations": 8
 }
