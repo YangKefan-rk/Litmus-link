@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from models import GeneratedCase
@@ -139,17 +135,26 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
             command=command,
         )
 
+    # Native and herd7 disagree. herd7 + riscv.cat is the OFFICIAL RISC-V memory
+    # model; the native checker is a hand-rolled approximation that mis-handles
+    # topologies whose forbiddenness is not captured by "all po edges preserved"
+    # -- e.g. RWC, where the declared closing edge is a cross-address coherence
+    # edge that is NOT a real RVWMO cycle, so native over-forbids. herd7 judges
+    # the actual rendered body, so it is authoritative for the verdict; native's
+    # per-edge reasoning is kept for explanation and the disagreement is surfaced
+    # via cross_check rather than silently picking the (possibly wrong) native one.
     return SolverResult(
-        status="conflict",
-        verdict=native.verdict,
-        allowed=native.allowed,
-        model="rvwmo-native+riscv.cat",
-        tool="native+herd7",
+        status="verified",
+        verdict=herd_parsed["verdict"],
+        allowed=herd_parsed["allowed"],
+        model="riscv.cat+native",
+        tool="herd7(authoritative)+native",
         reason=(
-            f"Native checker says {native.verdict} but herd7 says {herd_parsed['verdict']}. "
-            "Native verdict is reported as primary; investigate the disagreement."
+            f"herd7/riscv.cat (authoritative RISC-V model) says {herd_parsed['verdict']}; "
+            f"the native approximation said {native.verdict} and is overridden. "
+            "Native per-edge reasoning is retained for explanation only."
         ),
-        cross_check="conflict",
+        cross_check="native_disagrees",
         edges=edges,
         observation=herd_parsed.get("observation", ""),
         raw_output=raw,
@@ -157,30 +162,39 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
     )
 
 
-def _run_herd(case: GeneratedCase, herd: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
-    """Run herd7 if available. Returns None when herd7 is not on PATH.
+def _judge_litmus_via_toolchain(litmus_text: str, command_label: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Judge one litmus text with the real herd7 via the toolchain wrapper.
 
-    Otherwise returns (status, parsed, raw_output, command) where status is
-    "ok", "error", or "unparsed".
+    Uses toolchain's explicit binary path + ``-I <libdir>`` so the cross-check
+    works even when herd7 is not on PATH (it is not, in this environment -- the
+    previous ``shutil.which`` lookup silently disabled every scalar cross-check,
+    and the command was also missing ``-I`` so riscv.cat could not be found).
+    Returns None when herd7 is unavailable, else (status, parsed, raw, command)
+    with status "ok" | "error" | "unparsed".
     """
-    herd_path = shutil.which(herd)
-    if herd_path is None:
+    import toolchain
+
+    if not toolchain.HERD.exists() or not toolchain.RISCV_CAT.exists():
         return None
-    with tempfile.TemporaryDirectory(prefix="litmus-link-herd-") as tmp:
-        litmus_path = Path(tmp) / f"{case.name}.litmus"
-        litmus_path.write_text(case.litmus, encoding="utf-8")
-        command = [herd_path, "-model", "riscv.cat", str(litmus_path)]
-        try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=60)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            return "error", {}, str(exc), command
-    raw = (result.stdout or "") + (result.stderr or "")
-    if result.returncode != 0:
-        return "error", {}, raw, command
-    parsed = parse_herd_output(raw)
-    if parsed["allowed"] is None:
-        return "unparsed", parsed, raw, command
-    return "ok", parsed, raw, command
+    command = [str(toolchain.HERD), "-I", str(toolchain.HERDTOOLS_LIB),
+               "-model", str(toolchain.RISCV_CAT), command_label]
+    try:
+        verdict = toolchain.herd_judge(litmus_text)
+    except toolchain.ToolchainError as exc:
+        return "error", {}, str(exc), command
+    if verdict.allowed is None:
+        return "unparsed", {"verdict": "unknown", "allowed": None, "observation": verdict.observation}, verdict.raw, command
+    parsed = {
+        "verdict": "forbidden" if verdict.allowed is False else "allowed",
+        "allowed": verdict.allowed,
+        "observation": verdict.observation,
+    }
+    return "ok", parsed, verdict.raw, command
+
+
+def _run_herd(case: GeneratedCase, herd: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Cross-check a scalar case against the real herd7. None if unavailable."""
+    return _judge_litmus_via_toolchain(case.litmus, f"<{case.name}.litmus>")
 
 
 def _run_herd_lowered(case_ir) -> tuple[str, dict[str, Any], str, list[str]] | None:
