@@ -85,13 +85,18 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
     elif case.decision.expected_kind == "rvwmo-vector":
         reason_base = (
             native.reason
-            + " (RVV reduces vector memory ordering to per-element RVWMO, and a FENCE orders"
-            + " those element accesses exactly like scalar, so this verdict equals the scalar MP"
-            + " twin; herd7's RISC-V front-end does not parse vector ops, so it is native-only.)"
+            + " (RVV reduces vector memory ordering to per-element RVWMO; this case is lowered"
+            + " to its scalar element twin -- which herd7's RISC-V front-end DOES parse -- and"
+            + " judged by the real herd7/riscv.cat, so the verdict is tool-confirmed, not native-only.)"
         )
 
-    # Optional cross-validation against herd7 if it happens to be installed.
-    herd_check = _run_herd(case, herd)
+    # Cross-validation against the real herd7. Vector cases are judged on their
+    # scalar element-lowered twin (herd7 cannot parse RVV directly); scalar cases
+    # run on their own text. Both confirm the native verdict with riscv.cat.
+    if case.decision.expected_kind == "rvwmo-vector" and case_ir is not None:
+        herd_check = _run_herd_lowered(case_ir)
+    else:
+        herd_check = _run_herd(case, herd)
     if herd_check is None:
         return SolverResult(
             status="verified",
@@ -176,6 +181,39 @@ def _run_herd(case: GeneratedCase, herd: str) -> tuple[str, dict[str, Any], str,
     if parsed["allowed"] is None:
         return "unparsed", parsed, raw, command
     return "ok", parsed, raw, command
+
+
+def _run_herd_lowered(case_ir) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Judge a vector case via its scalar element-lowered twin.
+
+    herd7's RISC-V front-end cannot parse RVV instructions, so we lower the
+    vector case to an equivalent per-element scalar RVWMO twin (see
+    vector_lower) and run the real herd7 on THAT. Uses toolchain's explicit
+    binary paths, so it works even when herd7 is not on PATH. Returns the same
+    shape as _run_herd: None when the toolchain is absent, else
+    (status, parsed, raw, command).
+    """
+    import toolchain
+    from vector_lower import lower_vector_to_litmus
+
+    if not toolchain.HERD.exists():
+        return None
+    try:
+        litmus = lower_vector_to_litmus(case_ir)
+        verdict = toolchain.herd_judge(litmus)
+    except toolchain.ToolchainError as exc:
+        return "error", {}, str(exc), []
+    except Exception as exc:  # lowering/parse failure -> no cross-check, not a crash
+        return "error", {}, f"vector lowering failed: {exc}", []
+    command = [str(toolchain.HERD), "-model", str(toolchain.RISCV_CAT), "<lowered-vector-twin>"]
+    if verdict.allowed is None:
+        return "unparsed", {"verdict": "unknown", "allowed": None, "observation": verdict.observation}, verdict.raw, command
+    parsed = {
+        "verdict": "forbidden" if verdict.allowed is False else "allowed",
+        "allowed": verdict.allowed,
+        "observation": verdict.observation,
+    }
+    return "ok", parsed, verdict.raw, command
 
 
 def parse_herd_output(output: str) -> dict[str, Any]:
