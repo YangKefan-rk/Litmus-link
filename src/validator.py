@@ -56,7 +56,8 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     combination = Combination.from_json(meta["combination"])
     decision = evaluate(combination)
-    header = litmus_path.read_text(encoding="utf-8").splitlines()[0].strip()
+    litmus_lines = litmus_path.read_text(encoding="utf-8").splitlines()
+    header = litmus_lines[0].strip() if litmus_lines else ""
     expected_header = f"RISCV {meta.get('name', combination.name)}"
     if header != expected_header:
         errors.append(f"{litmus_path}: expected header {expected_header!r}, got {header!r}")

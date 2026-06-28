@@ -406,9 +406,14 @@ def _solver_badge(solver: dict[str, Any] | None) -> str:
     status = (solver or {}).get("status", "not_applicable")
     verdict = (solver or {}).get("verdict", "unchecked")
     cross = (solver or {}).get("cross_check", "")
+    model = (solver or {}).get("model", "")
     if status == "verified":
         if cross == "agree":
             return f"{verdict} (native+herd7)"
+        if cross == "native_disagrees":
+            return f"{verdict} (herd7; native approx. disagreed)"
+        if cross == "herd7_only" or model == "rvwmo-herd7":
+            return f"{verdict} (herd7)"
         return f"{verdict} (native)"
     if status == "conflict":
         return f"conflict: {verdict}"

@@ -51,8 +51,10 @@ def _base_reg(instruction: str) -> str:
 def _is_vector_mem(event: LitmusEvent) -> bool:
     if event.kind not in ("store", "load"):
         return False
-    mnem = event.instruction.split()[0] if event.instruction else ""
-    return mnem.startswith("v")
+    # A whitespace-only instruction is truthy but splits to [], so guard the
+    # index rather than `split()[0]` (which would IndexError).
+    parts = event.instruction.split() if event.instruction else []
+    return bool(parts) and parts[0].startswith("v")
 
 
 def _broadcast_src(hart: list[LitmusEvent]) -> str:
@@ -126,7 +128,12 @@ def lower_vector_case(case_ir: LitmusCaseIR, n_elems: int = 2) -> LitmusCaseIR:
     expanded to n_elems per-element scalar accesses; vector-only setup (vsetvli,
     vmv.v.x, vid.v) and extract (vmv.x.s) are dropped. Element 0 keeps the
     original event id and the shared location so the cross-hart cycle is intact."""
-    n = max(1, n_elems)
+    # Siblings use address registers x20+ (x{19+i}) and load-dest scratch
+    # x28-x31. Beyond i=8 the address regs collide with the scratch pool (silent
+    # wrong-address corruption) and beyond i=12 they overflow past x31 (herd
+    # rejects x32+). The siblings are only an inert witness set, so clamp to a
+    # safe small bound rather than emit corrupt/unparseable litmus.
+    n = max(1, min(n_elems, 8))
     ordered = any(t in VECTOR_FORM_ORDERED for t in case_ir.tags)
     new_harts: list[list[LitmusEvent]] = []
     extra_init: list[str] = []

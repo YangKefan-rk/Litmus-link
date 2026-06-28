@@ -320,7 +320,9 @@ def _param_value(raw_value: Any, name: str) -> str:
 
 
 def _limit(raw_limit: Any) -> int:
-    if not isinstance(raw_limit, int) or raw_limit <= 0:
+    # bool is a subclass of int, so `limit: true` would otherwise pass and act
+    # as 1, silently capping the corpus to a single combination. Reject it.
+    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit <= 0:
         raise RuleFileError("limit must be a positive integer")
     return raw_limit
 
