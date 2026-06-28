@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, Tuple
 
 from diagram import render_diagram
 from descriptions import feature_description_catalog
-from generator import audit_summary, generate_combinations, generate_profile, write_audit, write_audit_for_combinations
+from generator import audit_summary, generate_combinations, generate_profile, write_audit, write_audit_for_combinations, write_one_generated_case, _coverage_markdown
 from models import Combination, GENERATED
 from profiles import (
     ALIAS_MODES,
@@ -243,7 +243,7 @@ def _corpus_preview_items(combination: Combination, limit: int) -> list:
             _preview_item(
                 combination,
                 _corpus_decision_json(test),
-                test.name,
+                test.unique_id,
                 test.text,
                 ir.to_json(),
                 solver,
@@ -428,6 +428,8 @@ def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if mode == "profile":
         return write_audit(str(payload.get("profile") or "smoke"), out_dir, summary_only=summary_only)
     name, combinations, source = _combinations_from_payload(payload)
+    if source == "gui" and corpus_available():
+        return _gui_corpus_audit(name, list(combinations), out_dir, source, summary_only)
     return write_audit_for_combinations(name, combinations, out_dir, source=source, summary_only=summary_only)
 
 
@@ -437,7 +439,120 @@ def generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if mode == "profile":
         return generate_profile(str(payload.get("profile") or "smoke"), out_dir)
     name, combinations, source = _combinations_from_payload(payload)
+    if source == "gui" and corpus_available():
+        compute_verdicts = bool(payload.get("compute_verdicts", False))
+        limit = payload.get("generate_limit")
+        return _gui_corpus_generate(
+            name, list(combinations), out_dir, source,
+            per_family_limit=int(limit) if limit is not None else None,
+            compute_verdicts=compute_verdicts,
+        )
     return generate_combinations(name, combinations, out_dir, source=source)
+
+
+# __LL_CORPUS_GENERATE__
+
+
+def _corpus_meta(test, verdict_json: Dict[str, Any] | None) -> Dict[str, Any]:
+    return {
+        "schema": "litmus-link.corpus-meta.v1",
+        "name": test.name,
+        "family": test.family,
+        "skeleton": test.skeleton,
+        "cycle": test.cycle,
+        "exists": test.exists,
+        "nprocs": test.nprocs,
+        "source_path": test.path,
+        "model": "rvwmo-herd7",
+        "verdict": verdict_json,
+    }
+
+
+def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdicts, generated_names, solver_counts, seen_names) -> int:
+    written = 0
+    for test in tests_for_skeleton(combination.skeleton, limit=per_family_limit):
+        if test.unique_id in seen_names:
+            continue
+        seen_names.add(test.unique_id)
+        (out_dir / f"{test.unique_id}.litmus").write_text(test.text, encoding="utf-8")
+        verdict_json = None
+        if compute_verdicts:
+            verdict = _safe_corpus_judge(test)
+            verdict_json = _corpus_solver_json(verdict)
+            solver_counts[verdict_json["status"]] = solver_counts.get(verdict_json["status"], 0) + 1
+            render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
+            (out_dir / f"{test.unique_id}.solver.json").write_text(
+                json.dumps(verdict_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        (out_dir / f"{test.unique_id}.meta.json").write_text(
+            json.dumps(_corpus_meta(test, verdict_json), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        generated_names.append(f"{test.unique_id}.litmus")
+        written += 1
+    return written
+
+
+# __LL_CORPUS_GENERATE2__
+
+
+def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=None, compute_verdicts=False) -> Dict[str, Any]:
+    """Generate GUI custom-rule output, serving scalar RVWMO families from the
+    real corpus. .litmus files are written immediately; herd7 verdicts + diagrams
+    are computed only when compute_verdicts is set (default: deferred/on-demand)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    generated_names: list[str] = []
+    solver_counts = {"verified": 0, "conflict": 0, "not_applicable": 0}
+    counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
+    seen_names: set[str] = set()
+    excluded: list[Dict[str, Any]] = []
+    total = 0
+    generated_litmus = 0
+    for combination in combinations:
+        total += 1
+        if _is_scalar_corpus_combination(combination):
+            counts[GENERATED] += 1
+            generated_litmus += _write_corpus_family(
+                combination, out_dir, per_family_limit, compute_verdicts,
+                generated_names, solver_counts, seen_names,
+            )
+            continue
+        decision = evaluate(combination)
+        counts[decision.status] = counts.get(decision.status, 0) + 1
+        if decision.status == GENERATED:
+            for case in render_cases(combination, decision):
+                status, fname = write_one_generated_case(case, out_dir)
+                solver_counts[status] = solver_counts.get(status, 0) + 1
+                generated_names.append(fname)
+                generated_litmus += 1
+        else:
+            excluded.append({"combination": combination.to_json(), "decision": decision.to_json()})
+
+    report = {
+        "schema": "litmus-link.audit.v1",
+        "profile": name,
+        "total_combinations": total,
+        "generated": counts[GENERATED],
+        "generated_litmus": generated_litmus,
+        "excluded_illegal": counts["excluded_illegal"],
+        "excluded_unsupported": counts["excluded_unsupported"],
+        "hand_required": counts["hand_required"],
+        "missing": counts["missing"],
+        "solver": solver_counts,
+        "verdict_mode": "computed" if compute_verdicts else "deferred",
+        "source": source,
+    }
+    (out_dir / "excluded.json").write_text(json.dumps(excluded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
+    (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
+
+
+def _gui_corpus_audit(name, combinations, out_dir, source, summary_only) -> Dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = _gui_corpus_report(name, combinations, source)
+    (out_dir / "cross-coverage.md").write_text(_coverage_markdown(report), encoding="utf-8")
+    (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
 
 
 def _combinations_from_payload(payload: Dict[str, Any]) -> Tuple[str, Iterable[Combination], str | None]:

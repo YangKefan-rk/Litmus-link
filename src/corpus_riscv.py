@@ -13,6 +13,7 @@ Corpus root is configurable via the LITMUS_RISCV_ROOT env var.
 
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -64,12 +65,18 @@ class CorpusTest:
     cycle: str
     nprocs: int
     text: str
+    suite: str = ""       # category dir relative to the corpus root (e.g. "SAFE")
+    uid: str = ""         # suite-qualified unique id; distinguishes same-named tests
+
+    @property
+    def unique_id(self) -> str:
+        return self.uid or self.name
 
 
 _CYCLE_RE = re.compile(r"^Cycle=(.*)$", re.M)
 
 
-def parse_litmus(text: str, path: str = "") -> CorpusTest:
+def parse_litmus(text: str, path: str = "", suite: str = "", uid: str = "") -> CorpusTest:
     """Parse a herdtools .litmus file into a CorpusTest (structure only)."""
     lines = text.splitlines()
     name = ""
@@ -143,15 +150,26 @@ def parse_litmus(text: str, path: str = "") -> CorpusTest:
         cycle=cycle,
         nprocs=len(harts),
         text=text,
+        suite=suite,
+        uid=uid or name,
     )
 
 
 @lru_cache(maxsize=1)
 def _index() -> dict:
-    """Index the corpus once: skeleton -> list of (name, path)."""
+    """Index the corpus once: skeleton -> sorted list of (uid, suite, path).
+
+    Tests are keyed by a suite-qualified unique id, NOT by cycle-name: the same
+    herdtools cycle name (e.g. "MP") appears in several suites (BASIC_2_THREAD,
+    SF_THESIS/BASIC, ...) as GENUINELY DIFFERENT tests (e.g. sw/lw vs sd/ld width
+    variants). Keying by name alone silently dropped 21 of 23 such MP tests on
+    generate and showed duplicates in preview. We keep every distinct file and
+    only suite-qualify the uid where a bare name collides.
+    """
     by_skeleton: dict[str, list[tuple]] = {}
     if not CORPUS_ROOT.exists():
         return by_skeleton
+    raw: dict[str, list[tuple]] = {}  # skeleton -> [(name, suite, path)]
     for dirpath, _dirs, files in os.walk(CORPUS_ROOT):
         for f in files:
             if not f.endswith(".litmus"):
@@ -159,9 +177,19 @@ def _index() -> dict:
             name = f[:-7]
             prefix = re.split(r"[+]", name)[0]
             skel = family_to_skeleton(prefix)
-            by_skeleton.setdefault(skel, []).append((name, os.path.join(dirpath, f)))
-    for skel in by_skeleton:
-        by_skeleton[skel].sort()
+            suite = os.path.relpath(dirpath, CORPUS_ROOT)
+            raw.setdefault(skel, []).append((name, suite, os.path.join(dirpath, f)))
+    for skel, entries in raw.items():
+        name_counts = Counter(name for name, _suite, _path in entries)
+        out: list[tuple] = []
+        for name, suite, path in entries:
+            if name_counts[name] > 1:
+                uid = f"{name}__{suite.replace(os.sep, '_')}"
+            else:
+                uid = name
+            out.append((uid, suite, path))
+        out.sort()
+        by_skeleton[skel] = out
     return by_skeleton
 
 
@@ -179,9 +207,9 @@ def tests_for_skeleton(skeleton: str, limit: int | None = None) -> list[CorpusTe
     if limit is not None:
         entries = entries[:limit]
     out = []
-    for name, path in entries:
+    for uid, suite, path in entries:
         try:
-            out.append(parse_litmus(Path(path).read_text(), path))
+            out.append(parse_litmus(Path(path).read_text(), path, suite=suite, uid=uid))
         except Exception:
             continue
     return out

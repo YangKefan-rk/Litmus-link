@@ -112,11 +112,11 @@ def corpus_to_ir(test: CorpusTest, verdict: HerdVerdict | None = None) -> Litmus
         outcome = "solver_required"
 
     return LitmusCaseIR(
-        name=test.name,
+        name=test.unique_id,
         display_name=test.name,
         combination_name=test.name,
         skeleton=test.skeleton,
-        variant=test.name,
+        variant=test.unique_id,
         cycle=test.cycle,
         init_lines=list(test.init_lines),
         harts=harts,

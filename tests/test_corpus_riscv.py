@@ -57,7 +57,27 @@ def test_corpus_has_full_mp_family() -> None:
 
 
 @pytestmark_corpus
-def test_corpus_herd_verdicts_are_per_outcome() -> None:
+def test_corpus_uids_are_unique_no_tests_lost() -> None:
+    # Regression guard: the same herdtools cycle-name (e.g. "MP") appears in
+    # several suites as GENUINELY DIFFERENT tests (sw/lw vs sd/ld width
+    # variants). Keying by name dropped 21 of 23 such MP tests on generate and
+    # duplicated them in preview. Every distinct file must survive with a
+    # unique id.
+    for skel in ("MP", "SB", "LB"):
+        tests = get_tests_for_skeleton(skel)
+        uids = [t.unique_id for t in tests]
+        assert len(uids) == len(set(uids)), f"{skel}: uid collision -> tests would be lost"
+        # uids stay clean unless a bare name actually collides
+        assert any("__" not in u for u in uids)
+
+
+def test_parse_litmus_threads_suite_and_uid() -> None:
+    text = "RISCV MP\n{\n0:x6=x;\n}\n P0 ;\n sw x5,0(x6) ;\nexists (1:x5=1)\n"
+    t = parse_litmus(text, "p.litmus", suite="SAFE", uid="MP__SAFE")
+    assert t.suite == "SAFE"
+    assert t.unique_id == "MP__SAFE"
+    # uid falls back to name when not supplied
+    assert parse_litmus(text, "p.litmus").unique_id == "MP"
     from toolchain import tools_available
     if not tools_available():
         pytest.skip("herd7 not installed")
