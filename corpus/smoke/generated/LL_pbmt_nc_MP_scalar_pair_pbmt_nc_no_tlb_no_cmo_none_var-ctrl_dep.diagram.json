@@ -34,7 +34,7 @@
     {
       "event_id": "p1_branch",
       "hart": 1,
-      "instruction": "beq x5,x5,1f",
+      "instruction": "beq x5,x5,LC1",
       "kind": "dep",
       "location": "",
       "register": "",
@@ -44,7 +44,7 @@
     {
       "event_id": "p1_label",
       "hart": 1,
-      "instruction": "1:",
+      "instruction": "LC1:",
       "kind": "label",
       "location": "",
       "register": "",

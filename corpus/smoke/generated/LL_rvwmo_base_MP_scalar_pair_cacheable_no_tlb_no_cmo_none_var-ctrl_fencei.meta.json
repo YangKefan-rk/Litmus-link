@@ -52,7 +52,7 @@
         {
           "event_id": "p1_branch",
           "hart": 1,
-          "instruction": "beq x5,x5,1f",
+          "instruction": "beq x5,x5,LC1",
           "kind": "dep",
           "location": "",
           "register": "",
@@ -62,7 +62,7 @@
         {
           "event_id": "p1_label",
           "hart": 1,
-          "instruction": "1:",
+          "instruction": "LC1:",
           "kind": "label",
           "location": "",
           "register": "",
@@ -201,7 +201,7 @@
       {
         "event_id": "p1_branch",
         "hart": 1,
-        "instruction": "beq x5,x5,1f",
+        "instruction": "beq x5,x5,LC1",
         "kind": "dep",
         "location": "",
         "register": "",
@@ -211,7 +211,7 @@
       {
         "event_id": "p1_label",
         "hart": 1,
-        "instruction": "1:",
+        "instruction": "LC1:",
         "kind": "label",
         "location": "",
         "register": "",
@@ -294,8 +294,15 @@
   "schema": "litmus-link.meta.v1",
   "solver": {
     "allowed": true,
-    "command": [],
-    "cross_check": "herd7_absent",
+    "command": [
+      "/nfs/home/yangkefan/Nanhu-V5.1/herdtools7/_build/install/default/bin/herd7",
+      "-I",
+      "/nfs/home/yangkefan/Nanhu-V5.1/herdtools7/herd/libdir",
+      "-model",
+      "/nfs/home/yangkefan/Nanhu-V5.1/herdtools7/herd/libdir/riscv.cat",
+      "<LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei.litmus>"
+    ],
+    "cross_check": "agree",
     "edges": [
       {
         "detail": "No fence or dependency preserves the W->W program-order edge.",
@@ -306,7 +313,7 @@
         "src": "p0_wx"
       },
       {
-        "detail": "External communication edge is always part of global order.",
+        "detail": "External communication edge is part of global order.",
         "dst": "p1_ry",
         "kind": "rfe",
         "preserved": true,
@@ -322,7 +329,7 @@
         "src": "p1_ry"
       },
       {
-        "detail": "External communication edge is always part of global order.",
+        "detail": "External communication edge is part of global order.",
         "dst": "p0_wx",
         "kind": "fre",
         "preserved": true,
@@ -331,13 +338,13 @@
       }
     ],
     "fusion": null,
-    "model": "rvwmo-native",
-    "observation": "",
-    "raw_output": "",
-    "reason": "Cycle is broken: program-order edge(s) p0_wx->p0_wy, p1_ry->p1_rx are not preserved by RVWMO PPO. (herd7 not on PATH; no cross-check performed.)",
+    "model": "rvwmo-native+riscv.cat",
+    "observation": "Sometimes",
+    "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei Sometimes 1 3\nTime LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_fencei 0.00\nHash=d2dc2d1baaad3f2fb7d5ce84dd01c8f8\n\n",
+    "reason": "Cycle is broken: edge(s) p0_wx->p0_wy, p1_ry->p1_rx are not preserved (ppo / per-location comm). Confirmed by herd7/riscv.cat.",
     "schema": "litmus-link.solver.v1",
     "status": "verified",
-    "tool": "native",
+    "tool": "native+herd7",
     "verdict": "allowed"
   },
   "test_description": {

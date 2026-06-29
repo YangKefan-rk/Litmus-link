@@ -9,8 +9,8 @@ RISCV LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-ctrl_dep
 }
  P0               | P1              ;
  sw x5,0(x6)      | lw x5,0(x6)     ;
- sw x5,0(x7)      | beq x5,x5,1f    ;
-                  | 1:              ;
+ sw x5,0(x7)      | beq x5,x5,LC1   ;
+                  | LC1:            ;
                   | lw x7,0(x8)     ;
 exists
 (1:x5=1 /\ 1:x7=0)

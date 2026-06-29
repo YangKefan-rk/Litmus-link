@@ -1,7 +1,12 @@
 {
   "allowed": false,
-  "command": [],
-  "cross_check": "herd7_absent",
+  "command": [
+    "/nfs/home/yangkefan/Nanhu-V5.1/herdtools7/_build/install/default/bin/herd7",
+    "-model",
+    "/nfs/home/yangkefan/Nanhu-V5.1/herdtools7/herd/libdir/riscv.cat",
+    "<lowered-vector-twin>"
+  ],
+  "cross_check": "agree",
   "edges": [
     {
       "detail": "FENCE 'fence rw,rw' orders W->W.",
@@ -12,7 +17,7 @@
       "src": "p0_wx"
     },
     {
-      "detail": "External communication edge is always part of global order.",
+      "detail": "External communication edge is part of global order.",
       "dst": "p1_ry",
       "kind": "rfe",
       "preserved": true,
@@ -28,7 +33,7 @@
       "src": "p1_ry"
     },
     {
-      "detail": "External communication edge is always part of global order.",
+      "detail": "External communication edge is part of global order.",
       "dst": "p0_wx",
       "kind": "fre",
       "preserved": true,
@@ -37,12 +42,12 @@
     }
   ],
   "fusion": null,
-  "model": "rvwmo-native",
-  "observation": "",
-  "raw_output": "",
-  "reason": "Every program-order edge in the cycle is a preserved (ppo) edge, so ppo u comm is cyclic; RVWMO forbids it. (RVV reduces vector memory ordering to per-element RVWMO, and a FENCE orders those element accesses exactly like scalar, so this verdict equals the scalar MP twin; herd7's RISC-V front-end does not parse vector ops, so it is native-only.) (herd7 not on PATH; no cross-check performed.)",
+  "model": "rvwmo-native+riscv.cat",
+  "observation": "Never",
+  "raw_output": "Test LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-fence_rw_rw__lowered Allowed\nStates 3\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=1;\nNo\nWitnesses\nPositive: 0 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-fence_rw_rw__lowered Never 0 3\nTime LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-fence_rw_rw__lowered 0.01\nHash=5db777b3c79f230d512d81e871d33ef6\n\n",
+  "reason": "Every program-order edge in the cycle is a preserved (ppo) edge, so ppo u comm is cyclic; RVWMO forbids it. (RVV reduces vector memory ordering to per-element RVWMO; this case is lowered to its scalar element twin -- which herd7's RISC-V front-end DOES parse -- and judged by the real herd7/riscv.cat, so the verdict is tool-confirmed, not native-only.) Confirmed by herd7/riscv.cat.",
   "schema": "litmus-link.solver.v1",
   "status": "verified",
-  "tool": "native",
+  "tool": "native+herd7",
   "verdict": "forbidden"
 }
