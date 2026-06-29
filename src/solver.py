@@ -162,6 +162,37 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
     )
 
 
+_HERD_BODY_CACHE: dict[str, Any] = {}
+
+
+def _semantic_body(litmus_text: str) -> str:
+    """The init+threads+exists block (from the first '{') fully determines
+    herd7's verdict; the `RISCV <name>` header, cycle-label string and comment
+    lines before it do not. Keying the herd cache on this lets the many
+    stress-profile cases that render byte-identical bodies under different names
+    share a single herd7 invocation."""
+    idx = litmus_text.find("{")
+    return litmus_text[idx:] if idx != -1 else litmus_text
+
+
+def _herd_judge_cached(litmus_text: str):
+    """herd_judge memoised on the semantic body. Sound because the verdict is a
+    pure function of the body; herd is still run on the FULL text on a miss (it
+    needs the `RISCV <name>` header to parse). Note: a cache hit reuses the
+    first body's raw output, so raw_output's echoed test-name may differ from
+    the current case -- cosmetic only, the verdict/observation are identical."""
+    import toolchain
+
+    body = _semantic_body(litmus_text)
+    cached = _HERD_BODY_CACHE.get(body)
+    if cached is not None:
+        return cached
+    verdict = toolchain.herd_judge(litmus_text)
+    if len(_HERD_BODY_CACHE) < 50000:  # soft cap for long-lived server processes
+        _HERD_BODY_CACHE[body] = verdict
+    return verdict
+
+
 def _judge_litmus_via_toolchain(litmus_text: str, command_label: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
     """Judge one litmus text with the real herd7 via the toolchain wrapper.
 
@@ -179,7 +210,7 @@ def _judge_litmus_via_toolchain(litmus_text: str, command_label: str) -> tuple[s
     command = [str(toolchain.HERD), "-I", str(toolchain.HERDTOOLS_LIB),
                "-model", str(toolchain.RISCV_CAT), command_label]
     try:
-        verdict = toolchain.herd_judge(litmus_text)
+        verdict = _herd_judge_cached(litmus_text)
     except toolchain.ToolchainError as exc:
         return "error", {}, str(exc), command
     if verdict.allowed is None:
@@ -214,7 +245,7 @@ def _run_herd_lowered(case_ir) -> tuple[str, dict[str, Any], str, list[str]] | N
         return None
     try:
         litmus = lower_vector_to_litmus(case_ir)
-        verdict = toolchain.herd_judge(litmus)
+        verdict = _herd_judge_cached(litmus)
     except toolchain.ToolchainError as exc:
         return "error", {}, str(exc), []
     except Exception as exc:  # lowering/parse failure -> no cross-check, not a crash
