@@ -166,9 +166,17 @@ def _parse_herd(raw: str) -> HerdVerdict:
     negative = int(obs.group(4))
     # Never  -> the exists outcome is forbidden (0 positive witnesses)
     # Sometimes / Always -> observable (>=1 positive witness)
+    # Defensive consistency check: the Observation word and the witness counts
+    # must agree (Never <=> positive==0). herd is self-consistent in practice,
+    # but if they ever contradict, return unknown rather than trust one half --
+    # a missing verdict is safer than a wrong one for a verification tool.
     if observation == "Never":
+        if positive != 0:
+            return HerdVerdict("unknown", None, observation, positive, negative, states_n, cond_s, raw)
         outcome, allowed = "forbidden", False
     else:
+        if positive == 0:
+            return HerdVerdict("unknown", None, observation, positive, negative, states_n, cond_s, raw)
         outcome, allowed = "observable", True
     return HerdVerdict(outcome, allowed, observation, positive, negative, states_n, cond_s, raw)
 

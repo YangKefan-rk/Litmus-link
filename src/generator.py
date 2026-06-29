@@ -59,6 +59,8 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
     generated_cases = 0
     solver_counts = _empty_solver_counts()
 
+    seen_names: set[str] = set()
+    collisions = 0
     with _JsonArrayWriter(out_dir / "excluded.json") as excluded:
         for combination in combinations:
             total += 1
@@ -66,6 +68,18 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
             counts[decision.status] = counts.get(decision.status, 0) + 1
             if decision.status == GENERATED:
                 for case in render_cases(combination, decision):
+                    # Two distinct combinations whose params sanitise to the same
+                    # token collapse to one filename; writing both would silently
+                    # overwrite the first case's .litmus/.meta.json/.solver.json
+                    # with the second's body, corrupting the verdict<->body
+                    # correspondence while @all still lists both. Skip + record
+                    # the collision rather than lose a test silently. (rule_file
+                    # ._reject_duplicates guards its own path; this protects every
+                    # other caller of generate_combinations.)
+                    if case.name in seen_names:
+                        collisions += 1
+                        continue
+                    seen_names.add(case.name)
                     status, fname = write_one_generated_case(case, out_dir)
                     solver_counts[status] = solver_counts.get(status, 0) + 1
                     generated_names.append(fname)
@@ -76,6 +90,8 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
     report = _report(profile, total, counts, source)
     report["generated_litmus"] = generated_cases
     report["solver"] = solver_counts
+    if collisions:
+        report["name_collisions_skipped"] = collisions
 
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

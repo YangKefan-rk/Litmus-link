@@ -104,8 +104,18 @@ def _fonts() -> dict[str, ImageFont.FreeTypeFont]:
         "body": _font(18),
         "small": _font(15),
         "small_b": _font(15, True),
-        "mono": ImageFont.truetype(str(FONT_MONO), 15),
+        "mono": _mono_font(15),
     }
+
+
+def _mono_font(size: int) -> ImageFont.FreeTypeFont:
+    # FONT_MONO was loaded directly with no fallback, so a host lacking that
+    # exact file crashed EVERY render_diagram call (preview + generate). Fall
+    # back like _font does; a proportional font as last resort never crashes.
+    for path in (FONT_MONO, Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")):
+        if path.exists():
+            return ImageFont.truetype(str(path), size)
+    return _font(size)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -129,7 +139,11 @@ def _draw_harts(
     case_ir: LitmusCaseIR,
 ) -> tuple[dict[str, tuple[int, int, int, int]], list[tuple[int, int]]]:
     hart_count = max(len(case_ir.harts), 1)
-    col_width = int((PANEL_RIGHT - PANEL_LEFT - PANEL_GAP * (hart_count - 1)) / hart_count)
+    # Clamp to >=1: at ~25+ harts the computed width goes <=0, making x1<x0 and
+    # crashing PIL ("x1 must be >= x0"). Real litmus rarely exceeds a handful of
+    # threads, but a crafted/corrupt IR should degrade (overlapping columns),
+    # not crash the renderer.
+    col_width = max(1, int((PANEL_RIGHT - PANEL_LEFT - PANEL_GAP * (hart_count - 1)) / hart_count))
     box_h = 64
     content_top = PANEL_TOP + 58
     content_bottom = PANEL_BOTTOM - 24

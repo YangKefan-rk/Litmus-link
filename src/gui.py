@@ -235,21 +235,30 @@ def _corpus_decision_json(test) -> Dict[str, Any]:
 def _corpus_preview_items(combination: Combination, limit: int) -> list:
     items = []
     for test in tests_for_skeleton(combination.skeleton, limit=limit):
-        verdict = _safe_corpus_judge(test)
-        ir = corpus_to_ir(test, verdict)
-        solver = _corpus_solver_json(verdict)
-        diagram = render_diagram(ir, solver, _DIAGRAM_DIR).summary
-        items.append(
-            _preview_item(
-                combination,
-                _corpus_decision_json(test),
-                test.unique_id,
-                test.text,
-                ir.to_json(),
-                solver,
-                diagram,
+        # One malformed corpus sample (parse/IR/diagram/PIL error) must not
+        # take down the whole preview list. do_POST only catches
+        # ValueError/RuleFileError/FileNotFoundError, so anything else here
+        # would 500 the request and lose every other valid sample. Degrade the
+        # single bad row instead.
+        try:
+            verdict = _safe_corpus_judge(test)
+            ir = corpus_to_ir(test, verdict)
+            solver = _corpus_solver_json(verdict)
+            diagram = render_diagram(ir, solver, _DIAGRAM_DIR).summary
+            items.append(
+                _preview_item(
+                    combination,
+                    _corpus_decision_json(test),
+                    test.unique_id,
+                    test.text,
+                    ir.to_json(),
+                    solver,
+                    diagram,
+                )
             )
-        )
+        except Exception:
+            # Skip just this malformed sample; keep every other valid one.
+            continue
     return items
 
 
