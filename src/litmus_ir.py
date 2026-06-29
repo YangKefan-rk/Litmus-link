@@ -267,7 +267,7 @@ def _scalar_case(combination: Combination, variant: str, expanded: bool) -> Litm
         "IRIW": _iriw_case,
     }.get(combination.skeleton, _generic_scalar_case)
     name = _case_name(combination, variant, expanded)
-    return builder(combination, variant, name)
+    return builder(combination, _effective_ordering_variant(variant), name)
 
 
 def _case_name(combination: Combination, variant: str, expanded: bool) -> str:
@@ -284,6 +284,22 @@ def _sanitize_variant(value: str) -> str:
         else:
             chars.append("_")
     return "".join(chars).strip("_") or "base"
+
+
+# Stress profiles pack the ordering mechanism into a `dep-<shape>` token inside a
+# composite variant id (e.g. "dep-addr_width-w32_outcome-forbidden_stress-none").
+# Map the renderable shapes onto the scalar ordering renderers so the body honours
+# what the file name claims. none/data/aq/rl/aqrl have no scalar lowering yet and
+# render as the bare (base) body; width/outcome/stress are cross-product axis
+# labels that never affect the body (they stay in the file name for cell identity).
+_DEP_TO_VARIANT = {"addr": "addr_dep", "ctrl": "ctrl_dep", "ctrl_fence": "ctrl_fencei"}
+
+
+def _effective_ordering_variant(variant: str) -> str:
+    match = re.match(r"dep-(.+?)(?:_width-|_outcome-|_stress-|$)", variant)
+    if not match:
+        return variant
+    return _DEP_TO_VARIANT.get(match.group(1), "base")
 
 
 def _ordering_events(hart: int, variant: str, prefix: str, role: str) -> list[LitmusEvent]:
@@ -360,9 +376,12 @@ def _case(
 
 
 def _expected_outcome(combination: Combination) -> str:
-    requested = str(combination.params.get("outcome", "solver_required"))
-    if requested in {"allowed", "forbidden", "mixed_size"}:
-        return requested
+    # The `outcome` param (allowed/forbidden/mixed_size) is a stress cross-product
+    # axis LABEL, not a verified fact: the body is built from skeleton + dep only,
+    # so a requested "forbidden" routinely renders a body the authoritative solver
+    # judges "allowed" -- baking it in produced metadata that contradicted the
+    # verdict. The solver is the source of truth, so always defer to it. (The
+    # requested label is preserved in the file name / GUI prose for cell identity.)
     return "solver_required"
 
 
