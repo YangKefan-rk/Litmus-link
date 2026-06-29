@@ -299,13 +299,13 @@ def _ordering_events(hart: int, variant: str, prefix: str, role: str) -> list[Li
         ]
     if role == "reader" and variant == "ctrl_dep":
         return [
-            _event(f"{prefix}_branch", hart, "dep", "beq x5,x5,1f", role="ctrl-dep"),
-            _event(f"{prefix}_label", hart, "label", "1:", role="ctrl-dep"),
+            _event(f"{prefix}_branch", hart, "dep", f"beq x5,x5,LC{hart}", role="ctrl-dep"),
+            _event(f"{prefix}_label", hart, "label", f"LC{hart}:", role="ctrl-dep"),
         ]
     if role == "reader" and variant == "ctrl_fencei":
         return [
-            _event(f"{prefix}_branch", hart, "dep", "beq x5,x5,1f", role="ctrl-dep"),
-            _event(f"{prefix}_label", hart, "label", "1:", role="ctrl-dep"),
+            _event(f"{prefix}_branch", hart, "dep", f"beq x5,x5,LC{hart}", role="ctrl-dep"),
+            _event(f"{prefix}_label", hart, "label", f"LC{hart}:", role="ctrl-dep"),
             _event(f"{prefix}_fencei", hart, "fence", "fence.i", role="ctrl-fencei"),
         ]
     return []
@@ -397,12 +397,12 @@ def _mp_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
 
 def _lb_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
     p0 = [
-        _event("p0_rx", 0, "load", "lw x5,0(x6)", "x", register="x5", value="0"),
+        _event("p0_rx", 0, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
         *_ordering_events(0, variant, "p0", "reader"),
         _event("p0_wy", 0, "store", "sw x9,0(x7)", "y", value="1"),
     ]
     p1 = [
-        _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="0"),
+        _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1"),
         *_ordering_events(1, variant, "p1", "reader"),
         _event("p1_wx", 1, "store", "sw x9,0(x7)", "x", value="1"),
     ]
@@ -410,17 +410,17 @@ def _lb_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
         combination,
         name,
         variant,
-        _cycle_label("PodRW -> Fre -> PodRW -> Fre", variant),
+        _cycle_label("PodRW -> Rfe -> PodRW -> Rfe", variant),
         ["0:x6=x; 0:x7=y; 0:x9=1;", "1:x6=y; 1:x7=x; 1:x9=1;"],
         [p0, p1],
         [
             _relation("p0_rx", "p0_wy", "po", _variant_po_label("PodRW", variant), True),
-            _relation("p0_wy", "p1_ry", "fre", "Fre"),
+            _relation("p0_wy", "p1_ry", "rfe", "Rfe"),
             _relation("p1_ry", "p1_wx", "po", _variant_po_label("PodRW", variant), True),
-            _relation("p1_wx", "p0_rx", "fre", "Fre"),
+            _relation("p1_wx", "p0_rx", "rfe", "Rfe"),
         ],
-        "(0:x5=0 /\\ 1:x5=0)",
-        "Load buffering: both harts read before publishing their writes.",
+        "(0:x5=1 /\\ 1:x5=1)",
+        "Load buffering: each hart's load reads the other's later store (rf+po cycle); RVWMO allows it unless load->store is ordered.",
     )
 
 

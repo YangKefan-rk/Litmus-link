@@ -108,26 +108,38 @@ def check_rvwmo(case_ir: LitmusCaseIR) -> RvwmoResult:
             preserved, rule, detail = _ppo_preserved(case_ir, events, relation.src, relation.dst)
             judgements.append(EdgeJudgement(relation.src, relation.dst, "po", preserved, rule, detail))
         else:
-            judgements.append(
-                EdgeJudgement(
-                    relation.src,
-                    relation.dst,
-                    relation.kind,
-                    True,
-                    f"comm:{relation.kind}",
-                    "External communication edge is always part of global order.",
+            # rf/co/fr are PER-LOCATION relations. A communication edge between
+            # two DIFFERENT addresses cannot exist (e.g. RWC's declared co
+            # Wy->Wx spans y and x), so it does NOT close the cycle. Trusting it
+            # blindly is what made the native checker over-forbid RWC, which
+            # RVWMO actually allows. Treat a cross-address comm edge as broken.
+            a = events.get(relation.src)
+            b = events.get(relation.dst)
+            same_loc = (
+                a is not None and b is not None
+                and a.location is not None and a.location == b.location
+            )
+            detail = (
+                "External communication edge is part of global order."
+                if same_loc
+                else (
+                    f"Cross-address {relation.kind} edge "
+                    f"({a.location if a else '?'} vs {b.location if b else '?'}) is not a real "
+                    "per-location relation; it cannot close the cycle."
                 )
             )
+            judgements.append(
+                EdgeJudgement(relation.src, relation.dst, relation.kind, same_loc, f"comm:{relation.kind}", detail)
+            )
 
-    po_edges = [j for j in judgements if j.kind == "po"]
-    broken = [j for j in po_edges if not j.preserved]
+    broken = [j for j in judgements if not j.preserved]
     if broken:
         names = ", ".join(f"{j.src}->{j.dst}" for j in broken)
         return RvwmoResult(
             status="verified",
             verdict="allowed",
             allowed=True,
-            reason=f"Cycle is broken: program-order edge(s) {names} are not preserved by RVWMO PPO.",
+            reason=f"Cycle is broken: edge(s) {names} are not preserved (ppo / per-location comm).",
             edges=judgements,
         )
     return RvwmoResult(

@@ -14,25 +14,32 @@ BUILDERS = {
 
 # Expected RVWMO verdict per (skeleton, variant): True == forbidden (bad
 # outcome cannot occur), False == allowed. Derived from the PPO rules and
-# cross-checked against the standard RVWMO results for these shapes.
+# cross-checked cell-by-cell against the real herd7 + riscv.cat on the rendered
+# litmus bodies (all 36 cells agree).
 #
 # Key reasoning:
 #  - base: no ordering anywhere -> cycle broken -> allowed everywhere.
-#  - fence_rw_rw: full fence on every ordered hart -> forbidden everywhere.
+#  - fence_rw_rw: full fence on every ordered hart -> forbidden, EXCEPT RWC.
 #  - fence_w_w_r_rw: writers get "fence w,w" (orders W->W only), readers get
-#    "fence r,rw" (orders R->anything). So it forbids MP/LB/WRC/RWC/IRIW but
-#    NOT SB, whose writer edges are W->R (R not in the w,w successor set).
+#    "fence r,rw" (orders R->anything). So it forbids MP/LB/WRC/IRIW but NOT SB,
+#    whose writer edges are W->R (R not in the w,w successor set).
 #  - addr_dep / ctrl_dep / ctrl_fencei only ever decorate *reader* harts.
 #      addr_dep  -> rule 9: orders load->{load,store}
 #      ctrl_dep  -> rule 11: orders load->store ONLY
 #      ctrl_fencei == ctrl_dep (fence.i has no data-ordering power in RVWMO)
+#  - RWC: allowed for EVERY variant. Its declared closing edge is a coherence
+#    edge between writes to DIFFERENT addresses (co Wy->Wx). rf/co/fr are
+#    per-location relations, so that edge cannot exist and the cycle never
+#    closes -- no amount of intra-hart ordering can forbid it. (RWC is the
+#    classic test that distinguishes multi-copy-atomic models; RVWMO, being
+#    non-MCA, allows it.) herd7 confirms allowed for all six variants.
 EXPECTED = {
-    "MP":   {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": True,  "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
-    "LB":   {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": True,  "ctrl_fencei": True},
-    "SB":   {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
-    "WRC":  {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
-    "RWC":  {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
-    "IRIW": {"base": False, "fence_rw_rw": True, "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
+    "MP":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "LB":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": True,  "ctrl_fencei": True},
+    "SB":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "WRC":  {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
+    "RWC":  {"base": False, "fence_rw_rw": False, "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "IRIW": {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
 }
 
 VARIANTS = ["base", "fence_rw_rw", "fence_w_w_r_rw", "addr_dep", "ctrl_dep", "ctrl_fencei"]
