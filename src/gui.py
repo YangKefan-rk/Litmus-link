@@ -449,7 +449,7 @@ def generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         return generate_profile(str(payload.get("profile") or "smoke"), out_dir)
     name, combinations, source = _combinations_from_payload(payload)
     if source == "gui" and corpus_available():
-        compute_verdicts = bool(payload.get("compute_verdicts", False))
+        compute_verdicts = bool(payload.get("compute_verdicts", True))
         limit = payload.get("generate_limit")
         return _gui_corpus_generate(
             name, list(combinations), out_dir, source,
@@ -477,7 +477,7 @@ def _corpus_meta(test, verdict_json: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
-def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdicts, generated_names, solver_counts, seen_names) -> int:
+def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdicts, generated_names, solver_counts, seen_names, errors) -> int:
     written = 0
     for test in tests_for_skeleton(combination.skeleton, limit=per_family_limit):
         if test.unique_id in seen_names:
@@ -486,13 +486,16 @@ def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdict
         (out_dir / f"{test.unique_id}.litmus").write_text(test.text, encoding="utf-8")
         verdict_json = None
         if compute_verdicts:
-            verdict = _safe_corpus_judge(test)
-            verdict_json = _corpus_solver_json(verdict)
-            solver_counts[verdict_json["status"]] = solver_counts.get(verdict_json["status"], 0) + 1
-            render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
-            (out_dir / f"{test.unique_id}.solver.json").write_text(
-                json.dumps(verdict_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+            try:
+                verdict = _safe_corpus_judge(test)
+                verdict_json = _corpus_solver_json(verdict)
+                solver_counts[verdict_json["status"]] = solver_counts.get(verdict_json["status"], 0) + 1
+                render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
+                (out_dir / f"{test.unique_id}.solver.json").write_text(
+                    json.dumps(verdict_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+            except Exception as exc:
+                errors.append({"case": test.unique_id, "path": test.path, "error": str(exc)})
         (out_dir / f"{test.unique_id}.meta.json").write_text(
             json.dumps(_corpus_meta(test, verdict_json), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -514,6 +517,7 @@ def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=N
     counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
     seen_names: set[str] = set()
     excluded: list[Dict[str, Any]] = []
+    errors: list[Dict[str, Any]] = []
     total = 0
     generated_litmus = 0
     for combination in combinations:
@@ -522,7 +526,7 @@ def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=N
             counts[GENERATED] += 1
             generated_litmus += _write_corpus_family(
                 combination, out_dir, per_family_limit, compute_verdicts,
-                generated_names, solver_counts, seen_names,
+                generated_names, solver_counts, seen_names, errors,
             )
             continue
         decision = evaluate(combination)
@@ -548,9 +552,12 @@ def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=N
         "missing": counts["missing"],
         "solver": solver_counts,
         "verdict_mode": "computed" if compute_verdicts else "deferred",
+        "generation_errors": len(errors),
         "source": source,
     }
     (out_dir / "excluded.json").write_text(json.dumps(excluded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if errors:
+        (out_dir / "generation-errors.json").write_text(json.dumps(errors, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report

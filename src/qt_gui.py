@@ -474,6 +474,10 @@ class _LitmusLinkQtWindow:
         self.summary_only = QtWidgets.QCheckBox("Summary-only audit")
         self.summary_only.setChecked(True)
         controls.addWidget(self.summary_only)
+        self.defer_solver_diagram = QtWidgets.QCheckBox("Defer solver/diagram")
+        self.defer_solver_diagram.setToolTip("Advanced: skip herd7 verdicts and PNG diagrams for large real-corpus generation.")
+        self.defer_solver_diagram.setChecked(False)
+        controls.addWidget(self.defer_solver_diagram)
         self.output_hint = QtWidgets.QLabel("Output: out/qt-profile")
         self.output_hint.setObjectName("OutputHint")
         controls.addWidget(self.output_hint, 1)
@@ -609,6 +613,7 @@ class _LitmusLinkQtWindow:
             "out": self.rule_out.text() or "out/qt-custom",
             "summary_only": self.summary_only.isChecked(),
             "sample_limit": sample_limit,
+            "compute_verdicts": not self.defer_solver_diagram.isChecked(),
         }
 
     def _preview_sample_limit(self) -> int:
@@ -785,16 +790,24 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     )
     if label == "Generate Files":
         out_path = Path(out_dir)
+        solver = result.get("solver") if isinstance(result.get("solver"), dict) else {}
+        solver_files = sum(int(solver.get(key, 0)) for key in ["verified", "conflict", "not_applicable"])
+        generation_errors = int(result.get("generation_errors", 0) or 0)
         lines.extend(
             [
                 "",
                 "Generated artifacts:",
-                f"  litmus files: {result.get('generated', 0)}",
+                f"  generated combinations: {result.get('generated', 0)}",
+                f"  litmus files: {result.get('generated_litmus', result.get('generated', 0))}",
+                f"  solver results: {solver_files}",
+                f"  verdict mode: {result.get('verdict_mode', 'computed')}",
                 f"  @all: {out_path / '@all'}",
                 f"  audit report: {out_path / 'audit-report.json'}",
                 f"  excluded cases: {out_path / 'excluded.json'}",
             ]
         )
+        if generation_errors:
+            lines.append(f"  generation errors: {out_path / 'generation-errors.json'} ({generation_errors})")
     elif label == "Run Audit":
         out_path = Path(out_dir)
         lines.extend(

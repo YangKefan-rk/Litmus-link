@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 from cli import main
-from gui import options_payload, preview_payload
+from gui import generate_payload, options_payload, preview_payload
 from qt_gui import _summary_text, qt_binding_status
 
 
@@ -77,17 +77,42 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
             "profile": "qt-custom",
             "total_combinations": 4,
             "generated": 3,
+            "generated_litmus": 7,
             "excluded_illegal": 1,
             "excluded_unsupported": 0,
             "hand_required": 0,
             "missing": 0,
+            "solver": {"verified": 5, "conflict": 0, "not_applicable": 2},
         },
         "out/qt-custom",
     )
     assert "Generate Files complete" in summary
-    assert "litmus files: 3" in summary
+    assert "generated combinations: 3" in summary
+    assert "litmus files: 7" in summary
+    assert "solver results: 7" in summary
     assert "out/qt-custom/@all" in summary
     assert "out/qt-custom/audit-report.json" in summary
+
+
+def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Path) -> None:
+    from corpus_riscv import corpus_available
+
+    if not corpus_available():
+        return
+    out = tmp_path / "gui-mp"
+    report = generate_payload(
+        {
+            "mode": "rule",
+            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
+            "out": str(out),
+            "generate_limit": 2,
+        }
+    )
+    assert report["verdict_mode"] == "computed"
+    assert report["generated_litmus"] == 2
+    assert len(list(out.glob("*.litmus"))) == 2
+    assert len(list(out.glob("*.solver.json"))) == 2
+    assert len(list(out.glob("*.diagram.png"))) == 2
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
