@@ -450,10 +450,11 @@ def generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     name, combinations, source = _combinations_from_payload(payload)
     if source == "gui" and corpus_available():
         compute_verdicts = bool(payload.get("compute_verdicts", True))
-        limit = payload.get("generate_limit")
+        rule = payload.get("rule") if isinstance(payload.get("rule"), dict) else {}
+        limit = payload.get("generate_limit", rule.get("generate_limit", rule.get("limit")))
         return _gui_corpus_generate(
             name, list(combinations), out_dir, source,
-            per_family_limit=int(limit) if limit is not None else None,
+            generation_limit=int(limit) if limit is not None else None,
             compute_verdicts=compute_verdicts,
         )
     return generate_combinations(name, combinations, out_dir, source=source)
@@ -477,9 +478,12 @@ def _corpus_meta(test, verdict_json: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
-def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdicts, generated_names, solver_counts, seen_names, errors) -> int:
+def _write_corpus_family(combination, out_dir, generation_limit, compute_verdicts, generated_names, solver_counts, seen_names, errors) -> int:
     written = 0
-    for test in tests_for_skeleton(combination.skeleton, limit=per_family_limit):
+    remaining = None if generation_limit is None else max(generation_limit - len(generated_names), 0)
+    if remaining == 0:
+        return 0
+    for test in tests_for_skeleton(combination.skeleton, limit=remaining):
         if test.unique_id in seen_names:
             continue
         seen_names.add(test.unique_id)
@@ -507,7 +511,7 @@ def _write_corpus_family(combination, out_dir, per_family_limit, compute_verdict
 # __LL_CORPUS_GENERATE2__
 
 
-def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=None, compute_verdicts=False) -> Dict[str, Any]:
+def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=None, compute_verdicts=False) -> Dict[str, Any]:
     """Generate GUI custom-rule output, serving scalar RVWMO families from the
     real corpus. .litmus files are written immediately; herd7 verdicts + diagrams
     are computed only when compute_verdicts is set (default: deferred/on-demand)."""
@@ -518,14 +522,15 @@ def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=N
     seen_names: set[str] = set()
     excluded: list[Dict[str, Any]] = []
     errors: list[Dict[str, Any]] = []
-    total = 0
+    total = len(combinations)
     generated_litmus = 0
     for combination in combinations:
-        total += 1
+        if generation_limit is not None and generated_litmus >= generation_limit:
+            break
         if _is_scalar_corpus_combination(combination):
             counts[GENERATED] += 1
             generated_litmus += _write_corpus_family(
-                combination, out_dir, per_family_limit, compute_verdicts,
+                combination, out_dir, generation_limit, compute_verdicts,
                 generated_names, solver_counts, seen_names, errors,
             )
             continue
@@ -533,6 +538,8 @@ def _gui_corpus_generate(name, combinations, out_dir, source, per_family_limit=N
         counts[decision.status] = counts.get(decision.status, 0) + 1
         if decision.status == GENERATED:
             for case in render_cases(combination, decision):
+                if generation_limit is not None and generated_litmus >= generation_limit:
+                    break
                 status, fname = write_one_generated_case(case, out_dir)
                 solver_counts[status] = solver_counts.get(status, 0) + 1
                 generated_names.append(fname)

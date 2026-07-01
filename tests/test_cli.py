@@ -115,6 +115,25 @@ def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Pa
     assert len(list(out.glob("*.diagram.png"))) == 2
 
 
+def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> None:
+    from corpus_riscv import corpus_available
+
+    if not corpus_available():
+        return
+    out = tmp_path / "gui-mp-rule-limit"
+    report = generate_payload(
+        {
+            "mode": "rule",
+            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 3},
+            "out": str(out),
+        }
+    )
+    assert report["generated_litmus"] == 3
+    assert len(list(out.glob("*.litmus"))) == 3
+    assert len(list(out.glob("*.solver.json"))) == 3
+    assert len(list(out.glob("*.diagram.png"))) == 3
+
+
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
     assert main(["generate", "--out", str(tmp_path / "out")]) == 2
     assert main(["generate", "--profile", "smoke", "--rule-file", str(tmp_path / "rules.json"), "--out", str(tmp_path / "out")]) == 2
