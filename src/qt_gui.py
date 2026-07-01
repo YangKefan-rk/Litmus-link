@@ -793,12 +793,14 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
         solver = result.get("solver") if isinstance(result.get("solver"), dict) else {}
         solver_files = sum(int(solver.get(key, 0)) for key in ["verified", "conflict", "not_applicable"])
         generation_errors = int(result.get("generation_errors", 0) or 0)
+        generation_limit = result.get("generation_limit")
         lines.extend(
             [
                 "",
                 "Generated artifacts:",
                 f"  generated combinations: {result.get('generated', 0)}",
                 f"  litmus files: {result.get('generated_litmus', result.get('generated', 0))}",
+                f"  available litmus: {result.get('available_litmus', result.get('generated_litmus', result.get('generated', 0)))}",
                 f"  solver results: {solver_files}",
                 f"  verdict mode: {result.get('verdict_mode', 'computed')}",
                 f"  @all: {out_path / '@all'}",
@@ -806,6 +808,8 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
                 f"  excluded cases: {out_path / 'excluded.json'}",
             ]
         )
+        if result.get("generation_limited"):
+            lines.append(f"  generation limit: truncated to {generation_limit} litmus files")
         if generation_errors:
             lines.append(f"  generation errors: {out_path / 'generation-errors.json'} ({generation_errors})")
     elif label == "Run Audit":

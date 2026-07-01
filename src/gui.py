@@ -516,6 +516,8 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
     real corpus. .litmus files are written immediately; herd7 verdicts + diagrams
     are computed only when compute_verdicts is set (default: deferred/on-demand)."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    potential_report = _gui_corpus_report(name, combinations, source)
+    available_litmus = int(potential_report.get("generated_litmus", 0) or 0)
     generated_names: list[str] = []
     solver_counts = {"verified": 0, "conflict": 0, "not_applicable": 0}
     counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
@@ -553,12 +555,15 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
         "total_combinations": total,
         "generated": counts[GENERATED],
         "generated_litmus": generated_litmus,
+        "available_litmus": available_litmus,
         "excluded_illegal": counts["excluded_illegal"],
         "excluded_unsupported": counts["excluded_unsupported"],
         "hand_required": counts["hand_required"],
         "missing": counts["missing"],
         "solver": solver_counts,
         "verdict_mode": "computed" if compute_verdicts else "deferred",
+        "generation_limit": generation_limit,
+        "generation_limited": generation_limit is not None and generated_litmus < available_litmus,
         "generation_errors": len(errors),
         "source": source,
     }

@@ -129,6 +129,9 @@ def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> Non
         }
     )
     assert report["generated_litmus"] == 3
+    assert report["available_litmus"] > 3
+    assert report["generation_limit"] == 3
+    assert report["generation_limited"] is True
     assert len(list(out.glob("*.litmus"))) == 3
     assert len(list(out.glob("*.solver.json"))) == 3
     assert len(list(out.glob("*.diagram.png"))) == 3
