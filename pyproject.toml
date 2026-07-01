@@ -19,8 +19,11 @@ litmus-link = "cli:main"
 py-modules = [
   "asm_check",
   "cli",
+  "corpus_ir",
+  "corpus_riscv",
   "descriptions",
   "diagram",
+  "fusion",
   "generator",
   "gui",
   "litmus_ir",
@@ -30,9 +33,12 @@ py-modules = [
   "renderer",
   "rule_file",
   "rules",
+  "rvwmo",
   "solver",
+  "toolchain",
   "upstream",
   "validator",
+  "vector_lower",
 ]
 
 [tool.pytest.ini_options]

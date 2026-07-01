@@ -19,24 +19,23 @@ pip install -e .
 litmus-link list profiles
 litmus-link generate --profile smoke --out out/smoke
 litmus-link validate out/smoke/@all
-litmus-link audit --profile full-cross --out out/audit
 litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
 litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
-litmus-link gui
+litmus-link qt-gui --check
 ```
 
 The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is recommended for future development and CI.
 
 ## Commands
 
-- `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `@all`, and `audit-report.json`.
+- `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `.solver.json`, diagram files when an IR is available, `@all`, and `audit-report.json`.
 - `litmus-link generate --rule-file <json> --out <dir>` generates from user-defined axes or explicit cases instead of a built-in profile.
 - `litmus-link validate <dir-or-@all>` validates index references, metadata, naming, and legality status.
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
-- `litmus-link gui` starts a local browser UI for configuring profiles, custom rule axes, parameter axes, audit, and generation.
-- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed.
+- `litmus-link gui` starts a local browser UI for configuring profiles, custom rule axes, parameter axes, audit, preview, and generation.
+- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Custom-rule generation computes solver results and PNG diagrams by default; use the advanced defer switch only for very large corpus dumps.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
 
 ## GUI
@@ -80,8 +79,8 @@ The small profiles are for smoke tests and targeted debugging. The large profile
 
 | Profile | Total combinations | Generated `.litmus` | HAND-required | Excluded illegal |
 | --- | ---: | ---: | ---: | ---: |
-| `stress-large` | 250,360 | 39,840 | 205,640 | 4,880 |
-| `stress-all` | 3,890,180 | 1,492,560 | 2,309,140 | 88,480 |
+| `stress-large` | 250,360 | 38,400 | 205,640 | 4,880 |
+| `stress-all` | 3,890,180 | 1,489,728 | 2,309,140 | 88,480 |
 
 Use `stress-large` as the practical large profile. Use `stress-all` only when you intentionally want the multi-million combination domain. Start with summary audit before generating files:
 
@@ -121,13 +120,15 @@ See `specs/rule-files/README.md` and `specs/rule-files/example-vector-cmo.json` 
 Verification has two layers (see [`RVWMO-verification.md`](RVWMO-verification.md)):
 
 - **Pure scalar main-memory tests** get a formal allowed/forbidden verdict from
-  a native axiomatic RVWMO checker (`src/rvwmo.py`), which needs no external
-  tool. If `herd7` is installed (`make herd7`), it is run as optional
-  cross-validation (`herd7 -model riscv.cat`); agreement is recorded and any
-  conflict is surfaced rather than hidden.
-- **Vector, CMO, PBMT, `FENCE.I`, and `SFENCE.VMA` interactions** are *not*
-  formalized in the standard RVWMO herd model, so they never receive a formal
-  forbidden claim. Instead `src/fusion.py` reports an informative,
-  model-extended ordering analysis with citations to the relevant extension
-  prose (`ordering-documented` / `ordering-absent` / `prose-spec`), always with
-  `allowed = None`.
+  `herd7/riscv.cat` when the bundled herdtools path is available. A small native
+  RVWMO checker (`src/rvwmo.py`) provides edge explanations and a fallback; if
+  it ever disagrees with herd7, herd7 is reported as authoritative.
+- **The simple MP vector-memory subset** can be judged by scalar element
+  lowering when the selected axes are exactly renderable by the current IR.
+  More complex Vector parameters such as cross-page footprints, masks, non-base
+  SEW/LMUL/VL, CMO, PBMT aliases, `FENCE.I`, and `SFENCE.VMA` interactions are
+  emitted as hardware-observation or prose-spec cases, not formal forbidden
+  claims.
+- **Unrendered stress axes** are not counted as formal coverage. For example,
+  `dep=data/aq/rl/aqrl` is reported as unsupported until a real instruction body
+  exists for that relation shape.
