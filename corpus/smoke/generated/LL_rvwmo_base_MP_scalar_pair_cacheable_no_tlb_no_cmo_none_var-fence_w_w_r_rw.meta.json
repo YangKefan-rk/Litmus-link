@@ -320,7 +320,7 @@
     "fusion": null,
     "model": "rvwmo-native+riscv.cat",
     "observation": "Never",
-    "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw Allowed\nStates 3\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=1;\nNo\nWitnesses\nPositive: 0 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw Never 0 3\nTime LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw 0.01\nHash=23bcdf400bdb92685b9fcb75415045b1\n\n",
+    "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw Allowed\nStates 3\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=1;\nNo\nWitnesses\nPositive: 0 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-fence_w_w_r_rw Never 0 3\nHash=23bcdf400bdb92685b9fcb75415045b1\n\n",
     "reason": "Every program-order edge in the cycle is a preserved (ppo) edge, so ppo u comm is cyclic; RVWMO forbids it. Confirmed by herd7/riscv.cat.",
     "schema": "litmus-link.solver.v1",
     "status": "verified",

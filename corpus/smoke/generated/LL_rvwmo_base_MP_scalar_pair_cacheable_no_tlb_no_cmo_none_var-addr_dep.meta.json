@@ -320,7 +320,7 @@
     "fusion": null,
     "model": "rvwmo-native+riscv.cat",
     "observation": "Sometimes",
-    "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-addr_dep Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-addr_dep Sometimes 1 3\nTime LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-addr_dep 0.00\nHash=85ef288a590d583f7b2767e2329b62f5\n\n",
+    "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-addr_dep Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-addr_dep Sometimes 1 3\nHash=85ef288a590d583f7b2767e2329b62f5\n\n",
     "reason": "Cycle is broken: edge(s) p0_wx->p0_wy are not preserved (ppo / per-location comm). Confirmed by herd7/riscv.cat.",
     "schema": "litmus-link.solver.v1",
     "status": "verified",

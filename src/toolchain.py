@@ -131,6 +131,17 @@ _STATES_RE = re.compile(r"^States\s+(\d+)", re.M)
 _COND_RE = re.compile(r"^Condition\s+(exists.*)$", re.M)
 
 
+def _strip_nondeterministic(raw: str) -> str:
+    """herd7 emits a wall-clock ``Time <name> <seconds>`` line that is pure
+    jitter. Storing it in committed-corpus raw_output makes every regeneration
+    produce spurious git diffs (0.00 -> 0.01), so you cannot tell a real output
+    change from timing noise. Strip it; every other line (States/Observation/
+    Witnesses/Condition/Hash) is deterministic and kept."""
+    return "".join(
+        line for line in raw.splitlines(keepends=True) if not line.startswith("Time ")
+    )
+
+
 def herd_judge(litmus_text: str, *, timeout: int = 120) -> HerdVerdict:
     """Run herd7 on one litmus test and parse its per-outcome verdict."""
     if not HERD.exists():
@@ -143,7 +154,7 @@ def herd_judge(litmus_text: str, *, timeout: int = 120) -> HerdVerdict:
     cmd = [str(HERD), "-I", str(HERDTOOLS_LIB), "-model", str(RISCV_CAT), str(test_path)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        raw = proc.stdout
+        raw = _strip_nondeterministic(proc.stdout)
         if proc.returncode != 0 and not raw.strip():
             raise ToolchainError(f"herd7 failed: {proc.stderr.strip()}")
         return _parse_herd(raw)

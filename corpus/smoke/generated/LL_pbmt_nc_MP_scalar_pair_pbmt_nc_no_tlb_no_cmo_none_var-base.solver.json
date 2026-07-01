@@ -46,7 +46,7 @@
   "fusion": null,
   "model": "rvwmo-native+riscv.cat",
   "observation": "Sometimes",
-  "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-base Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-base Sometimes 1 3\nTime LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-base 0.00\nHash=2939da84098a543efdbb91e30585ab71\n\n",
+  "raw_output": "Test LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-base Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_rvwmo_base_MP_scalar_pair_cacheable_no_tlb_no_cmo_none_var-base Sometimes 1 3\nHash=2939da84098a543efdbb91e30585ab71\n\n",
   "reason": "Cycle is broken: edge(s) p0_wx->p0_wy, p1_ry->p1_rx are not preserved (ppo / per-location comm). (PBMT=NC is non-cacheable main memory and obeys RVWMO per Svpbmt, so this verdict equals the cacheable twin; the plain body lets herd7 cross-check it.) Confirmed by herd7/riscv.cat.",
   "schema": "litmus-link.solver.v1",
   "status": "verified",

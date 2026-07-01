@@ -1,6 +1,6 @@
 import pytest
 
-from toolchain import tools_available, diycross_generate, herd_judge, _parse_herd
+from toolchain import tools_available, diycross_generate, herd_judge, _parse_herd, _strip_nondeterministic
 
 
 requires_tools = pytest.mark.skipif(
@@ -9,6 +9,24 @@ requires_tools = pytest.mark.skipif(
 
 
 # --- Pure parser tests: no herd7 binary needed, so they run unconditionally. ---
+
+
+def test_strip_nondeterministic_removes_only_time_line() -> None:
+    raw = (
+        "Test T Allowed\nStates 4\nOk\nWitnesses\nPositive: 1 Negative: 3\n"
+        "Condition exists (1:x5=1)\nObservation T Sometimes 1 3\n"
+        "Time T 0.01\nHash=abc123\n"
+    )
+    stripped = _strip_nondeterministic(raw)
+    assert "Time " not in stripped
+    # Every deterministic line is preserved verbatim.
+    assert "Observation T Sometimes 1 3" in stripped
+    assert "Hash=abc123" in stripped
+    assert "States 4" in stripped
+    # Idempotent + parse still works after stripping.
+    assert _strip_nondeterministic(stripped) == stripped
+    v = _parse_herd(stripped)
+    assert v.outcome == "observable" and v.allowed is True
 
 def test_parse_herd_never_is_forbidden() -> None:
     v = _parse_herd("Observation T Never 0 5\n")

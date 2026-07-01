@@ -44,7 +44,7 @@
   "fusion": null,
   "model": "rvwmo-native+riscv.cat",
   "observation": "Sometimes",
-  "raw_output": "Test LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-base__lowered Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-base__lowered Sometimes 1 3\nTime LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-base__lowered 0.01\nHash=61eafcfa2c8350977ebd2df53d273291\n\n",
+  "raw_output": "Test LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-base__lowered Allowed\nStates 4\n1:x5=0; 1:x7=0;\n1:x5=0; 1:x7=1;\n1:x5=1; 1:x7=0;\n1:x5=1; 1:x7=1;\nOk\nWitnesses\nPositive: 1 Negative: 3\nCondition exists (1:x5=1 /\\ 1:x7=0)\nObservation LL_vector_mem_MP_vector_load_cacheable_no_tlb_no_cmo_unit_load_var-base__lowered Sometimes 1 3\nHash=61eafcfa2c8350977ebd2df53d273291\n\n",
   "reason": "Cycle is broken: edge(s) p0_wx->p0_wy, p1_ry->p1_rx are not preserved (ppo / per-location comm). (RVV reduces vector memory ordering to per-element RVWMO; this case is lowered to its scalar element twin -- which herd7's RISC-V front-end DOES parse -- and judged by the real herd7/riscv.cat, so the verdict is tool-confirmed, not native-only.) Confirmed by herd7/riscv.cat.",
   "schema": "litmus-link.solver.v1",
   "status": "verified",
