@@ -67,6 +67,30 @@ def test_vm_params_require_tlb_axis() -> None:
     assert "require a non-none TLB" in decision.reason
 
 
+def test_unrendered_stress_dep_is_not_formal_coverage() -> None:
+    decision = evaluate(Combination("test", "rvwmo_base", "MP", "scalar_pair", "cacheable", params={"dep": "aq"}))
+    assert decision.status == EXCLUDED_UNSUPPORTED
+    assert decision.metadata["formal_forbidden_claim"] == "false"
+    assert decision.metadata["unrendered_axis"] == "dep=aq"
+
+
+def test_complex_vector_params_are_observation_not_formal_rvwmo() -> None:
+    decision = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="unit_load",
+            params={"sew": "e64", "footprint": "cross_page"},
+        )
+    )
+    assert decision.status == GENERATED
+    assert decision.rvwmo_class == "rvwmo-instruction-level"
+    assert decision.metadata["formal_forbidden_claim"] == "false"
+
+
 def test_alias_flush_sync_is_generated_with_sync_metadata() -> None:
     decision = evaluate(Combination("test", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params={"sync": "full_alias_sync"}))
     assert decision.status == GENERATED
@@ -103,4 +127,3 @@ def test_every_referenced_rule_has_a_description() -> None:
     referenced = set(re.findall(r'"rule:([a-z_0-9]+)"', src))
     missing = referenced - set(RULE_DESCRIPTIONS)
     assert not missing, f"rule keys referenced but undescribed: {sorted(missing)}"
-

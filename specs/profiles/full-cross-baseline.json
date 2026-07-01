@@ -2,7 +2,7 @@
   "excluded_illegal": 3,
   "excluded_unsupported": 0,
   "generated": 79,
-  "generated_litmus": 129,
+  "generated_litmus": 177,
   "hand_required": 40,
   "missing": 0,
   "profile": "full-cross",

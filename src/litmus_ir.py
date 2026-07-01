@@ -182,8 +182,10 @@ def _vector_variant_ids(combination: Combination) -> list[str]:
 
 
 def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
-    events = [_event(f"{prefix}_vset", hart, "setup", "vsetvli x10,x0,e32,m1,ta,ma")]
+    events = [_event(f"{prefix}_vset", hart, "setup", _vector_vset_instruction(combination))]
     extra_init: list[str] = []
+    if combination.params.get("mask") == "masked":
+        events.append(_event(f"{prefix}_mask", hart, "setup", "vmset.m v0"))
     if "indexed" in combination.vector:
         events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v4"))
     if "strided" in combination.vector:
@@ -596,6 +598,10 @@ def _generic_scalar_case(combination: Combination, variant: str, name: str) -> L
 def _observation_case(combination: Combination, decision: Decision) -> LitmusCaseIR:
     events = _observation_events(combination)
     relations = [_relation(events[0][0].event_id, events[-1][-1].event_id, "obs", "observation")]
+    init_lines = ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;"]
+    if "strided" in combination.vector:
+        hart = 0 if combination.memory_event == "vector_store" else 1
+        init_lines[hart] = init_lines[hart] + f" {hart}:x9=4;"
     return LitmusCaseIR(
         name=combination.name,
         display_name=combination.name,
@@ -603,7 +609,7 @@ def _observation_case(combination: Combination, decision: Decision) -> LitmusCas
         skeleton=combination.skeleton,
         variant="observation",
         cycle=_observation_cycle(combination),
-        init_lines=["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;"],
+        init_lines=init_lines,
         harts=events,
         relations=relations,
         exists="(1:x5=1)",
@@ -616,8 +622,9 @@ def _observation_case(combination: Combination, decision: Decision) -> LitmusCas
 
 def _observation_events(combination: Combination) -> list[list[LitmusEvent]]:
     if combination.vector != "none" and combination.cmo != "no_cmo":
+        setup, _extra_init = _vector_setup(combination, 0, "p0")
         p0 = [
-            _event("p0_vset", 0, "setup", "vsetvli x10,x11,e32,m1,ta,ma"),
+            *setup,
             _event("p0_vec", 0, "vector", _vector_instruction(combination), "x"),
             *_cmo_events(combination, 0, "p0"),
         ]
@@ -625,10 +632,12 @@ def _observation_events(combination: Combination) -> list[list[LitmusEvent]]:
         return [p0, p1]
     if combination.vector != "none":
         hart = 0 if combination.memory_event == "vector_store" else 1
-        vector_event = _event(f"p{hart}_vec", hart, "vector", _vector_instruction(combination), "x")
+        setup, _extra_init = _vector_setup(combination, hart, f"p{hart}")
+        base_reg = "x6" if hart == 0 else "x8"
+        vector_event = _event(f"p{hart}_vec", hart, "vector", _rebase_vector(_vector_instruction(combination), base_reg), "x")
         if hart == 0:
-            return [[_event("p0_vset", 0, "setup", "vsetvli x10,x11,e32,m1,ta,ma"), vector_event], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
-        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [_event("p1_vset", 1, "setup", "vsetvli x10,x11,e32,m1,ta,ma"), vector_event]]
+            return [[*setup, vector_event], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
+        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [*setup, vector_event]]
     if combination.cmo != "no_cmo":
         return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x"), *_cmo_events(combination, 0, "p0")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
     return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
@@ -656,21 +665,51 @@ def _cmo_events(combination: Combination, hart: int, prefix: str) -> list[Litmus
 
 
 def _vector_instruction(combination: Combination) -> str:
+    width = _vector_width(combination)
+    mask = _vector_mask_suffix(combination)
     table = {
-        "unit_load": "vle32.v v8,(x6)",
-        "unit_store": "vse32.v v8,(x6)",
-        "strided_load": "vlse32.v v8,(x6),x9",
-        "strided_store": "vsse32.v v8,(x6),x9",
-        "indexed_ordered_load": "vloxei32.v v8,(x6),v4",
-        "indexed_unordered_load": "vluxei32.v v8,(x6),v4",
-        "indexed_ordered_store": "vsoxei32.v v8,(x6),v4",
-        "indexed_unordered_store": "vsuxei32.v v8,(x6),v4",
-        "segment_load": "vlseg2e32.v v8,(x6)",
-        "segment_store": "vsseg2e32.v v8,(x6)",
-        "fof_load": "vle32ff.v v8,(x6)",
-        "fof_segment_load": "vlseg2e32ff.v v8,(x6)",
+        "unit_load": f"vle{width}.v v8,(x6){mask}",
+        "unit_store": f"vse{width}.v v8,(x6){mask}",
+        "strided_load": f"vlse{width}.v v8,(x6),x9{mask}",
+        "strided_store": f"vsse{width}.v v8,(x6),x9{mask}",
+        "indexed_ordered_load": f"vloxei32.v v8,(x6),v4{mask}",
+        "indexed_unordered_load": f"vluxei32.v v8,(x6),v4{mask}",
+        "indexed_ordered_store": f"vsoxei32.v v8,(x6),v4{mask}",
+        "indexed_unordered_store": f"vsuxei32.v v8,(x6),v4{mask}",
+        "segment_load": f"vlseg2e{width}.v v8,(x6){mask}",
+        "segment_store": f"vsseg2e{width}.v v8,(x6){mask}",
+        "fof_load": f"vle{width}ff.v v8,(x6){mask}",
+        "fof_segment_load": f"vlseg2e{width}ff.v v8,(x6){mask}",
     }
-    return table.get(combination.vector, "vle32.v v8,(x6)")
+    return table.get(combination.vector, f"vle{width}.v v8,(x6){mask}")
+
+
+def _vector_width(combination: Combination) -> str:
+    sew = str(combination.params.get("sew", "e32"))
+    return {"e8": "8", "e16": "16", "e32": "32", "e64": "64"}.get(sew, "32")
+
+
+def _vector_policy(combination: Combination) -> str:
+    tail = str(combination.params.get("tail", "ta_ma"))
+    return {"ta_ma": "ta,ma", "ta_mu": "ta,mu", "tu_ma": "tu,ma", "tu_mu": "tu,mu"}.get(tail, "ta,ma")
+
+
+def _vector_vset_instruction(combination: Combination) -> str:
+    sew = str(combination.params.get("sew", "e32"))
+    lmul = str(combination.params.get("lmul", "m1"))
+    policy = _vector_policy(combination)
+    vl = str(combination.params.get("vl", "vlmax"))
+    if vl == "vl1":
+        return f"vsetivli x10,1,{sew},{lmul},{policy}"
+    if vl == "vl2":
+        return f"vsetivli x10,2,{sew},{lmul},{policy}"
+    if vl == "vl_random":
+        return f"vsetvli x10,x11,{sew},{lmul},{policy}"
+    return f"vsetvli x10,x0,{sew},{lmul},{policy}"
+
+
+def _vector_mask_suffix(combination: Combination) -> str:
+    return ",v0.t" if combination.params.get("mask") == "masked" else ""
 
 
 def _observation_cycle(combination: Combination) -> str:

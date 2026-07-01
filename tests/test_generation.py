@@ -193,6 +193,23 @@ def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:
     assert all(combination.params["stress"] == "load_queue_replay" for combination in rule_set.combinations)
 
 
+def test_vector_params_render_into_observation_body(tmp_path: Path) -> None:
+    combination = Combination(
+        "test",
+        "vector_mem",
+        "MP",
+        "vector_load",
+        "cacheable",
+        vector="unit_load",
+        params={"sew": "e64", "lmul": "m4", "mask": "masked", "tail": "tu_mu", "vl": "vl2", "footprint": "cross_page"},
+    )
+    cases = generate_combinations("vector-param-render", [combination], tmp_path)
+    assert cases["generated_litmus"] == 1
+    litmus = (tmp_path / f"{combination.name}.litmus").read_text()
+    assert "vsetivli x10,2,e64,m4,tu,mu" in litmus
+    assert "vle64.v v8,(x8),v0.t" in litmus
+
+
 def test_long_parameterized_names_are_hashed() -> None:
     combination = Combination(
         "test",

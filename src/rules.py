@@ -117,6 +117,9 @@ def evaluate(combination: Combination) -> Decision:
     shape_decision = _shape_validity(combination, requires)
     if shape_decision is not None:
         return shape_decision
+    fidelity_decision = _rendering_fidelity(combination, requires)
+    if fidelity_decision is not None:
+        return fidelity_decision
     if sync not in {"", *CMO_SYNC_SEQUENCES}:
         return Decision(
             EXCLUDED_UNSUPPORTED,
@@ -287,7 +290,7 @@ def _rvwmo_class(combination: Combination) -> str:
         # Vector memory ordering reduces per-element to RVWMO. For a clean MP
         # cycle over main memory we render a real cycle case with a native
         # verdict; other skeletons stay observation/instruction-level.
-        if combination.skeleton == "MP" and combination.attribute in {"cacheable", "pbmt_nc"}:
+        if _is_formal_vector_rvwmo(combination):
             return "rvwmo-vector"
         return "rvwmo-instruction-level"
     if combination.cmo != "no_cmo" or combination.attribute != "cacheable":
@@ -474,3 +477,42 @@ def _shape_validity(combination: Combination, requires: List[str]) -> Decision |
                 "cross",
             )
     return None
+
+
+def _rendering_fidelity(combination: Combination, requires: List[str]) -> Decision | None:
+    dep = combination.params.get("dep")
+    if _is_scalar_main_memory(combination) and dep in {"data", "aq", "rl", "aqrl"}:
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            f"dep={dep} is part of the stress coverage domain, but the current generator does not yet render a real data/aq/rl/aqrl instruction sequence for it.",
+            "rvwmo-herd",
+            "hardware-observation",
+            requires,
+            ["rule:rvwmo_scope"],
+            "rvwmo_base",
+            {"formal_forbidden_claim": "false", "unrendered_axis": f"dep={dep}"},
+        )
+    return None
+
+
+_FORMAL_VECTOR_PARAM_VALUES = {
+    "variant": {"base", "fence_rw_rw", "fence_w_w_r_rw"},
+    "sew": {"e32"},
+    "lmul": {"m1"},
+    "mask": {"unmasked"},
+    "tail": {"ta_ma"},
+    "footprint": {"same_line"},
+    "vl": {"vlmax"},
+    "elem_order": {"single_event"},
+    "stress": {"none"},
+}
+
+
+def _is_formal_vector_rvwmo(combination: Combination) -> bool:
+    if combination.skeleton != "MP" or combination.attribute not in {"cacheable", "pbmt_nc"}:
+        return False
+    for key, value in combination.params.items():
+        allowed = _FORMAL_VECTOR_PARAM_VALUES.get(key)
+        if allowed is None or str(value) not in allowed:
+            return False
+    return True
