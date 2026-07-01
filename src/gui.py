@@ -708,7 +708,7 @@ HTML = r"""<!doctype html>
         <div class="group"><h3>Rule JSON</h3><textarea id="ruleJson"></textarea></div>
       </div>
       <label><input id="summaryOnly" type="checkbox" checked> Summary-only audit</label>
-      <div class="buttons"><button class="secondary" id="buildBtn">Build Rule</button><button id="previewBtn">Preview</button><button id="auditBtn" class="primary">Audit</button><button id="generateBtn" class="danger">Generate</button></div>
+      <div class="buttons"><button class="secondary" id="buildBtn">Refresh Rule Preview</button><button id="previewBtn">Preview</button><button id="auditBtn" class="primary">Audit</button><button id="generateBtn" class="danger">Generate</button></div>
       <p class="hint">Audit classifies combinations through the same legality rules used by CLI. Generate writes .litmus, .meta.json, @all, and audit-report.json.</p>
     </section>
     <section class="split">

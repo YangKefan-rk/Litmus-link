@@ -10,8 +10,8 @@ Implemented profiles:
 - `cmo_pbmt`: CMO operations crossed with PBMT/cacheability attributes.
 - `vm_tlb`: PTE/TLB/sfence.vma scenarios.
 - `full-cross`: combined audit profile covering CMO/PBMT/Vector/TLB interactions.
-- `stress-large`: practical large multicore profile. Current baseline is 250,360 combinations, 39,840 generated `.litmus`, 205,640 HAND-required, 4,880 illegal, and 0 missing.
-- `stress-all`: exhaustive stress profile. Current baseline is 3,890,180 combinations, 1,492,560 generated `.litmus`, 2,309,140 HAND-required, 88,480 illegal, and 0 missing.
+- `stress-large`: practical large multicore profile. Current baseline is 250,360 combinations, 38,400 generated `.litmus`, 205,640 HAND-required, 4,880 illegal, 1,440 unsupported, and 0 missing.
+- `stress-all`: exhaustive stress profile. Current baseline is 3,890,180 combinations, 1,489,728 generated `.litmus`, 2,309,140 HAND-required, 88,480 illegal, 2,880 unsupported, and 0 missing.
 
 Large profiles should usually be audited with `--summary-only` first:
 
