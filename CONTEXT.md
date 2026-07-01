@@ -11,27 +11,23 @@ without fabricating ordering the spec does not give.
 ## Module chain
 
 ```
-rule/profile -> litmus_ir (LitmusCaseIR variant expansion)
-             -> rvwmo (native scalar checker) + fusion (extension-prose analysis)
-             -> solver (verdict assembly + optional herd7 cross-check)
+rule/profile -> litmus_ir / corpus_riscv (case expansion)
+             -> solver + herd7/riscv.cat or fusion extension-prose analysis
              -> diagram (PNG topology) -> gui / qt_gui
+             -> optional asm_check syntax smoke test
 ```
 
 ## Verification architecture (see RVWMO-verification.md)
 
 Two layers, split because stock RVWMO/herd7 only model scalar main memory:
 
-1. **Native axiomatic checker** — `src/rvwmo.py`. Primary verdict source for
-   pure scalar RVWMO cycle cases (`model == "rvwmo"`). A scalar test is
-   forbidden iff every `po` edge of its critical cycle is a preserved (`ppo`)
-   edge. Implements PPO rules 1–3 (same address), 4 (FENCE), 9 (addr dep),
-   10 (data dep), 11 (ctrl dep, store-only). `fence.i` is NOT a data fence.
-   Each edge carries its rule + reason. Verdict table pinned in
-   `tests/test_rvwmo.py`.
-2. **herd7 cross-validation** — optional. `src/solver.py` runs
-   `herd7 -model riscv.cat` when on PATH and compares: `agree` /
-   `conflict` / `herd7_absent` / `herd7_error` (recorded in `cross_check`).
-   `make herd7` installs it via opam; `make verify` exits non-zero on conflict.
+1. **herd7 / riscv.cat** — authoritative for pure scalar RVWMO corpus tests
+   when the bundled herdtools path is present. `src/corpus_riscv.py` indexes
+   the real RISC-V corpus and `src/toolchain.py` strips nondeterministic herd
+   timing from stored outputs.
+2. **Native axiomatic checker** — `src/rvwmo.py`. Provides edge explanations
+   and fallback verdicts for renderable scalar IR. A scalar test is forbidden
+   iff every `po` edge of its critical cycle is a preserved (`ppo`) edge.
 3. **Fusion (vector/CMO/PBMT/TLB)** — `src/fusion.py`. NEVER a formal
    forbidden claim: always `allowed = None`, `formal_forbidden_claim = False`.
    Reports `ordering-documented` / `ordering-absent` / `prose-spec` with spec
@@ -51,24 +47,32 @@ spine. Pure routing lives in `_route_relations()`; invariants pinned in
 
 ## Important files
 
-- `src/rvwmo.py` — native scalar RVWMO checker (PPO oracle).
+- `src/toolchain.py` — herd7/diycross wrappers and deterministic output parsing.
+- `src/corpus_riscv.py` — real scalar RVWMO corpus indexing and herd judging.
+- `src/rvwmo.py` — native scalar RVWMO checker (PPO oracle / fallback).
 - `src/fusion.py` — extension-prose fusion ordering analysis.
 - `src/solver.py` — verdict assembly, herd7 cross-check, `SolverResult`.
 - `src/diagram.py` — topology PNG rendering and relation routing.
 - `src/litmus_ir.py` — `LitmusCaseIR`, event/relation builders per skeleton.
 - `src/generator.py` — generation/audit flow, `solver_counts`.
+- `src/gui.py` / `src/qt_gui.py` — browser and Qt workflows, including preview
+  case lists, solver/diagram summaries, and generation limit reporting.
+- `src/asm_check.py` — optional assembler syntax smoke check for generated
+  instruction bodies.
 - `RVWMO-verification.md` — the two-layer verification design.
 
 ## Verified commands
 
 ```sh
-make test       # 62 tests pass (pytest), or tests/run_tests.py fallback
+make test       # pytest suite, or tests/run_tests.py fallback
 make smoke      # regenerate + validate the 8-combination smoke corpus
 make verify     # regenerate smoke + report native/herd7/conflict/fusion counts
 make herd7      # opam install herdtools7 (optional cross-validation)
+make asm-check  # syntax-check generated instruction bodies if a RISC-V GCC exists
 ```
 
-Latest smoke solver counts: `verified: 6, conflict: 0, not_applicable: 7`.
+Latest smoke profile counts: `generated: 8`, `generated_litmus: 22`,
+`solver.verified: 18`, `solver.conflict: 0`, `solver.not_applicable: 4`.
 
 ## Possible next steps
 

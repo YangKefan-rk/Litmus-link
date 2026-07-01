@@ -142,6 +142,17 @@ def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
     assert main(["generate", "--profile", "smoke", "--rule-file", str(tmp_path / "rules.json"), "--out", str(tmp_path / "out")]) == 2
 
 
+def test_cli_asm_check_returns_nonzero_on_assembler_failure(tmp_path: Path) -> None:
+    litmus = tmp_path / "T.litmus"
+    litmus.write_text("RISCV T\n{\n}\n P0 ;\n definitely.not.an.op ;\nexists\n(0:x1=0)\n", encoding="utf-8")
+    atfile = tmp_path / "@all"
+    atfile.write_text("T.litmus\n", encoding="utf-8")
+    fake_gcc = tmp_path / "fake-gcc"
+    fake_gcc.write_text("#!/bin/sh\necho assembler nope >&2\nexit 1\n", encoding="utf-8")
+    fake_gcc.chmod(0o755)
+    assert main(["asm-check", str(atfile), "--gcc", str(fake_gcc)]) == 1
+
+
 def test_python_m_cli_entrypoint_runs() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "cli", "list", "profiles"],

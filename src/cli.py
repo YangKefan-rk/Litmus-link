@@ -88,9 +88,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"kind": index["kind"], "count": index["count"]}, indent=2, sort_keys=True))
             return 0
         if args.command == "asm-check":
-            for line in asm_check(args.atfile, args.gcc):
+            lines = asm_check(args.atfile, args.gcc)
+            for line in lines:
                 print(line)
-            return 0
+            return 1 if lines and lines[0].startswith("asm-check failed:") else 0
         if args.command == "gui":
             run_gui(args.host, args.port, open_browser=not args.no_open)
             return 0

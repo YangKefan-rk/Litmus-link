@@ -46,8 +46,7 @@ validate:
 	PYTHONPATH=src $(PYTHON) -m cli validate $(OUT)/@all
 
 asm-check:
-	@command -v riscv64-linux-gnu-gcc >/dev/null || { echo "riscv64-linux-gnu-gcc not found; skipping"; exit 0; }
-	PYTHONPATH=src $(PYTHON) -m cli asm-check $(OUT)/@all --gcc riscv64-linux-gnu-gcc
+	PYTHONPATH=src $(PYTHON) -m cli asm-check $(OUT)/@all --gcc auto
 
 clean:
 	rm -rf out corpus/smoke/generated .pytest_cache

@@ -21,6 +21,7 @@ litmus-link generate --profile smoke --out out/smoke
 litmus-link validate out/smoke/@all
 litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
 litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
+litmus-link asm-check out/custom/@all --gcc auto
 litmus-link qt-gui --check
 ```
 
@@ -31,6 +32,7 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `.solver.json`, diagram files when an IR is available, `@all`, and `audit-report.json`.
 - `litmus-link generate --rule-file <json> --out <dir>` generates from user-defined axes or explicit cases instead of a built-in profile.
 - `litmus-link validate <dir-or-@all>` validates index references, metadata, naming, and legality status.
+- `litmus-link asm-check <@all> --gcc <tool>` optionally extracts generated instruction bodies and asks a RISC-V assembler to accept them. This is a syntax smoke check, not a litmus semantic proof.
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
@@ -88,6 +90,8 @@ Use `stress-large` as the practical large profile. Use `stress-all` only when yo
 litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
 litmus-link audit --profile stress-all --summary-only --out out/audit-stress-all
 ```
+
+After generation, `make asm-check OUT=out/smoke` can be used when a RISC-V GCC is available. The target uses `--gcc auto`, so it will try common RISC-V compiler names and otherwise report a clean skip.
 
 Every generated `.meta.json` includes a `test_description` section that explains the selected skeleton, feature axes, and stress knobs. Use `litmus-link list features` to inspect the description catalog.
 
