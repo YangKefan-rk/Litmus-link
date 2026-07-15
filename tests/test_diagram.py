@@ -6,13 +6,13 @@ import pytest
 
 from PIL import ImageDraw, Image
 
-import diagram as D
-from diagram import render_diagram, _draw_harts, _route_relations
-from litmus_ir import _mp_case, _lb_case, _sb_case, _wrc_case, _rwc_case, _iriw_case
-from renderer import render_cases
-from rules import evaluate
-from models import Combination
-from solver import solve_generated_case
+from litmus_link import diagram as D
+from litmus_link.diagram import render_diagram, _draw_harts, _route_relations
+from litmus_link.litmus_ir import _mp_case, _lb_case, _sb_case, _wrc_case, _rwc_case, _iriw_case
+from litmus_link.renderer import render_cases
+from litmus_link.rules import evaluate
+from litmus_link.models import Combination
+from litmus_link.solver import solve_generated_case
 
 
 def test_render_diagram_writes_png_and_summary(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 import pytest
 
-from corpus_riscv import (
+from litmus_link.corpus_riscv import (
     corpus_available,
     parse_litmus,
     skeleton_counts,
@@ -78,7 +78,7 @@ def test_parse_litmus_threads_suite_and_uid() -> None:
     assert t.unique_id == "MP__SAFE"
     # uid falls back to name when not supplied
     assert parse_litmus(text, "p.litmus").unique_id == "MP"
-    from toolchain import tools_available
+    from litmus_link.toolchain import tools_available
     if not tools_available():
         pytest.skip("herd7 not installed")
     by_name = {t.name: t for t in get_tests_for_skeleton("MP")}

@@ -1,6 +1,6 @@
 # Litmus-link
 
-Litmus-link is a RISC-V litmus-test generator focused on scenarios that are not covered by the public scalar RVWMO corpus: Vector memory operations, Zicbom/Zicboz CMO instructions, Svpbmt/PBMT=NC and NC aliases, TLB/page-table interactions, and cross combinations of those features.
+Litmus-link is a native RISC-V litmus-test generator plus an extension-scenario generator for Vector memory operations, Zicbom/Zicboz CMO instructions, Svpbmt/PBMT=NC and NC aliases, TLB/page-table interactions, and cross combinations of those features.
 
 The project intentionally avoids blind Cartesian generation. Every generated test first passes through ISA legality checks, RVWMO classification, and coverage audit accounting. Combinations that are illegal, unsupported, or require hand-written setup are reported instead of silently dropped.
 
@@ -16,11 +16,15 @@ The project intentionally avoids blind Cartesian generation. Every generated tes
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
+git submodule update --init nexus-am
 litmus-link list profiles
+litmus-link native catalog
+litmus-link native templates --skeleton MP --no-judge --out out/native-mp
+litmus-link validate out/native-mp/@all
 litmus-link generate --profile smoke --out out/smoke
 litmus-link validate out/smoke/@all
 litmus-link audit --profile stress-large --summary-only --out out/audit-stress-large
-litmus-link generate --rule-file specs/rule-files/example-vector-cmo.json --out out/custom
+litmus-link generate --rule-file examples/rules/vector-cmo.json --out out/custom
 litmus-link asm-check out/custom/@all --gcc auto
 litmus-link qt-gui --check
 ```
@@ -36,29 +40,69 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
-- `litmus-link gui` starts a local browser UI for configuring profiles, custom rule axes, parameter axes, audit, preview, and generation.
 - `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Custom-rule generation computes solver results and PNG diagrams by default; use the advanced defer switch only for very large corpus dumps.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
+- `litmus-link native templates` exhausts the configured variants of named scalar skeletons without invoking diy7/diycross7 or reading an existing corpus.
+- `litmus-link native enumerate` enumerates every canonical cycle in a user-bounded native relation grammar.
+- `litmus-link native catalog` prints the native grammar and exact finite-domain counts.
+- `litmus-link scalar cross` generates named scalar skeleton families with `diycross7`.
+- `litmus-link scalar enumerate` enumerates bounded scalar cycles with `diy7`.
+- `litmus-link scalar tools|catalog` is the legacy/reference herdtools path and is not used by the default GUI generator.
+
+## Native Scalar Generation
+
+The default scalar path is implemented inside Litmus-link. It does not invoke
+`diy7`/`diycross7` and does not copy or index an existing corpus. The native
+pipeline performs relation expansion, direction matching, hart and location
+constraint solving, rotation canonicalization, RISC-V register/address/value
+allocation, dependency lowering, `exists` construction, and file rendering.
+
+The current finite grammar covers external/internal `rf/fr/co`, different- and
+same-location `po`, all nonempty R/W fence predecessor/successor subsets,
+address/data/control/control+`fence.i` dependencies, and event annotations
+`P/Aq/Rl/AR`. Non-plain annotations lower to ISA-valid `amoor.w`/`amoswap.w`
+forms and declare the A extension; the generator does not emit pseudo
+`lw.aq`/`sw.rl` instructions.
+
+The exact named-template domain currently contains 38,871,296 cases. MP alone
+contains 66,560 cases. These are finite-grammar counts, not a claim that the
+set of all possible programs is finite. Audit metadata records the selected
+grammar, base cycles, accepted cases, canonical duplicates, and every rejected
+constraint class.
+
+Generate the complete native MP domain without any external process:
+
+```sh
+litmus-link native templates --skeleton MP --no-judge --out out/native-mp
+litmus-link validate out/native-mp/@all
+```
+
+Limit files while retaining the full-domain audit count:
+
+```sh
+litmus-link native templates --skeleton MP --limit 100 --no-judge --out out/native-mp-100
+```
+
+Enumerate cycles independently of named MP/LB/SB templates:
+
+```sh
+litmus-link native enumerate --min-size 2 --size 4 --nprocs 2 \
+  --mechanism po --mechanism fence --mechanism dependency \
+  --limit 1000 --no-judge --out out/native-cycles
+```
+
+Omit `--no-judge` to run `herd7/riscv.cat` only as an independent outcome
+cross-check after native generation. The legacy `scalar cross/enumerate`
+commands remain available for comparison, but the Qt GUI does not use them.
+
+The next native grammar additions are mixed-size/partial-overlap accesses,
+explicit LR/SC success/failure scaffolding, and Ztso `fence.tso`; they must be
+added as finite axes with legality and canonicalization rules rather than as
+unbounded ad hoc instruction substitution.
 
 ## GUI
 
-Run the local graphical configuration UI with:
-
-```sh
-litmus-link gui
-```
-
-The GUI opens a local browser page on `127.0.0.1:8765`. It can:
-
-- select a built-in profile and run summary audit or generation;
-- graphically choose custom `skeleton`/`vector`/`cmo`/`tlb`/`attribute` axes;
-- choose parameter axes such as `sew`, `lmul`, `mask`, `footprint`, `sync`, `vm`, `pte`, and `stress`;
-- preview the generated rule JSON and sample combinations;
-- run audit or generate `.litmus` files through the same backend as the CLI.
-
-Use `litmus-link gui --no-open --port 9000` if you do not want the browser to open automatically or need a different port.
-
-For a desktop GUI without HTTP/browser, install one Qt binding and run:
+The project has one GUI implementation: the local Qt desktop application. Install one Qt binding and run:
 
 ```sh
 python3 -m pip install PyQt6
@@ -71,9 +115,9 @@ Check Qt availability with:
 litmus-link qt-gui --check
 ```
 
-The Qt window opens on the machine where the command runs. If you run it over SSH on a server, use X forwarding/remote desktop, or run the repo locally on your workstation.
+The Qt window opens on the machine where the command runs. On a server, use X forwarding or a remote desktop session. The GUI does not open a network socket.
 
-The Qt GUI uses a four-step workflow: select a built-in profile or custom axes, run an audit, generate files, then inspect the output directory. Actions run in the background and update the status bar, progress indicator, log tab, and summary tab. Custom rules are synchronized automatically from the checkbox selections; the JSON tab remains available for advanced edits.
+The Qt GUI opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds. `Generate the complete accepted domain` has no hidden file cap, while `Maximum preview rows` limits only the scrollable preview. The independent herd7 cross-check is off by default, so native generation works on a closed server with no herdtools installation. Actions run in the background and update the status bar, progress indicator, log, summary, and case-inspector tabs.
 
 ## Large Profiles
 
@@ -117,15 +161,15 @@ Use `litmus-link list axes` to see accepted values. A minimal rule file can be a
 }
 ```
 
-See `specs/rule-files/README.md` and `specs/rule-files/example-vector-cmo.json` for a larger example that combines Vector and CMO axes.
+See `examples/rules/vector-cmo.json` for a larger example that combines Vector and CMO axes.
 
 ## Design Boundary
 
-Verification has two layers (see [`RVWMO-verification.md`](RVWMO-verification.md)):
+Verification has two layers:
 
 - **Pure scalar main-memory tests** get a formal allowed/forbidden verdict from
   `herd7/riscv.cat` when the bundled herdtools path is available. A small native
-  RVWMO checker (`src/rvwmo.py`) provides edge explanations and a fallback; if
+  RVWMO checker (`src/litmus_link/rvwmo.py`) provides edge explanations and a fallback; if
   it ever disagrees with herd7, herd7 is reported as authoritative.
 - **The simple MP vector-memory subset** can be judged by scalar element
   lowering when the selected axes are exactly renderable by the current IR.
@@ -136,3 +180,19 @@ Verification has two layers (see [`RVWMO-verification.md`](RVWMO-verification.md
 - **Unrendered stress axes** are not counted as formal coverage. For example,
   `dep=data/aq/rl/aqrl` is reported as unsupported until a real instruction body
   exists for that relation shape.
+
+## Repository Layout
+
+```text
+src/litmus_link/   Python package: CLI, rules, generation, solvers, diagrams, Qt GUI
+src/cli.py         Compatibility entry point for PYTHONPATH=src python3 -m cli
+examples/rules/    User-editable JSON generation rule examples
+tests/             Unit tests and machine-checked profile baselines
+nexus-am/          Git submodule reserved for the future ELF build backend
+out/               Generated corpora and audit output; ignored by Git
+```
+
+`nexus-am` is intentionally kept as a submodule. It is not yet called by the
+current `.litmus` generation path; the planned ELF backend will use it as the
+runtime/build harness. Clone with `--recurse-submodules`, or initialize it later
+with `git submodule update --init nexus-am`.

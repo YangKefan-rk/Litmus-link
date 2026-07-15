@@ -1,5 +1,5 @@
-from models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
-from rules import evaluate, RULE_DESCRIPTIONS
+from litmus_link.models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
+from litmus_link.rules import evaluate, RULE_DESCRIPTIONS
 import re
 from pathlib import Path
 
@@ -123,7 +123,7 @@ def test_amo_on_io_is_illegal_access_fault() -> None:
 def test_every_referenced_rule_has_a_description() -> None:
     # Guard against the latent bug where a rule: note has no RULE_DESCRIPTIONS
     # entry, so list_rules()/the GUI cannot describe it.
-    src = Path("src/rules.py").read_text()
+    src = Path("src/litmus_link/rules.py").read_text()
     referenced = set(re.findall(r'"rule:([a-z_0-9]+)"', src))
     missing = referenced - set(RULE_DESCRIPTIONS)
     assert not missing, f"rule keys referenced but undescribed: {sorted(missing)}"

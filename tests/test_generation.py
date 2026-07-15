@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
 
-from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
-from gui import preview_payload
-from models import Combination
-from profiles import profile_combinations
-from rule_file import RuleFileError, load_rule_file
-from validator import validate_path
+from litmus_link.generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
+from litmus_link.workflow import preview_payload
+from litmus_link.models import Combination
+from litmus_link.profiles import profile_combinations
+from litmus_link.rule_file import RuleFileError, load_rule_file
+from litmus_link.validator import validate_path
 
 
 def test_smoke_generation_round_trip(tmp_path: Path) -> None:
@@ -32,7 +32,7 @@ def test_smoke_generation_round_trip(tmp_path: Path) -> None:
 
 def test_full_cross_has_no_missing(tmp_path: Path) -> None:
     report = write_audit("full-cross", tmp_path)
-    baseline = json.loads(Path("specs/profiles/full-cross-baseline.json").read_text())
+    baseline = json.loads(Path("tests/baselines/full-cross.json").read_text())
     for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
         assert report[key] == baseline[key]
     assert (tmp_path / "missing.json").read_text() == ""
@@ -40,7 +40,7 @@ def test_full_cross_has_no_missing(tmp_path: Path) -> None:
 
 def test_stress_large_summary_matches_baseline() -> None:
     report = audit_summary("stress-large", profile_combinations("stress-large"))
-    baseline = json.loads(Path("specs/profiles/stress-large-baseline.json").read_text())
+    baseline = json.loads(Path("tests/baselines/stress-large.json").read_text())
     assert report == baseline
 
 
@@ -143,7 +143,7 @@ def test_preview_payload_includes_litmus_and_analysis() -> None:
 
 
 def test_mp_cacheable_expands_to_corpus_family() -> None:
-    from corpus_riscv import corpus_available
+    from litmus_link.corpus_riscv import corpus_available
 
     sample_limit = 6
     preview = preview_payload(

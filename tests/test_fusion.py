@@ -1,8 +1,8 @@
-from fusion import analyze_fusion, FusionResult
-from litmus_ir import LitmusCaseIR, LitmusEvent
-from models import Combination
-from renderer import render_cases
-from rules import evaluate
+from litmus_link.fusion import analyze_fusion, FusionResult
+from litmus_link.litmus_ir import LitmusCaseIR, LitmusEvent
+from litmus_link.models import Combination
+from litmus_link.renderer import render_cases
+from litmus_link.rules import evaluate
 
 
 def _case(**kwargs):

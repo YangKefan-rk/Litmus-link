@@ -1,6 +1,6 @@
 import pytest
 
-from toolchain import tools_available, diycross_generate, herd_judge, _parse_herd, _strip_nondeterministic
+from litmus_link.toolchain import diy_generate, tools_available, diycross_generate, herd_judge, toolchain_info, _parse_herd, _strip_nondeterministic
 
 
 requires_tools = pytest.mark.skipif(
@@ -51,6 +51,27 @@ def test_parse_herd_contradictory_counts_are_unknown() -> None:
     assert never_with_witness.outcome == "unknown" and never_with_witness.allowed is None
     sometimes_without_witness = _parse_herd("Observation T Sometimes 0 5\n")
     assert sometimes_without_witness.outcome == "unknown" and sometimes_without_witness.allowed is None
+
+
+def test_toolchain_info_has_stable_shape() -> None:
+    info = toolchain_info()
+    assert set(info["tools"]) == {"diy7", "diycross7", "herd7"}
+    assert info["model"]["path"].endswith("riscv.cat")
+
+
+@requires_tools
+def test_diy_generates_basic_cycles() -> None:
+    tests = diy_generate(
+        safe=["Rfe", "Fre", "Wse", "Fence.rw.rwd**", "DpAddrdR", "DpAddrdW"],
+        relax=["PodRR", "PodRW", "PodWR", "PodWW"],
+        size=4,
+        nprocs=2,
+        timeout=30,
+    )
+    names = {test.name for test in tests}
+    assert "LB" in names and "SB" in names
+    assert any(name.startswith("MP+") for name in names)
+    assert all(test.text.startswith("RISCV ") for test in tests)
 
 
 @requires_tools

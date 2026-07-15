@@ -4,16 +4,18 @@ import json
 import tempfile
 from pathlib import Path
 
-from cli import main
-from generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
-from gui import options_payload, preview_payload
-from models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
-from profiles import profile_combinations
-from qt_gui import qt_binding_status
-from rule_file import RuleFileError, load_rule_file
-from rules import evaluate
-from upstream import import_upstream
-from validator import validate_path
+from litmus_link.cli import main
+from litmus_link.generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
+from litmus_link.workflow import options_payload, preview_payload
+from litmus_link.models import EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED, Combination
+from litmus_link.profiles import profile_combinations
+from litmus_link.qt_gui import qt_binding_status
+from litmus_link.rule_file import RuleFileError, load_rule_file
+from litmus_link.rules import evaluate
+from litmus_link.scalar import generate_scalar_cross, scalar_catalog
+from litmus_link.toolchain import tools_available
+from litmus_link.upstream import import_upstream
+from litmus_link.validator import validate_path
 
 
 def check(condition: bool, message: str) -> None:
@@ -51,14 +53,14 @@ def test_generation() -> None:
         check(first_meta.get("diagram", {}).get("schema") == "litmus-link.diagram.v1", "metadata diagram summary missing")
         check((root / "smoke" / entries[0]).with_suffix(".diagram.png").exists(), "diagram PNG missing")
         full = write_audit("full-cross", root / "audit")
-        baseline = json.loads(Path("specs/profiles/full-cross-baseline.json").read_text())
+        baseline = json.loads(Path("tests/baselines/full-cross.json").read_text())
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
             check(full[key] == baseline[key], f"full-cross audit changed from baseline for {key}")
         rows, vector = audit_profile("vector_mem")
         check(rows and vector["excluded_illegal"] > 0, "vector profile should include illegal exclusions")
         check(vector["hand_required"] > 0, "vector profile should include HAND cases")
         stress = audit_summary("stress-large", profile_combinations("stress-large"))
-        baseline = json.loads(Path("specs/profiles/stress-large-baseline.json").read_text())
+        baseline = json.loads(Path("tests/baselines/stress-large.json").read_text())
         check(stress == baseline, "stress-large audit changed from baseline")
         summary_dir = root / "summary"
         summary = write_audit("stress-large", summary_dir, summary_only=True)
@@ -136,6 +138,13 @@ def test_generation() -> None:
             },
         ).name
         check(len(long_name) <= 180 and "params_" in long_name, "long parameterized name should be hashed")
+        check("MP" in scalar_catalog()["presets"], "scalar preset catalog missing MP")
+        if tools_available():
+            scalar_report = generate_scalar_cross(
+                out_dir=root / "scalar", presets=["MP"], mechanisms=["po"], judge=False, timeout=30
+            )
+            check(scalar_report["generated_litmus"] == 1, "scalar MP/po generation count mismatch")
+            check(len(validate_path(root / "scalar" / "@all")) == 1, "scalar corpus validation failed")
 
 
 def test_cli() -> None:
@@ -145,6 +154,7 @@ def test_cli() -> None:
         check(main(["validate", str(out / "@all")]) == 0, "CLI validate failed")
         check(main(["list", "rules"]) == 0, "CLI list rules failed")
         check(main(["list", "features"]) == 0, "CLI list features failed")
+        check(main(["scalar", "catalog"]) == 0, "CLI scalar catalog failed")
         rule_file = Path(tmp) / "rules.json"
         rule_file.write_text(json.dumps({"name": "cli-custom", "axes": {"cmo": ["flush"]}}), encoding="utf-8")
         check(main(["generate", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "custom")]) == 0, "CLI rule-file generate failed")
@@ -159,7 +169,7 @@ def test_cli() -> None:
         check("solver" in preview["sample"][0], "GUI preview should include solver result")
         check("diagram" in preview["sample"][0], "GUI preview should include diagram result")
         mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 6})
-        from corpus_riscv import corpus_available as _corpus_available
+        from litmus_link.corpus_riscv import corpus_available as _corpus_available
         if _corpus_available():
             check(mp_preview["report"]["generated_litmus"] > 500, "MP cacheable should expand to the full real corpus family")
             check(len([item for item in mp_preview["sample"] if item.get("litmus")]) == 6, "MP preview should sample the corpus family")

@@ -1,11 +1,14 @@
 from pathlib import Path
 import json
+import pytest
 import subprocess
 import sys
 
-from cli import main
-from gui import generate_payload, options_payload, preview_payload
-from qt_gui import _summary_text, qt_binding_status
+from litmus_link.cli import main
+from litmus_link.workflow import generate_payload, options_payload, preview_payload
+from litmus_link.qt_gui import _summary_text, qt_binding_status
+from litmus_link.toolchain import tools_available
+from litmus_link.validator import validate_path
 
 
 def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -26,6 +29,39 @@ def test_cli_list_features(capsys) -> None:  # type: ignore[no-untyped-def]
     out = capsys.readouterr().out
     assert "vector" in out
     assert "pbmt_nc" in out
+
+
+def test_cli_scalar_catalog_and_tools(capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["scalar", "catalog"]) == 0
+    assert '"MP"' in capsys.readouterr().out
+    expected = 0 if tools_available() else 1
+    assert main(["scalar", "tools"]) == expected
+    assert '"diycross7"' in capsys.readouterr().out
+
+
+def test_cli_native_catalog_and_generation(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["native", "catalog"]) == 0
+    catalog_output = capsys.readouterr().out
+    assert '"MP": 260' in catalog_output
+    out = tmp_path / "native-mp"
+    assert main([
+        "native", "templates", "--skeleton", "MP", "--limit", "3",
+        "--no-judge", "--out", str(out),
+    ]) == 0
+    report_output = capsys.readouterr().out
+    assert '"available_litmus": 66560' in report_output
+    assert len(validate_path(out / "@all")) == 3
+
+
+@pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
+def test_cli_scalar_cross_round_trip(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "scalar"
+    assert main([
+        "scalar", "cross", "--skeleton", "MP", "--mechanism", "po",
+        "--no-judge", "--out", str(out),
+    ]) == 0
+    assert main(["validate", str(out / "@all")]) == 0
+    assert "validated 1 litmus files" in capsys.readouterr().out
 
 
 def test_cli_rule_file_generate_and_audit(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -64,6 +100,66 @@ def test_gui_options_and_preview() -> None:
     assert preview["sample"][0]["combination"]["params"]["sew"] == "e32"
 
 
+@pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
+def test_gui_scalar_mp_preview_uses_full_official_family() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "cross",
+            "skeletons": ["MP"],
+            "mechanisms": ["po", "fence", "dependency"],
+            "sample_limit": 1000,
+            "judge": True,
+        }
+    )
+    assert preview["available_litmus"] == 18
+    assert preview["displayed_litmus"] == 18
+    assert len(preview["sample"]) == 18
+    assert all(not item["name"].startswith("LL_custom_") for item in preview["sample"])
+    assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
+    assert all(Path(item["diagram"]["png"]).exists() for item in preview["sample"])
+
+
+@pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
+def test_gui_scalar_generate_honors_file_limit(tmp_path: Path) -> None:
+    out = tmp_path / "gui-scalar"
+    report = generate_payload(
+        {
+            "mode": "scalar",
+            "engine": "cross",
+            "skeletons": ["MP"],
+            "mechanisms": ["po", "fence", "dependency"],
+            "limit": 3,
+            "judge": True,
+            "out": str(out),
+        }
+    )
+    assert report["available_litmus"] == 18
+    assert report["generated_litmus"] == 3
+    assert report["generation_limited"] is True
+    assert report["verdicts"] == {"verified": 3}
+    assert len(validate_path(out / "@all")) == 3
+
+
+def test_gui_native_scalar_preview_is_exhaustive_for_configured_mp_domain() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_templates",
+            "skeletons": ["MP"],
+            "mechanisms": ["po", "fence", "dependency"],
+            "include_same": True,
+            "sample_limit": 3,
+            "judge": False,
+        }
+    )
+    assert preview["available_litmus"] == 66560
+    assert preview["displayed_litmus"] == 3
+    assert all(item["name"].startswith("NATIVE_MP_") for item in preview["sample"])
+    assert all(item["decision"]["reason"].startswith("Scalar RVWMO test exhaustively") for item in preview["sample"])
+    assert all(len(item["case_ir"]["relations"]) == 4 for item in preview["sample"])
+
+
 def test_qt_gui_check(capsys) -> None:  # type: ignore[no-untyped-def]
     assert main(["qt-gui", "--check"]) == 0
     assert "PyQt6" in capsys.readouterr().out
@@ -95,7 +191,7 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
 
 
 def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Path) -> None:
-    from corpus_riscv import corpus_available
+    from litmus_link.corpus_riscv import corpus_available
 
     if not corpus_available():
         return
@@ -116,7 +212,7 @@ def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Pa
 
 
 def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> None:
-    from corpus_riscv import corpus_available
+    from litmus_link.corpus_riscv import corpus_available
 
     if not corpus_available():
         return
@@ -155,7 +251,7 @@ def test_cli_asm_check_returns_nonzero_on_assembler_failure(tmp_path: Path) -> N
 
 def test_python_m_cli_entrypoint_runs() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "cli", "list", "profiles"],
+        [sys.executable, "-m", "litmus_link", "list", "profiles"],
         check=False,
         capture_output=True,
         env={"PYTHONPATH": "src"},

@@ -1,0 +1,821 @@
+from __future__ import annotations
+
+"""Native scalar litmus generation and RISC-V lowering.
+
+Generation in this module does not invoke diy7/diycross7 and does not read an
+existing litmus corpus.  The optional herd7 call is an independent model check
+performed only after Litmus-link has constructed the complete test source.
+"""
+
+import hashlib
+import json
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from itertools import islice, product
+from math import gcd
+from pathlib import Path
+from typing import Iterable, Sequence
+
+from .diagram import render_diagram
+from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation
+from .native_cycles import (
+    EnumerationReport,
+    NativeCycle,
+    enumerate_relation_cycles,
+    enumerate_template_cycles,
+    location_ids,
+    process_ids,
+    validate_cycle,
+    vertex_directions,
+)
+from .native_edges import EXTERNAL, LOCAL, READ, SAME, WRITE, NativeEdge, edge_by_label, edge_catalog, edges_for_shape
+from .toolchain import RISCV_CAT, ToolchainError, herd_judge
+
+
+class NativeGenerationError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class NativePreset:
+    name: str
+    description: str
+    axes: tuple[str, ...]
+    nprocs: int
+
+    def to_json(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "axes": list(self.axes),
+            "nprocs": self.nprocs,
+        }
+
+
+NATIVE_PRESETS: dict[str, NativePreset] = {
+    "MP": NativePreset("MP", "Message Passing", ("Rfe", "RR", "Fre", "WW"), 2),
+    "LB": NativePreset("LB", "Load Buffering", ("Rfe", "RW", "Rfe", "RW"), 2),
+    "SB": NativePreset("SB", "Store Buffering", ("Fre", "WR", "Fre", "WR"), 2),
+    "WRC": NativePreset("WRC", "Write-Read Causality", ("Rfe", "RW", "Rfe", "RR", "Fre"), 3),
+    "RWC": NativePreset("RWC", "Read-Write Causality", ("Rfe", "RR", "Fre", "WR", "Fre"), 3),
+    "IRIW": NativePreset("IRIW", "Independent Reads of Independent Writes", ("Rfe", "RR", "Fre", "Rfe", "RR", "Fre"), 4),
+    "ISA2": NativePreset("ISA2", "Three-hart causality shape", ("Fre", "WW", "Rfe", "RW", "Rfe", "RR"), 3),
+    "R": NativePreset("R", "Read/coherence shape", ("Fre", "WW", "Wse", "WR"), 2),
+    "S": NativePreset("S", "Store/coherence shape", ("Rfe", "RW", "Wse", "WW"), 2),
+    "CoRR": NativePreset("CoRR", "Single-location read-read coherence shape", ("Rfe", "PosRR", "Fre"), 2),
+}
+
+DEFAULT_NATIVE_MECHANISMS = ("po", "fence", "dependency")
+NATIVE_ANNOTATIONS = ("P", "Aq", "Rl", "AR")
+
+
+@dataclass(frozen=True)
+class NativeLoweredCase:
+    name: str
+    litmus: str
+    cycle: NativeCycle
+    case_ir: LitmusCaseIR
+    metadata: dict
+
+
+def native_catalog() -> dict:
+    plain_counts = {
+        name: native_template_audit([name], DEFAULT_NATIVE_MECHANISMS)["accepted"]
+        for name in NATIVE_PRESETS
+    }
+    return {
+        "presets": {name: preset.to_json() for name, preset in NATIVE_PRESETS.items()},
+        "mechanisms": {
+            "po": "program-order edges (different and same location)",
+            "fence": "all nonempty R/W predecessor/successor subsets relevant to main-memory events",
+            "dependency": "address, data, control, and control+fence.i chains",
+        },
+        "annotations": list(NATIVE_ANNOTATIONS),
+        "template_counts": plain_counts,
+        "template_counts_all_annotations": {
+            name: _annotated_count(native_template_cycles([name], DEFAULT_NATIVE_MECHANISMS)[0], NATIVE_ANNOTATIONS)
+            for name in NATIVE_PRESETS
+        },
+    }
+
+
+def native_template_cycles(
+    presets: Sequence[str],
+    mechanisms: Sequence[str] = DEFAULT_NATIVE_MECHANISMS,
+    *,
+    include_same: bool = True,
+) -> tuple[list[NativeCycle], dict]:
+    selected_presets = tuple(dict.fromkeys(presets or ("MP",)))
+    selected_mechanisms = _validate_mechanisms(mechanisms)
+    cycles: list[NativeCycle] = []
+    reports: list[dict] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for name in selected_presets:
+        try:
+            preset = NATIVE_PRESETS[name]
+        except KeyError as exc:
+            raise NativeGenerationError(f"unknown native scalar preset: {name}") from exc
+        axes: list[NativeEdge | Sequence[NativeEdge]] = []
+        for token in preset.axes:
+            if token in {"RR", "RW", "WR", "WW"}:
+                alternatives = edges_for_shape(token, selected_mechanisms, include_same=include_same)
+                if not alternatives:
+                    raise NativeGenerationError(f"preset {name} has no legal alternatives for {token}")
+                axes.append(alternatives)
+            else:
+                axes.append(edge_by_label(token))
+        family_cycles, report = enumerate_template_cycles(
+            name,
+            axes,
+            max_procs=preset.nprocs,
+            exact_procs=True,
+        )
+        reports.append({"family": name, **report.to_json()})
+        for cycle in family_cycles:
+            key = (name, cycle.canonical_key)
+            if key not in seen:
+                seen.add(key)
+                cycles.append(cycle)
+    cycles.sort(key=lambda cycle: (cycle.family, cycle.canonical_key))
+    excluded: Counter[str] = Counter()
+    for report in reports:
+        excluded.update(report["excluded"])
+    audit = {
+        "schema": "litmus-link.native-enumeration.v1",
+        "mode": "templates",
+        "presets": list(selected_presets),
+        "mechanisms": list(selected_mechanisms),
+        "include_same_location": include_same,
+        "candidates": sum(report["candidates"] for report in reports),
+        "accepted": len(cycles),
+        "duplicate": sum(report["duplicate"] for report in reports),
+        "excluded": dict(sorted(excluded.items())),
+        "families": reports,
+    }
+    return cycles, audit
+
+
+def native_template_audit(
+    presets: Sequence[str],
+    mechanisms: Sequence[str] = DEFAULT_NATIVE_MECHANISMS,
+    *,
+    include_same: bool = True,
+    annotations: Sequence[str] = ("P",),
+) -> dict:
+    cycles, base_audit = native_template_cycles(presets, mechanisms, include_same=include_same)
+    selected_annotations = _validate_annotations(annotations)
+    audit = dict(base_audit)
+    audit["annotations"] = list(selected_annotations)
+    audit["base_cycles"] = len(cycles)
+    audit["accepted"] = _annotated_count(cycles, selected_annotations)
+    return audit
+
+
+def annotated_native_cycles(
+    cycles: Sequence[NativeCycle],
+    annotations: Sequence[str],
+) -> Iterable[NativeCycle]:
+    modes = _validate_annotations(annotations)
+    for cycle in cycles:
+        symmetries = _edge_symmetries(cycle)
+        for assignment in product(modes, repeat=cycle.size):
+            if assignment != min(_rotate(assignment, offset) for offset in symmetries):
+                continue
+            yield NativeCycle(cycle.edges, cycle.family, tuple(assignment)).canonical()
+
+
+def native_relation_cycles(
+    *,
+    mechanisms: Sequence[str] = ("communication", "po", "fence", "dependency"),
+    include_same: bool = True,
+    include_internal: bool = True,
+    min_size: int = 2,
+    max_size: int = 4,
+    max_procs: int = 2,
+    exact_procs: bool = False,
+    max_accesses_per_proc: int | None = None,
+) -> list[NativeCycle]:
+    domain = edge_catalog(tuple(dict.fromkeys(mechanisms)), include_same, include_internal)
+    return list(
+        enumerate_relation_cycles(
+            domain,
+            min_size=min_size,
+            max_size=max_size,
+            max_procs=max_procs,
+            exact_procs=exact_procs,
+            max_accesses_per_proc=max_accesses_per_proc,
+        )
+    )
+
+
+def lower_native_cycle(cycle: NativeCycle) -> NativeLoweredCase:
+    decision = validate_cycle(cycle.edges)
+    if not decision.accepted:
+        raise NativeGenerationError(f"cannot lower invalid native cycle: {decision.reason}")
+    directions = vertex_directions(cycle.edges)
+    procs = process_ids(cycle.edges)
+    locations = location_ids(cycle.edges)
+    nvertices = len(cycle.edges)
+    annotations = _cycle_annotations(cycle)
+    proc_orders = _program_orders(cycle.edges, procs)
+    write_values, read_values, final_values = _memory_values(cycle.edges, directions, locations)
+    location_names = {index: _location_name(index) for index in sorted(set(locations))}
+
+    address_regs: dict[tuple[int, int], str] = {}
+    memory_regs: dict[int, str] = {}
+    init_lines: list[str] = [f"{location_names[index]}=0;" for index in sorted(location_names)]
+    hart_events: list[list[LitmusEvent]] = []
+    instruction_rows: list[list[str]] = []
+
+    for proc in range(max(procs) + 1):
+        vertices = proc_orders[proc]
+        register_pool = _RegisterPool()
+        for location in sorted({locations[vertex] for vertex in vertices}):
+            register = register_pool.address()
+            address_regs[(proc, location)] = register
+            init_lines.append(f"{proc}:{register}={location_names[location]};")
+        for vertex in vertices:
+            register = register_pool.value()
+            memory_regs[vertex] = register
+            if directions[vertex] == WRITE:
+                init_lines.append(f"{proc}:{register}={write_values[vertex]};")
+
+        events: list[LitmusEvent] = []
+        instructions: list[str] = []
+        for position, vertex in enumerate(vertices):
+            location = locations[vertex]
+            address = address_regs[(proc, location)]
+            register = memory_regs[vertex]
+            annotation = annotations[vertex]
+            if directions[vertex] == READ:
+                instruction = _load_instruction(register, address, annotation)
+                kind = "load" if annotation == "P" else "amo"
+                value = str(read_values[vertex])
+            else:
+                instruction = _store_instruction(register, address, annotation)
+                kind = "store" if annotation == "P" else "amo"
+                value = str(write_values[vertex])
+            events.append(
+                LitmusEvent(
+                    event_id=f"v{vertex}",
+                    hart=proc,
+                    kind=kind,
+                    instruction=instruction,
+                    location=location_names[location],
+                    register=register,
+                    value=value,
+                    role="cycle-event",
+                )
+            )
+            instructions.append(instruction)
+            outgoing = cycle.edges[vertex]
+            target = (vertex + 1) % nvertices
+            if outgoing.scope == LOCAL:
+                if target not in vertices or position + 1 >= len(vertices) or vertices[position + 1] != target:
+                    raise NativeGenerationError(
+                        f"local edge {outgoing.label} is inconsistent with hart P{proc} program order"
+                    )
+                middle = _lower_local_edge(
+                    outgoing,
+                    proc=proc,
+                    source_register=register,
+                    target_address=address_regs[(proc, locations[target])],
+                    target_data=memory_regs[target],
+                    registers=register_pool,
+                    label_index=vertex,
+                )
+                for middle_index, (middle_kind, middle_instruction, role) in enumerate(middle):
+                    events.append(
+                        LitmusEvent(
+                            event_id=f"v{vertex}_m{middle_index}",
+                            hart=proc,
+                            kind=middle_kind,
+                            instruction=middle_instruction,
+                            role=role,
+                        )
+                    )
+                    instructions.append(middle_instruction)
+        hart_events.append(events)
+        instruction_rows.append(instructions)
+
+    relations = [
+        LitmusRelation(
+            src=f"v{index}",
+            dst=f"v{(index + 1) % nvertices}",
+            kind=edge.relation,
+            label=edge.label,
+            local=edge.scope == LOCAL,
+        )
+        for index, edge in enumerate(cycle.edges)
+    ]
+    exists_terms = [
+        f"{procs[vertex]}:{memory_regs[vertex]}={read_values[vertex]}"
+        for vertex in range(nvertices)
+        if directions[vertex] == READ
+    ]
+    exists_terms.extend(
+        f"{location_names[location]}={value}" for location, value in sorted(final_values.items())
+    )
+    if not exists_terms:
+        raise NativeGenerationError("native cycle has no observable read or final-memory outcome")
+    exists = "(" + " /\\ ".join(exists_terms) + ")"
+    name = _native_name(cycle)
+    cycle_text = " ".join(cycle.labels)
+    case_ir = LitmusCaseIR(
+        name=name,
+        display_name=name,
+        combination_name=name,
+        skeleton=cycle.family or "Native",
+        variant="native-exhaustive",
+        cycle=cycle_text,
+        init_lines=init_lines,
+        harts=hart_events,
+        relations=relations,
+        exists=exists,
+        expected_outcome="solver_required",
+        model="rvwmo-herd7",
+        description=f"Native exhaustive scalar cycle ({cycle.family or 'unclassified'}): {cycle_text}",
+        tags=["native", "scalar", "rvwmo", cycle.family or "unclassified"],
+    )
+    litmus = _render_native_litmus(name, cycle_text, init_lines, instruction_rows, exists)
+    return NativeLoweredCase(
+        name=name,
+        litmus=litmus,
+        cycle=cycle,
+        case_ir=case_ir,
+        metadata={
+            "process_ids": list(procs),
+            "location_ids": list(locations),
+            "write_values": {str(key): value for key, value in sorted(write_values.items())},
+            "read_values": {str(key): value for key, value in sorted(read_values.items())},
+            "final_values": {location_names[key]: value for key, value in sorted(final_values.items())},
+            "annotations": list(annotations),
+        },
+    )
+
+
+def generate_native_templates(
+    *,
+    out_dir: Path,
+    presets: Sequence[str],
+    mechanisms: Sequence[str] = DEFAULT_NATIVE_MECHANISMS,
+    include_same: bool = True,
+    annotations: Sequence[str] = NATIVE_ANNOTATIONS,
+    limit: int | None = None,
+    judge: bool = True,
+    diagrams: bool = False,
+    timeout: int = 180,
+) -> dict:
+    base_cycles, audit = native_template_cycles(presets, mechanisms, include_same=include_same)
+    selected_annotations = _validate_annotations(annotations)
+    available = _annotated_count(base_cycles, selected_annotations)
+    audit = dict(audit)
+    audit["annotations"] = list(selected_annotations)
+    audit["base_cycles"] = len(base_cycles)
+    audit["accepted"] = available
+    return _write_native_cases(
+        annotated_native_cycles(base_cycles, selected_annotations),
+        out_dir,
+        audit=audit,
+        available=available,
+        limit=limit,
+        judge=judge,
+        diagrams=diagrams,
+        timeout=timeout,
+    )
+
+
+def generate_native_relations(
+    *,
+    out_dir: Path,
+    mechanisms: Sequence[str] = ("communication", "po", "fence", "dependency"),
+    include_same: bool = True,
+    include_internal: bool = True,
+    min_size: int = 2,
+    max_size: int = 4,
+    max_procs: int = 2,
+    exact_procs: bool = False,
+    max_accesses_per_proc: int | None = None,
+    annotations: Sequence[str] = ("P",),
+    limit: int | None = None,
+    judge: bool = True,
+    diagrams: bool = False,
+    timeout: int = 180,
+) -> dict:
+    base_cycles = native_relation_cycles(
+        mechanisms=mechanisms,
+        include_same=include_same,
+        include_internal=include_internal,
+        min_size=min_size,
+        max_size=max_size,
+        max_procs=max_procs,
+        exact_procs=exact_procs,
+        max_accesses_per_proc=max_accesses_per_proc,
+    )
+    audit = {
+        "schema": "litmus-link.native-enumeration.v1",
+        "mode": "cycles",
+        "mechanisms": list(mechanisms),
+        "include_same_location": include_same,
+        "include_internal_communication": include_internal,
+        "min_size": min_size,
+        "max_size": max_size,
+        "max_procs": max_procs,
+        "exact_procs": exact_procs,
+        "annotations": list(_validate_annotations(annotations)),
+        "base_cycles": len(base_cycles),
+    }
+    available = _annotated_count(base_cycles, annotations)
+    audit["accepted"] = available
+    return _write_native_cases(
+        annotated_native_cycles(base_cycles, annotations),
+        out_dir,
+        audit=audit,
+        available=available,
+        limit=limit,
+        judge=judge,
+        diagrams=diagrams,
+        timeout=timeout,
+    )
+
+
+def _write_native_cases(
+    cycles: Iterable[NativeCycle],
+    out_dir: Path,
+    *,
+    audit: dict,
+    available: int,
+    limit: int | None,
+    judge: bool,
+    diagrams: bool,
+    timeout: int,
+) -> dict:
+    if limit is not None and limit < 1:
+        raise NativeGenerationError("native generation limit must be at least 1")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    selected = islice(cycles, limit) if limit is not None else cycles
+    filenames: list[str] = []
+    verdicts: Counter[str] = Counter()
+    for cycle in selected:
+        case = lower_native_cycle(cycle)
+        solver = _judge_native(case, judge=judge, timeout=timeout)
+        verdicts[solver["status"]] += 1
+        (out_dir / f"{case.name}.litmus").write_text(case.litmus, encoding="utf-8")
+        (out_dir / f"{case.name}.solver.json").write_text(
+            json.dumps(solver, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        diagram = render_diagram(case.case_ir, solver, out_dir).summary if diagrams else None
+        meta = {
+            "schema": "litmus-link.native-scalar-meta.v1",
+            "name": case.name,
+            "architecture": "RISCV",
+            "requires": ["RV64I", *(["A"] if any(mode != "P" for mode in _cycle_annotations(case.cycle)) else [])],
+            "cycle": " ".join(case.cycle.labels),
+            "exists": case.case_ir.exists,
+            "nprocs": len(case.case_ir.harts),
+            "generator": {"engine": "litmus-link-native", "audit": audit},
+            "generated_from": "litmus-link-native",
+            "native": case.metadata,
+            "case_ir": case.case_ir.to_json(),
+            "solver": solver,
+        }
+        if diagram is not None:
+            meta["diagram"] = diagram
+        (out_dir / f"{case.name}.meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        filenames.append(f"{case.name}.litmus")
+    (out_dir / "@all").write_text("\n".join(filenames) + ("\n" if filenames else ""), encoding="utf-8")
+    report = {
+        "schema": "litmus-link.native-generation.v1",
+        "architecture": "RISCV",
+        "generator": {"engine": "litmus-link-native"},
+        "audit": audit,
+        "available_litmus": available,
+        "generated_litmus": len(filenames),
+        "generation_limit": limit,
+        "generation_limited": len(filenames) < available,
+        "judge": judge,
+        "verdicts": dict(sorted(verdicts.items())),
+        "output": str(out_dir),
+        "atfile": str(out_dir / "@all"),
+    }
+    (out_dir / "generation-report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (out_dir / "audit-report.json").write_text(
+        json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def _program_orders(edges: Sequence[NativeEdge], procs: Sequence[int]) -> list[list[int]]:
+    vertices_by_proc: dict[int, set[int]] = defaultdict(set)
+    outgoing: dict[int, int] = {}
+    indegree: dict[int, int] = defaultdict(int)
+    for vertex, proc in enumerate(procs):
+        vertices_by_proc[proc].add(vertex)
+    for vertex, edge in enumerate(edges):
+        if edge.scope != LOCAL:
+            continue
+        target = (vertex + 1) % len(edges)
+        if procs[vertex] != procs[target]:
+            raise NativeGenerationError(f"local edge {edge.label} crosses harts")
+        outgoing[vertex] = target
+        indegree[target] += 1
+    orders: list[list[int]] = []
+    for proc in range(max(procs) + 1):
+        vertices = vertices_by_proc[proc]
+        ready = sorted(vertex for vertex in vertices if indegree[vertex] == 0)
+        order: list[int] = []
+        while ready:
+            vertex = ready.pop(0)
+            order.append(vertex)
+            target = outgoing.get(vertex)
+            if target is not None:
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+                    ready.sort()
+        if len(order) != len(vertices):
+            raise NativeGenerationError(f"local program-order graph for P{proc} is cyclic")
+        orders.append(order)
+    return orders
+
+
+def _memory_values(
+    edges: Sequence[NativeEdge],
+    directions: Sequence[str],
+    locations: Sequence[int],
+) -> tuple[dict[int, int], dict[int, int], dict[int, int]]:
+    writes = [vertex for vertex, direction in enumerate(directions) if direction == WRITE]
+    reads = [vertex for vertex, direction in enumerate(directions) if direction == READ]
+    rf_source: dict[int, int] = {}
+    co_edges: dict[int, set[int]] = defaultdict(set)
+    indegree: dict[int, int] = defaultdict(int)
+
+    def add_co(before: int, after: int) -> None:
+        if before == after or after in co_edges[before]:
+            return
+        if directions[before] != WRITE or directions[after] != WRITE:
+            raise NativeGenerationError("coherence constraint does not connect two writes")
+        if locations[before] != locations[after]:
+            raise NativeGenerationError("coherence constraint crosses locations")
+        co_edges[before].add(after)
+        indegree[after] += 1
+
+    for vertex, edge in enumerate(edges):
+        target = (vertex + 1) % len(edges)
+        if edge.relation == "rf":
+            if target in rf_source and rf_source[target] != vertex:
+                raise NativeGenerationError(f"read v{target} has multiple rf sources")
+            rf_source[target] = vertex
+        elif edge.relation == "co":
+            add_co(vertex, target)
+
+    for vertex, edge in enumerate(edges):
+        if edge.relation != "fr":
+            continue
+        target = (vertex + 1) % len(edges)
+        source = rf_source.get(vertex)
+        if source is not None:
+            add_co(source, target)
+
+    write_values: dict[int, int] = {}
+    final_values: dict[int, int] = {}
+    for location in sorted(set(locations)):
+        location_writes = sorted(vertex for vertex in writes if locations[vertex] == location)
+        ready = sorted(vertex for vertex in location_writes if indegree[vertex] == 0)
+        order: list[int] = []
+        while ready:
+            vertex = ready.pop(0)
+            order.append(vertex)
+            for target in sorted(co_edges.get(vertex, ())):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+                    ready.sort()
+        if len(order) != len(location_writes):
+            raise NativeGenerationError(f"coherence constraints for location {location} are cyclic")
+        for value, vertex in enumerate(order, start=1):
+            write_values[vertex] = value
+        if order:
+            final_values[location] = write_values[order[-1]]
+    read_values = {
+        vertex: write_values[rf_source[vertex]] if vertex in rf_source else 0
+        for vertex in reads
+    }
+    return write_values, read_values, final_values
+
+
+class _RegisterPool:
+    def __init__(self) -> None:
+        self._value = iter([f"x{index}" for index in range(5, 16)])
+        self._address = iter([f"x{index}" for index in range(20, 29)])
+        self._temp = iter([f"x{index}" for index in range(16, 20)] + ["x29", "x30", "x31"])
+
+    def value(self) -> str:
+        return _next_register(self._value, "value")
+
+    def address(self) -> str:
+        return _next_register(self._address, "address")
+
+    def temp(self) -> str:
+        return _next_register(self._temp, "temporary")
+
+
+def _next_register(pool, purpose: str) -> str:
+    try:
+        return next(pool)
+    except StopIteration as exc:
+        raise NativeGenerationError(f"native lowering exhausted {purpose} registers") from exc
+
+
+def _lower_local_edge(
+    edge: NativeEdge,
+    *,
+    proc: int,
+    source_register: str,
+    target_address: str,
+    target_data: str,
+    registers: _RegisterPool,
+    label_index: int,
+) -> list[tuple[str, str, str]]:
+    if edge.relation in {"po", "rf", "fr", "co"}:
+        return []
+    if edge.relation == "fence":
+        return [("fence", edge.lowering, "fence")]
+    if edge.relation != "dependency":
+        raise NativeGenerationError(f"no native lowering for local edge {edge.label}")
+    if edge.mechanism == "addr":
+        temporary = registers.temp()
+        return [
+            ("dep", f"xor {temporary},{source_register},{source_register}", "addr-dep"),
+            ("dep", f"add {target_address},{target_address},{temporary}", "addr-dep"),
+        ]
+    if edge.mechanism == "data":
+        temporary = registers.temp()
+        return [
+            ("dep", f"xor {temporary},{source_register},{source_register}", "data-dep"),
+            ("dep", f"add {target_data},{target_data},{temporary}", "data-dep"),
+        ]
+    if edge.mechanism in {"ctrl", "ctrl_fencei"}:
+        label = f"LC{proc}_{label_index}"
+        out = [
+            ("branch", f"bne {source_register},x0,{label}", "ctrl-dep"),
+            ("label", f"{label}:", "ctrl-dep"),
+        ]
+        if edge.mechanism == "ctrl_fencei":
+            out.append(("fence", "fence.i", "ctrl-fencei"))
+        return out
+    raise NativeGenerationError(f"unknown dependency mechanism: {edge.mechanism}")
+
+
+def _render_native_litmus(
+    name: str,
+    cycle: str,
+    init_lines: Sequence[str],
+    harts: Sequence[Sequence[str]],
+    exists: str,
+) -> str:
+    width = max(18, max((len(instruction) for hart in harts for instruction in hart), default=0) + 2)
+    rows = [" " + " | ".join(f"P{proc:<{width - 1}}" for proc in range(len(harts))) + ";"]
+    for row in range(max((len(hart) for hart in harts), default=0)):
+        rows.append(
+            " "
+            + " | ".join(
+                f"{(hart[row] if row < len(hart) else ''):<{width}}" for hart in harts
+            )
+            + ";"
+        )
+    return "\n".join(
+        [
+            f"RISCV {name}",
+            f'"{cycle}"',
+            f"Cycle={cycle}",
+            "Generator=Litmus-link-native",
+            "{",
+            *init_lines,
+            "}",
+            *rows,
+            "exists",
+            exists,
+            "",
+        ]
+    )
+
+
+def _judge_native(case: NativeLoweredCase, *, judge: bool, timeout: int) -> dict:
+    if not judge:
+        return {
+            "schema": "litmus-link.native-solver.v1",
+            "status": "unchecked",
+            "tool": "herd7",
+            "model": "riscv.cat",
+            "allowed": None,
+            "verdict": "unchecked",
+            "reason": "independent herd7 cross-check disabled by the user",
+        }
+    try:
+        verdict = herd_judge(case.litmus, timeout=timeout)
+    except ToolchainError as exc:
+        raise NativeGenerationError(f"herd7 cross-check failed for {case.name}: {exc}") from exc
+    status = "verified" if verdict.outcome in {"observable", "forbidden"} else "unknown"
+    return {
+        "schema": "litmus-link.native-solver.v1",
+        "status": status,
+        "tool": "herd7",
+        "model": "riscv.cat",
+        "model_path": str(RISCV_CAT),
+        "allowed": verdict.allowed,
+        "verdict": verdict.outcome,
+        "observation": verdict.observation,
+        "positive": verdict.positive,
+        "negative": verdict.negative,
+        "states": verdict.states,
+        "condition": verdict.condition,
+        "raw_output": verdict.raw,
+    }
+
+
+def _native_name(cycle: NativeCycle) -> str:
+    family = cycle.family or "Cycle"
+    readable = "+".join(_short_edge(edge) for edge in cycle.edges if edge.scope == LOCAL)
+    digest = hashlib.sha256("\0".join(cycle.labels).encode("utf-8")).hexdigest()[:12]
+    readable = readable[:96].strip("+") or "comm"
+    return f"NATIVE_{family}_{readable}_{digest}"
+
+
+def _short_edge(edge: NativeEdge) -> str:
+    return edge.label.replace("Fence.", "F.").replace("Dp", "")
+
+
+def _location_name(index: int) -> str:
+    alphabet = "xyzabcdefghijklmnopqrstuvw"
+    if index < len(alphabet):
+        return alphabet[index]
+    return f"loc{index}"
+
+
+def _cycle_annotations(cycle: NativeCycle) -> tuple[str, ...]:
+    return cycle.annotations or ("P",) * cycle.size
+
+
+def _load_instruction(destination: str, address: str, annotation: str) -> str:
+    if annotation == "P":
+        return f"lw {destination},0({address})"
+    suffix = _amo_suffix(annotation)
+    return f"amoor.w{suffix} {destination},x0,({address})"
+
+
+def _store_instruction(data: str, address: str, annotation: str) -> str:
+    if annotation == "P":
+        return f"sw {data},0({address})"
+    suffix = _amo_suffix(annotation)
+    return f"amoswap.w{suffix} x0,{data},({address})"
+
+
+def _amo_suffix(annotation: str) -> str:
+    try:
+        return {"Aq": ".aq", "Rl": ".rl", "AR": ".aq.rl"}[annotation]
+    except KeyError as exc:
+        raise NativeGenerationError(f"invalid AMO annotation: {annotation}") from exc
+
+
+def _validate_annotations(annotations: Sequence[str]) -> tuple[str, ...]:
+    selected = tuple(dict.fromkeys(annotations or ("P",)))
+    unknown = set(selected) - set(NATIVE_ANNOTATIONS)
+    if unknown:
+        raise NativeGenerationError(f"unknown native annotations: {', '.join(sorted(unknown))}")
+    return selected
+
+
+def _edge_symmetries(cycle: NativeCycle) -> tuple[int, ...]:
+    edge_labels = tuple(edge.label for edge in cycle.edges)
+    return tuple(
+        offset
+        for offset in range(cycle.size)
+        if _rotate(edge_labels, offset) == edge_labels
+    )
+
+
+def _annotated_count(cycles: Sequence[NativeCycle], annotations: Sequence[str]) -> int:
+    modes = _validate_annotations(annotations)
+    count = 0
+    for cycle in cycles:
+        symmetries = _edge_symmetries(cycle)
+        count += sum(len(modes) ** gcd(cycle.size, offset) for offset in symmetries) // len(symmetries)
+    return count
+
+
+def _rotate(values: Sequence[str], offset: int) -> tuple[str, ...]:
+    values = tuple(values)
+    return values[offset:] + values[:offset]
+
+
+def _validate_mechanisms(mechanisms: Sequence[str]) -> tuple[str, ...]:
+    selected = tuple(dict.fromkeys(mechanisms or DEFAULT_NATIVE_MECHANISMS))
+    unknown = set(selected) - set(DEFAULT_NATIVE_MECHANISMS)
+    if unknown:
+        raise NativeGenerationError(f"unknown native mechanisms: {', '.join(sorted(unknown))}")
+    return selected

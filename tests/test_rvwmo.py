@@ -1,6 +1,6 @@
-from litmus_ir import _mp_case, _lb_case, _sb_case, _wrc_case, _rwc_case, _iriw_case
-from models import Combination
-from rvwmo import check_rvwmo
+from litmus_link.litmus_ir import _mp_case, _lb_case, _sb_case, _wrc_case, _rwc_case, _iriw_case
+from litmus_link.models import Combination
+from litmus_link.rvwmo import check_rvwmo
 
 
 BUILDERS = {

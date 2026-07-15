@@ -1,11 +1,11 @@
 import pytest
 
-from models import Combination, Decision, GENERATED
-from litmus_ir import build_litmus_ir_cases
-from vector_lower import lower_vector_case, lower_vector_to_litmus
-from renderer import render_cases
-from solver import solve_generated_case
-from toolchain import tools_available
+from litmus_link.models import Combination, Decision, GENERATED
+from litmus_link.litmus_ir import build_litmus_ir_cases
+from litmus_link.vector_lower import lower_vector_case, lower_vector_to_litmus
+from litmus_link.renderer import render_cases
+from litmus_link.solver import solve_generated_case
+from litmus_link.toolchain import tools_available
 
 VECTOR_FORMS = [
     ("unit_load", "vector_load"), ("unit_store", "vector_store"),

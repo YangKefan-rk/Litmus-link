@@ -1,7 +1,7 @@
 import pytest
 
-from corpus_ir import corpus_to_ir, _kind, _addr_map
-from corpus_riscv import CorpusTest
+from litmus_link.corpus_ir import corpus_to_ir, _kind, _addr_map
+from litmus_link.corpus_riscv import CorpusTest
 
 
 def _mk(harts, init=(), name="MP+po+po", cycle="Rfe PodRR Fre PodWW"):
@@ -45,7 +45,7 @@ def test_corpus_to_ir_builds_events_and_po() -> None:
 
 
 def test_corpus_to_ir_attaches_verdict_outcome() -> None:
-    from toolchain import HerdVerdict
+    from litmus_link.toolchain import HerdVerdict
     t = _mk(harts=[["sw x5,0(x6)"], ["lw x5,0(x6)"]])
     v = HerdVerdict("forbidden", False, "Never", 0, 3, 3, "exists (...)", "")
     ir = corpus_to_ir(t, v)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from asm_check import asm_check, extract_litmus_instructions
+from litmus_link.asm_check import asm_check, extract_litmus_instructions
 
 
 def test_extract_litmus_instructions_ignores_init_and_exists() -> None:

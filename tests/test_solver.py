@@ -1,7 +1,7 @@
-from solver import parse_herd_output, solve_generated_case
-from renderer import render_cases
-from rules import evaluate
-from models import Combination
+from litmus_link.solver import parse_herd_output, solve_generated_case
+from litmus_link.renderer import render_cases
+from litmus_link.rules import evaluate
+from litmus_link.models import Combination
 
 
 def test_parse_herd_never_as_forbidden() -> None:

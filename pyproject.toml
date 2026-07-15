@@ -10,36 +10,18 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Litmus-link contributors" }]
-dependencies = []
+dependencies = ["Pillow>=9.0"]
 
 [project.scripts]
-litmus-link = "cli:main"
+litmus-link = "litmus_link.cli:main"
 
 [tool.setuptools]
-py-modules = [
-  "asm_check",
-  "cli",
-  "corpus_ir",
-  "corpus_riscv",
-  "descriptions",
-  "diagram",
-  "fusion",
-  "generator",
-  "gui",
-  "litmus_ir",
-  "models",
-  "profiles",
-  "qt_gui",
-  "renderer",
-  "rule_file",
-  "rules",
-  "rvwmo",
-  "solver",
-  "toolchain",
-  "upstream",
-  "validator",
-  "vector_lower",
-]
+package-dir = {"" = "src"}
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["litmus_link*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

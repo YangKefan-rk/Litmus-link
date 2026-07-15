@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from .models import GeneratedCase
+from .rvwmo import check_rvwmo
+from .fusion import analyze_fusion
+
+
+@dataclass(frozen=True)
+class SolverResult:
+    status: str
+    verdict: str
+    allowed: bool | None
+    model: str
+    tool: str
+    reason: str
+    cross_check: str = "native_only"
+    edges: list[dict[str, Any]] = field(default_factory=list)
+    fusion: dict[str, Any] | None = None
+    observation: str = ""
+    raw_output: str = ""
+    command: list[str] | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "schema": "litmus-link.solver.v1",
+            "status": self.status,
+            "verdict": self.verdict,
+            "allowed": self.allowed,
+            "model": self.model,
+            "tool": self.tool,
+            "reason": self.reason,
+            "cross_check": self.cross_check,
+            "edges": list(self.edges),
+            "fusion": self.fusion,
+            "observation": self.observation,
+            "raw_output": self.raw_output,
+            "command": list(self.command or []),
+        }
+
+
+def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResult:
+    case_ir = case.case_ir
+    if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"}:
+        # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
+        # made. For fusion (vector/CMO/PBMT/TLB) cases we still attach the
+        # extension-prose ordering analysis so consumers get something better
+        # than a bare "not modeled" -- but it never carries a herd verdict.
+        fusion = analyze_fusion(case_ir).to_json() if case_ir is not None else None
+        reason = "Only pure scalar RVWMO main-memory cases receive a formal verdict."
+        if fusion is not None and fusion.get("status") == "analyzed":
+            reason = "Extension-prose fusion analysis (informative, no herd verdict): " + fusion["reason"]
+        return SolverResult(
+            status="not_applicable",
+            verdict="unmodeled",
+            allowed=None,
+            model=case_ir.model if case_ir is not None else case.decision.rvwmo_class,
+            tool="none",
+            reason=reason,
+            fusion=fusion,
+        )
+
+    # Primary path: the native axiomatic RVWMO checker. It always renders a
+    # verdict for scalar cycle cases and needs no external tool.
+    native = check_rvwmo(case_ir)
+    edges = [edge.to_json() for edge in native.edges]
+
+    # NC scalar tests are RVWMO-decidable too (Svpbmt: NC is non-cacheable main
+    # memory, RVWMO-ordered) -- same verdict as the cacheable twin, plus one
+    # Svpbmt prose dependency we record here.
+    reason_base = native.reason
+    if case.decision.expected_kind == "rvwmo-nc":
+        reason_base = (
+            native.reason
+            + " (PBMT=NC is non-cacheable main memory and obeys RVWMO per Svpbmt, so this"
+            + " verdict equals the cacheable twin; the plain body lets herd7 cross-check it.)"
+        )
+    elif case.decision.expected_kind == "rvwmo-vector":
+        reason_base = (
+            native.reason
+            + " (RVV reduces vector memory ordering to per-element RVWMO; this case is lowered"
+            + " to its scalar element twin -- which herd7's RISC-V front-end DOES parse -- and"
+            + " judged by the real herd7/riscv.cat, so the verdict is tool-confirmed, not native-only.)"
+        )
+
+    # Cross-validation against the real herd7. Vector cases are judged on their
+    # scalar element-lowered twin (herd7 cannot parse RVV directly); scalar cases
+    # run on their own text. Both confirm the native verdict with riscv.cat.
+    if case.decision.expected_kind == "rvwmo-vector" and case_ir is not None:
+        herd_check = _run_herd_lowered(case_ir)
+    else:
+        herd_check = _run_herd(case, herd)
+    if herd_check is None:
+        return SolverResult(
+            status="verified",
+            verdict=native.verdict,
+            allowed=native.allowed,
+            model="rvwmo-native",
+            tool="native",
+            reason=reason_base + " (herd7 not on PATH; no cross-check performed.)",
+            cross_check="herd7_absent",
+            edges=edges,
+        )
+
+    herd_status, herd_parsed, raw, command = herd_check
+    if herd_status != "ok":
+        return SolverResult(
+            status="verified",
+            verdict=native.verdict,
+            allowed=native.allowed,
+            model="rvwmo-native",
+            tool="native",
+            reason=reason_base + f" (herd7 cross-check unavailable: {herd_status}.)",
+            cross_check=f"herd7_{herd_status}",
+            edges=edges,
+            raw_output=raw,
+            command=command,
+        )
+
+    if herd_parsed["allowed"] == native.allowed:
+        return SolverResult(
+            status="verified",
+            verdict=native.verdict,
+            allowed=native.allowed,
+            model="rvwmo-native+riscv.cat",
+            tool="native+herd7",
+            reason=reason_base + " Confirmed by herd7/riscv.cat.",
+            cross_check="agree",
+            edges=edges,
+            observation=herd_parsed.get("observation", ""),
+            raw_output=raw,
+            command=command,
+        )
+
+    # Native and herd7 disagree. herd7 + riscv.cat is the OFFICIAL RISC-V memory
+    # model; the native checker is a hand-rolled approximation that mis-handles
+    # topologies whose forbiddenness is not captured by "all po edges preserved"
+    # -- e.g. RWC, where the declared closing edge is a cross-address coherence
+    # edge that is NOT a real RVWMO cycle, so native over-forbids. herd7 judges
+    # the actual rendered body, so it is authoritative for the verdict; native's
+    # per-edge reasoning is kept for explanation and the disagreement is surfaced
+    # via cross_check rather than silently picking the (possibly wrong) native one.
+    return SolverResult(
+        status="verified",
+        verdict=herd_parsed["verdict"],
+        allowed=herd_parsed["allowed"],
+        model="riscv.cat+native",
+        tool="herd7(authoritative)+native",
+        reason=(
+            f"herd7/riscv.cat (authoritative RISC-V model) says {herd_parsed['verdict']}; "
+            f"the native approximation said {native.verdict} and is overridden. "
+            "Native per-edge reasoning is retained for explanation only."
+        ),
+        cross_check="native_disagrees",
+        edges=edges,
+        observation=herd_parsed.get("observation", ""),
+        raw_output=raw,
+        command=command,
+    )
+
+
+_HERD_BODY_CACHE: dict[str, Any] = {}
+
+
+def _semantic_body(litmus_text: str) -> str:
+    """The init+threads+exists block (from the first '{') fully determines
+    herd7's verdict; the `RISCV <name>` header, cycle-label string and comment
+    lines before it do not. Keying the herd cache on this lets the many
+    stress-profile cases that render byte-identical bodies under different names
+    share a single herd7 invocation."""
+    idx = litmus_text.find("{")
+    return litmus_text[idx:] if idx != -1 else litmus_text
+
+
+def _herd_judge_cached(litmus_text: str):
+    """herd_judge memoised on the semantic body. Sound because the verdict is a
+    pure function of the body; herd is still run on the FULL text on a miss (it
+    needs the `RISCV <name>` header to parse). Note: a cache hit reuses the
+    first body's raw output, so raw_output's echoed test-name may differ from
+    the current case -- cosmetic only, the verdict/observation are identical."""
+    from . import toolchain
+
+    body = _semantic_body(litmus_text)
+    cached = _HERD_BODY_CACHE.get(body)
+    if cached is not None:
+        return cached
+    verdict = toolchain.herd_judge(litmus_text)
+    if len(_HERD_BODY_CACHE) < 50000:  # soft cap for long-lived server processes
+        _HERD_BODY_CACHE[body] = verdict
+    return verdict
+
+
+def _judge_litmus_via_toolchain(litmus_text: str, command_label: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Judge one litmus text with the real herd7 via the toolchain wrapper.
+
+    Uses toolchain's explicit binary path + ``-I <libdir>`` so the cross-check
+    works even when herd7 is not on PATH (it is not, in this environment -- the
+    previous ``shutil.which`` lookup silently disabled every scalar cross-check,
+    and the command was also missing ``-I`` so riscv.cat could not be found).
+    Returns None when herd7 is unavailable, else (status, parsed, raw, command)
+    with status "ok" | "error" | "unparsed".
+    """
+    from . import toolchain
+
+    if not toolchain.HERD.exists() or not toolchain.RISCV_CAT.exists():
+        return None
+    command = [str(toolchain.HERD), "-I", str(toolchain.HERDTOOLS_LIB),
+               "-model", str(toolchain.RISCV_CAT), command_label]
+    try:
+        verdict = _herd_judge_cached(litmus_text)
+    except toolchain.ToolchainError as exc:
+        return "error", {}, str(exc), command
+    if verdict.allowed is None:
+        return "unparsed", {"verdict": "unknown", "allowed": None, "observation": verdict.observation}, verdict.raw, command
+    parsed = {
+        "verdict": "forbidden" if verdict.allowed is False else "allowed",
+        "allowed": verdict.allowed,
+        "observation": verdict.observation,
+    }
+    return "ok", parsed, verdict.raw, command
+
+
+def _run_herd(case: GeneratedCase, herd: str) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Cross-check a scalar case against the real herd7. None if unavailable."""
+    return _judge_litmus_via_toolchain(case.litmus, f"<{case.name}.litmus>")
+
+
+def _run_herd_lowered(case_ir) -> tuple[str, dict[str, Any], str, list[str]] | None:
+    """Judge a vector case via its scalar element-lowered twin.
+
+    herd7's RISC-V front-end cannot parse RVV instructions, so we lower the
+    vector case to an equivalent per-element scalar RVWMO twin (see
+    vector_lower) and run the real herd7 on THAT. Uses toolchain's explicit
+    binary paths, so it works even when herd7 is not on PATH. Returns the same
+    shape as _run_herd: None when the toolchain is absent, else
+    (status, parsed, raw, command).
+    """
+    from . import toolchain
+    from .vector_lower import lower_vector_to_litmus
+
+    if not toolchain.HERD.exists():
+        return None
+    try:
+        litmus = lower_vector_to_litmus(case_ir)
+        verdict = _herd_judge_cached(litmus)
+    except toolchain.ToolchainError as exc:
+        return "error", {}, str(exc), []
+    except Exception as exc:  # lowering/parse failure -> no cross-check, not a crash
+        return "error", {}, f"vector lowering failed: {exc}", []
+    command = [str(toolchain.HERD), "-model", str(toolchain.RISCV_CAT), "<lowered-vector-twin>"]
+    if verdict.allowed is None:
+        return "unparsed", {"verdict": "unknown", "allowed": None, "observation": verdict.observation}, verdict.raw, command
+    parsed = {
+        "verdict": "forbidden" if verdict.allowed is False else "allowed",
+        "allowed": verdict.allowed,
+        "observation": verdict.observation,
+    }
+    return "ok", parsed, verdict.raw, command
+
+
+def parse_herd_output(output: str) -> dict[str, Any]:
+    observation = _last_match(output, r"^Observation\s+[^\s]+\s+(.+)$")
+    if observation:
+        normalized = observation.strip().lower()
+        if normalized.startswith("never"):
+            return {"verdict": "forbidden", "allowed": False, "observation": observation.strip()}
+        if normalized.startswith("sometimes") or normalized.startswith("always"):
+            return {"verdict": "allowed", "allowed": True, "observation": observation.strip()}
+
+    condition = _last_match(output, r"^Condition\s+(.+)$")
+    if condition:
+        lowered = condition.lower()
+        if "is forbidden" in lowered or "forbidden" == lowered.strip():
+            return {"verdict": "forbidden", "allowed": False, "observation": condition.strip()}
+        if "is allowed" in lowered or "allowed" == lowered.strip():
+            return {"verdict": "allowed", "allowed": True, "observation": condition.strip()}
+
+    if re.search(r"\bNever\b", output):
+        return {"verdict": "forbidden", "allowed": False, "observation": "Never"}
+    if re.search(r"\bSometimes\b|\bAlways\b", output):
+        return {"verdict": "allowed", "allowed": True, "observation": "Sometimes/Always"}
+    return {"verdict": "unknown", "allowed": None, "observation": "unparsed"}
+
+
+def _last_match(text: str, pattern: str) -> str:
+    matches = re.findall(pattern, text, flags=re.MULTILINE)
+    return matches[-1] if matches else ""
