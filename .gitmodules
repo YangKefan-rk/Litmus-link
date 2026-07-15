@@ -1,0 +1,3 @@
+[submodule "nexus-am"]
+	path = nexus-am
+	url = https://github.com/OpenXiangShan-Nanhu/nexus-am.git
