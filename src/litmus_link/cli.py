@@ -14,9 +14,19 @@ from .native_scalar import (
     NATIVE_ANNOTATIONS,
     NATIVE_PRESETS,
     NativeGenerationError,
+    generate_native_diy,
     generate_native_relations,
     generate_native_templates,
     native_catalog,
+)
+from .native_diy import (
+    DEFAULT_DIY_RELAX,
+    DEFAULT_DIY_SAFE,
+    DIY_MODES,
+    DIY_OBSERVERS,
+    DIY_OBSERVER_TYPES,
+    DiyConfig,
+    NativeDiyError,
 )
 from .qt_gui import QtGuiError, qt_binding_status, run_qt_gui
 from .rule_file import RuleFileError, load_rule_file, rule_field_values
@@ -36,6 +46,7 @@ from .scalar import (
 from .toolchain import ToolchainError, toolchain_info
 from .upstream import import_upstream
 from .validator import ValidationError, validate_path
+from .verification import VERIFY_BACKENDS, VerificationError, verify_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,6 +66,13 @@ def main(argv: list[str] | None = None) -> int:
 
     validate = sub.add_parser("validate", help="validate generated corpus")
     validate.add_argument("path", type=Path)
+
+    verify = sub.add_parser("verify", help="check exists outcomes with embedded RVWMO, herd7, or both")
+    verify.add_argument("path", type=Path, help="one .litmus file, a directory, or an @all index")
+    verify.add_argument("--backend", choices=VERIFY_BACKENDS, default="embedded")
+    verify.add_argument("--timeout", type=int, default=120)
+    verify.add_argument("--max-candidates", type=int, default=100000)
+    verify.add_argument("--write", action="store_true", help="replace .solver.json and metadata solver fields")
 
     list_cmd = sub.add_parser("list", help="list known profiles, axes, rules, features, or hand categories")
     list_cmd.add_argument("what", choices=["profiles", "axes", "rules", "features", "hand"])
@@ -115,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     native_templates.add_argument("--out", required=True, type=Path)
     native_templates.add_argument("--limit", type=int, help="maximum files to write; audit still reports the complete finite domain")
     native_templates.add_argument("--no-judge", action="store_true", help="skip the independent herd7/riscv.cat cross-check")
+    native_templates.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_templates.add_argument("--diagrams", action="store_true", help="write PNG and diagram JSON for every generated case")
     native_templates.add_argument("--timeout", type=int, default=180)
 
@@ -131,8 +150,58 @@ def main(argv: list[str] | None = None) -> int:
     native_cycles.add_argument("--out", required=True, type=Path)
     native_cycles.add_argument("--limit", type=int)
     native_cycles.add_argument("--no-judge", action="store_true")
+    native_cycles.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_cycles.add_argument("--diagrams", action="store_true")
     native_cycles.add_argument("--timeout", type=int, default=180)
+
+    native_diy = native_sub.add_parser("diy", help="run the native diy-compatible safe/relax cycle strategy")
+    native_diy.add_argument("--safe", action="append", help="comma-separated safe relaxations; repeatable")
+    native_diy.add_argument("--relax", action="append", help="comma-separated tested relaxations; repeatable")
+    native_diy.add_argument("--reject", action="append", help="comma-separated rejected relaxations; repeatable")
+    native_diy.add_argument(
+        "--prefix",
+        action="append",
+        help="fixed relaxation prefix, for example 'PodWW Rfe'; repeatable",
+    )
+    native_diy.add_argument("--min-size", type=int, default=2)
+    native_diy.add_argument("--size", type=int, default=4, help="maximum relaxation slots in the cycle")
+    native_diy.add_argument("--nprocs", type=int, default=2)
+    native_diy.add_argument(
+        "--ins",
+        "--max-accesses-per-proc",
+        dest="max_accesses_per_proc",
+        type=int,
+        default=4,
+        help="maximum cycle memory events per hart",
+    )
+    native_diy.add_argument("--exact-procs", action="store_true")
+    native_diy.add_argument("--exact-size", action="store_true", help="generate exactly --size slots instead of all smaller sizes")
+    native_diy.add_argument("--mode", choices=DIY_MODES, default="default")
+    native_diy.add_argument("--mix", action="store_true", help="allow multiple distinct tested relaxations in one cycle")
+    native_diy.add_argument("--min-relax", type=int, help="minimum distinct relaxations; implies --mix")
+    native_diy.add_argument("--max-relax", type=int, help="maximum distinct relaxations; implies --mix")
+    native_diy.add_argument("--same-location", action="store_true")
+    native_diy.add_argument("--no-internal-communication", action="store_true")
+    native_diy.add_argument("--observer", choices=DIY_OBSERVERS, default="avoid")
+    native_diy.add_argument("--obstype", choices=DIY_OBSERVER_TYPES, default="straight")
+    native_diy.add_argument("--realdep", action="store_true")
+    native_diy.add_argument(
+        "--moreedges",
+        action="store_true",
+        help="reserved: fails explicitly until native mixed-size atoms are implemented",
+    )
+    native_diy.add_argument(
+        "--unrollatomic",
+        type=int,
+        help="reserved: fails explicitly until native LR/SC idioms are implemented",
+    )
+    native_diy.add_argument("--annotation", action="append", choices=NATIVE_ANNOTATIONS, help="repeat to select P/Aq/Rl/AR; default: P")
+    native_diy.add_argument("--out", required=True, type=Path)
+    native_diy.add_argument("--limit", type=int)
+    native_diy.add_argument("--no-judge", action="store_true")
+    native_diy.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
+    native_diy.add_argument("--diagrams", action="store_true")
+    native_diy.add_argument("--timeout", type=int, default=180)
 
     args = parser.parse_args(argv)
     try:
@@ -159,6 +228,17 @@ def main(argv: list[str] | None = None) -> int:
             entries = validate_path(args.path)
             print(f"validated {len(entries)} litmus files")
             return 0
+        if args.command == "verify":
+            report = verify_path(
+                args.path,
+                backend=args.backend,
+                timeout=args.timeout,
+                max_candidates=args.max_candidates,
+                write=args.write,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            verified = report["counts"].get("verified", 0)
+            return 0 if verified == report["tests"] else 1
         if args.command == "list":
             _print_list(args.what)
             return 0
@@ -233,10 +313,11 @@ def main(argv: list[str] | None = None) -> int:
                     annotations=args.annotation or NATIVE_ANNOTATIONS,
                     limit=args.limit,
                     judge=not args.no_judge,
+                    solver_backend=args.solver_backend,
                     diagrams=args.diagrams,
                     timeout=args.timeout,
                 )
-            else:
+            elif args.native_command == "enumerate":
                 report = generate_native_relations(
                     out_dir=args.out,
                     mechanisms=["communication", *(args.mechanism or DEFAULT_NATIVE_MECHANISMS)],
@@ -250,12 +331,51 @@ def main(argv: list[str] | None = None) -> int:
                     annotations=args.annotation or ("P",),
                     limit=args.limit,
                     judge=not args.no_judge,
+                    solver_backend=args.solver_backend,
+                    diagrams=args.diagrams,
+                    timeout=args.timeout,
+                )
+            else:
+                report = generate_native_diy(
+                    out_dir=args.out,
+                    config=DiyConfig(
+                        safe=_split_native_relaxations(args.safe) if args.safe else DEFAULT_DIY_SAFE,
+                        relax=_split_native_relaxations(args.relax) if args.relax else DEFAULT_DIY_RELAX,
+                        reject=_split_native_relaxations(args.reject) if args.reject else (),
+                        prefixes=_split_native_prefixes(args.prefix) if args.prefix else (),
+                        min_size=args.min_size,
+                        size=args.size,
+                        nprocs=args.nprocs,
+                        exact_procs=args.exact_procs,
+                        max_accesses_per_proc=args.max_accesses_per_proc,
+                        upto=not args.exact_size,
+                        mode=args.mode,
+                        mix=args.mix or args.min_relax is not None or args.max_relax is not None,
+                        min_relax=args.min_relax if args.min_relax is not None else 1,
+                        max_relax=(
+                            args.max_relax
+                            if args.max_relax is not None
+                            else 100 if (args.mix or args.min_relax is not None) else 1
+                        ),
+                        include_same=args.same_location,
+                        include_internal=not args.no_internal_communication,
+                        observer=args.observer,
+                        observer_type=args.obstype,
+                        realdep=args.realdep,
+                        moreedges=args.moreedges,
+                        unrollatomic=args.unrollatomic,
+                    ),
+                    annotations=args.annotation or ("P",),
+                    limit=args.limit,
+                    judge=not args.no_judge,
+                    solver_backend=args.solver_backend,
                     diagrams=args.diagrams,
                     timeout=args.timeout,
                 )
             print(json.dumps(report, indent=2, sort_keys=True))
-            return 1 if report.get("verdicts", {}).get("unknown", 0) else 0
-    except (ValueError, FileNotFoundError, ValidationError, RuleFileError, QtGuiError, ScalarGenerationError, NativeGenerationError, ToolchainError) as exc:
+            verdicts = report.get("verdicts", {})
+            return 1 if any(verdicts.get(key, 0) for key in ("unknown", "inconclusive", "conflict")) else 0
+    except (ValueError, FileNotFoundError, ValidationError, VerificationError, RuleFileError, QtGuiError, ScalarGenerationError, NativeGenerationError, NativeDiyError, ToolchainError) as exc:
         print(f"litmus-link: error: {exc}", file=sys.stderr)
         return 2
     return 2
@@ -271,6 +391,29 @@ def _split_edges(values: list[str]) -> tuple[str, ...]:
     if not edges:
         raise ScalarGenerationError("edge list cannot be empty")
     return edges
+
+
+def _split_native_relaxations(values: list[str]) -> tuple[str, ...]:
+    out: list[str] = []
+    for value in values:
+        # Bracketed edge sequences contain commas and must remain one token.
+        if value.strip().startswith("["):
+            out.append(value.strip())
+        else:
+            out.extend(part.strip() for part in value.split(",") if part.strip())
+    if not out:
+        raise NativeDiyError("relaxation list cannot be empty")
+    return tuple(out)
+
+
+def _split_native_prefixes(values: list[str]) -> tuple[tuple[str, ...], ...]:
+    prefixes = tuple(
+        tuple(token for token in value.replace(";", " ").split() if token)
+        for value in values
+    )
+    if any(not prefix for prefix in prefixes):
+        raise NativeDiyError("diy prefix cannot be empty")
+    return prefixes
 
 
 def _print_list(what: str) -> None:

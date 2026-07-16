@@ -101,7 +101,9 @@ def _validate_scalar_pair(litmus_path: Path, meta_path: Path, meta: dict) -> Lis
     if not isinstance(meta.get("requires"), list) or "RV64I" not in meta.get("requires", []):
         errors.append(f"{meta_path}: scalar test must declare RV64I")
     solver = meta.get("solver")
-    if not isinstance(solver, dict) or solver.get("status") not in {"verified", "unknown", "unchecked"}:
+    if not isinstance(solver, dict) or solver.get("status") not in {
+        "verified", "unknown", "unchecked", "inconclusive", "conflict", "unavailable", "not_applicable"
+    }:
         errors.append(f"{meta_path}: missing or invalid scalar solver result")
     solver_path = litmus_path.with_suffix(".solver.json")
     if not solver_path.exists():
@@ -133,7 +135,9 @@ def _validate_native_scalar_pair(litmus_path: Path, meta_path: Path, meta: dict)
     if not isinstance(case_ir, dict) or case_ir.get("cycle") != parsed.cycle:
         errors.append(f"{meta_path}: missing or inconsistent native case IR")
     solver = meta.get("solver")
-    if not isinstance(solver, dict) or solver.get("status") not in {"verified", "unknown", "unchecked"}:
+    if not isinstance(solver, dict) or solver.get("status") not in {
+        "verified", "unknown", "unchecked", "inconclusive", "conflict", "unavailable", "not_applicable"
+    }:
         errors.append(f"{meta_path}: missing or invalid native solver result")
     solver_path = litmus_path.with_suffix(".solver.json")
     if not solver_path.exists():

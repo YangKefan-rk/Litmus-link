@@ -30,12 +30,12 @@ from litmus_link.validator import validate_path
 def test_native_edge_domain_is_generated_without_external_tools() -> None:
     assert len(communication_edges()) == 6
     assert len(po_edges()) == 8
-    assert len(fence_edges()) == 72
+    assert len(fence_edges()) == 96
     assert len(dependency_edges()) == 14
     rr = edges_for_shape("RR")
     ww = edges_for_shape("WW")
-    assert len(rr) == 26
-    assert len(ww) == 20
+    assert len(rr) == 32
+    assert len(ww) == 26
     assert {edge.mechanism for edge in rr} == {"po", "fence", "addr", "ctrl", "ctrl_fencei"}
 
 
@@ -46,12 +46,12 @@ def test_native_mp_template_exhausts_all_configured_local_edges() -> None:
         max_procs=2,
         exact_procs=True,
     )
-    assert report.candidates == 26 * 20
+    assert report.candidates == 32 * 26
     # Mixed same/different-location rings are contradictory; both all-d and
     # all-s halves remain, so every non-conflicting configured MP is emitted.
-    assert report.accepted == 260
-    assert report.excluded == {"location_constraint_conflict": 260}
-    assert len({cycle.canonical_key for cycle in cycles}) == 260
+    assert report.accepted == 416
+    assert report.excluded == {"location_constraint_conflict": 416}
+    assert len({cycle.canonical_key for cycle in cycles}) == 416
     assert all(cycle.nprocs == 2 for cycle in cycles)
 
 
@@ -130,7 +130,7 @@ def test_native_generation_writes_and_validates_without_diytools(tmp_path: Path)
         judge=False,
     )
     assert report["generator"]["engine"] == "litmus-link-native"
-    assert report["available_litmus"] == 260
+    assert report["available_litmus"] == 416
     assert report["generated_litmus"] == 3
     assert report["generation_limited"] is True
     assert len(validate_path(tmp_path / "@all")) == 3
@@ -160,9 +160,9 @@ def test_native_annotations_expand_to_isa_legal_amo_forms() -> None:
 
 def test_native_full_template_domain_count_is_stable() -> None:
     counts = native_catalog()["template_counts_all_annotations"]
-    assert counts["MP"] == 66560
-    assert counts["ISA2"] == 37273600
-    assert sum(counts.values()) == 38871296
+    assert counts["MP"] == 106496
+    assert counts["ISA2"] == 72417280
+    assert sum(counts.values()) == 74873888
 
 
 def test_native_generation_does_not_spawn_diytools_when_judging_is_disabled(

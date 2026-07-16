@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-"""Wrappers around the real herdtools7 toolchain.
+"""Wrappers around the external herdtools7 reference toolchain.
 
-Per the project owner's decision, litmus generation and verdicts are produced by
-the authoritative tools, never by hand-rolled logic:
+Litmus-link's native generator and embedded RVWMO solver do not call these
+wrappers.  They remain available as independent reference paths:
 
 * ``diycross7`` enumerates a litmus family as the cartesian product of per-edge
   ordering mechanisms (this is what makes "check more axes -> get more tests"
   true: the tool itself does the cross-product).
-* ``herd7`` + ``riscv.cat`` decides, for each generated test, whether its
+* ``herd7`` + ``riscv.cat`` decides, for each supplied test, whether its
   ``exists`` outcome is architecturally *observable* (Allowed/Sometimes) or
   *forbidden* (Never). The verdict is a property of the OUTCOME, not the test.
 
+The native tests use these tools for differential checks when installed.
 Binary/lib locations are configurable via the HERDTOOLS_BIN / HERDTOOLS_LIB
 environment variables; defaults point at the local Nanhu-V5.1 build.
 """

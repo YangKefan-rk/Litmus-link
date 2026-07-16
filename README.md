@@ -19,6 +19,8 @@ pip install -e .
 git submodule update --init nexus-am
 litmus-link list profiles
 litmus-link native catalog
+litmus-link native diy --out out/native-diy
+litmus-link verify out/native-diy/@all --backend embedded
 litmus-link native templates --skeleton MP --no-judge --out out/native-mp
 litmus-link validate out/native-mp/@all
 litmus-link generate --profile smoke --out out/smoke
@@ -44,6 +46,8 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
 - `litmus-link native templates` exhausts the configured variants of named scalar skeletons without invoking diy7/diycross7 or reading an existing corpus.
 - `litmus-link native enumerate` enumerates every canonical cycle in a user-bounded native relation grammar.
+- `litmus-link native diy` applies a native safe/relax/reject/prefix cycle strategy compatible with the supported RISC-V `diy7` domain.
+- `litmus-link verify <file|dir|@all> --backend embedded|herd7|crosscheck` checks each generated `exists` outcome and can update solver metadata with `--write`.
 - `litmus-link native catalog` prints the native grammar and exact finite-domain counts.
 - `litmus-link scalar cross` generates named scalar skeleton families with `diycross7`.
 - `litmus-link scalar enumerate` enumerates bounded scalar cycles with `diy7`.
@@ -64,8 +68,8 @@ address/data/control/control+`fence.i` dependencies, and event annotations
 forms and declare the A extension; the generator does not emit pseudo
 `lw.aq`/`sw.rl` instructions.
 
-The exact named-template domain currently contains 38,871,296 cases. MP alone
-contains 66,560 cases. These are finite-grammar counts, not a claim that the
+The exact named-template domain currently contains 74,873,888 cases. MP alone
+contains 106,496 cases. These are finite-grammar counts, not a claim that the
 set of all possible programs is finite. Audit metadata records the selected
 grammar, base cycles, accepted cases, canonical duplicates, and every rejected
 constraint class.
@@ -91,14 +95,31 @@ litmus-link native enumerate --min-size 2 --size 4 --nprocs 2 \
   --limit 1000 --no-judge --out out/native-cycles
 ```
 
-Omit `--no-judge` to run `herd7/riscv.cat` only as an independent outcome
-cross-check after native generation. The legacy `scalar cross/enumerate`
+Use the native diy-compatible safe/relax strategy, including fixed prefixes:
+
+```sh
+litmus-link native diy \
+  --safe 'Rfe,Fre,Wse,Fence.rw.rwd**,DpAddrdR,DpAddrdW,DpDatadW' \
+  --relax 'PodRR,PodRW,PodWR,PodWW' \
+  --prefix 'PodWW Rfe' \
+  --solver-backend embedded \
+  --out out/native-diy
+litmus-link verify out/native-diy/@all --backend crosscheck --write
+```
+
+By default, native generation uses Litmus-link's offline RVWMO execution-graph
+solver. Select `--solver-backend herd7` to use the official model, or
+`--solver-backend crosscheck` to require both implementations to agree. The
+legacy `scalar cross/enumerate`
 commands remain available for comparison, but the Qt GUI does not use them.
 
-The next native grammar additions are mixed-size/partial-overlap accesses,
-explicit LR/SC success/failure scaffolding, and Ztso `fence.tso`; they must be
-added as finite axes with legality and canonicalization rules rather than as
-unbounded ad hoc instruction substitution.
+The native diy strategy has cycle-set differential tests against official
+`diy7` for all ten generation modes, exact size/hart bounds, mixed tested
+relaxations, observer policies, and fixed prefixes. This compatibility claim
+is limited to the current scalar, naturally aligned RISC-V edge domain.
+Mixed-size/partial-overlap atoms and explicit LR/SC success/failure scaffolding
+are not silently approximated; they remain unsupported until their lowering,
+outcomes, and RVWMO execution events can be checked end to end.
 
 ## GUI
 
@@ -117,7 +138,7 @@ litmus-link qt-gui --check
 
 The Qt window opens on the machine where the command runs. On a server, use X forwarding or a remote desktop session. The GUI does not open a network socket.
 
-The Qt GUI opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds. `Generate the complete accepted domain` has no hidden file cap, while `Maximum preview rows` limits only the scrollable preview. The independent herd7 cross-check is off by default, so native generation works on a closed server with no herdtools installation. Actions run in the background and update the status bar, progress indicator, log, summary, and case-inspector tabs.
+The Qt GUI opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. `Generate the complete accepted domain` has no hidden file cap, while `Maximum preview rows` limits only the scrollable preview. Embedded RVWMO verification is enabled by default and works on a closed server; the GUI can instead use herd7 or require a cross-check. Actions run in the background and update the status bar, progress indicator, log, summary, and case-inspector tabs.
 
 ## Large Profiles
 
@@ -165,12 +186,19 @@ See `examples/rules/vector-cmo.json` for a larger example that combines Vector a
 
 ## Design Boundary
 
-Verification has two layers:
+Verification is split by semantic scope:
 
-- **Pure scalar main-memory tests** get a formal allowed/forbidden verdict from
-  `herd7/riscv.cat` when the bundled herdtools path is available. A small native
-  RVWMO checker (`src/litmus_link/rvwmo.py`) provides edge explanations and a fallback; if
-  it ever disagrees with herd7, herd7 is reported as authoritative.
+- **Pure scalar main-memory tests** are checked by the independent execution-
+  graph solver in `src/litmus_link/rvwmo_solver.py`. It enumerates `rf` and
+  per-location `co`, derives `fr`, implements RISC-V PPO rules `r1-r13`, and
+  checks the Coherence, Model, and Atomic axioms from `riscv.cat`. A forbidden
+  verdict is returned only after exhaustive bounded search; a timeout or
+  candidate limit returns `inconclusive`.
+- **External comparison** uses `herd7 + riscv.cat`. Select `crosscheck` to
+  require both implementations to return the same verified `allowed` value.
+  The embedded backend currently consumes Litmus-link `case_ir` metadata;
+  arbitrary upstream `.litmus` files without that metadata must use the
+  `herd7` backend.
 - **The simple MP vector-memory subset** can be judged by scalar element
   lowering when the selected axes are exactly renderable by the current IR.
   More complex Vector parameters such as cross-page footprints, masks, non-base

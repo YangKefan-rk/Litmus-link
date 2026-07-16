@@ -115,6 +115,20 @@ def fence_edges(*, include_same: bool = True) -> tuple[NativeEdge, ...]:
     locations = (DIFFERENT, SAME) if include_same else (DIFFERENT,)
     for location in locations:
         location_code = "d" if location == DIFFERENT else "s"
+        for shape in ACCESS_SHAPES:
+            out.append(
+                NativeEdge(
+                    f"Fence.i{location_code}{shape}",
+                    "fence",
+                    shape[0],
+                    shape[1],
+                    LOCAL,
+                    location,
+                    "fence",
+                    lowering="fence.i",
+                    preserved=False,
+                )
+            )
         for pred in FENCE_SETS:
             for succ in FENCE_SETS:
                 for shape in ACCESS_SHAPES:
@@ -132,6 +146,33 @@ def fence_edges(*, include_same: bool = True) -> tuple[NativeEdge, ...]:
                             preserved=orders,
                         )
                     )
+        for shape in ACCESS_SHAPES:
+            out.append(
+                NativeEdge(
+                    f"Fence.iorw.iorw{location_code}{shape}",
+                    "fence",
+                    shape[0],
+                    shape[1],
+                    LOCAL,
+                    location,
+                    "fence",
+                    lowering="fence iorw,iorw",
+                    preserved=True,
+                )
+            )
+            out.append(
+                NativeEdge(
+                    f"Fence.tso{location_code}{shape}",
+                    "fence",
+                    shape[0],
+                    shape[1],
+                    LOCAL,
+                    location,
+                    "fence",
+                    lowering="fence.tso",
+                    preserved=shape != "WR",
+                )
+            )
     return tuple(out)
 
 

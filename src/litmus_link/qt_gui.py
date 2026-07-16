@@ -86,6 +86,11 @@ def _make_worker_class(QtCore: Any) -> Any:
                 if self.action == "preview":
                     self.progress.emit("Expanding sample combinations")
                     result = preview_payload(self.payload)
+                elif self.action == "verify":
+                    self.progress.emit("Generating preview cases and checking RVWMO outcomes")
+                    verify_payload = dict(self.payload)
+                    verify_payload["judge"] = True
+                    result = preview_payload(verify_payload)
                 elif self.action == "audit":
                     self.progress.emit("Classifying combinations with legality rules")
                     result = audit_payload(self.payload)
@@ -283,6 +288,7 @@ class _LitmusLinkQtWindow:
         self.scalar_engine = QtWidgets.QComboBox()
         self.scalar_engine.addItem("Litmus-link native - exhaustive named families", "native_templates")
         self.scalar_engine.addItem("Litmus-link native - enumerate all relation cycles", "native_cycles")
+        self.scalar_engine.addItem("Litmus-link native - diy-compatible safe/relax strategy", "native_diy")
         self.scalar_engine.currentIndexChanged.connect(lambda _index: self._update_scalar_engine())
         self.scalar_out = QtWidgets.QLineEdit("out/qt-scalar")
         self.scalar_out.textChanged.connect(lambda _text: self._update_output_hint())
@@ -300,13 +306,20 @@ class _LitmusLinkQtWindow:
         self.scalar_preview_limit = QtWidgets.QSpinBox()
         self.scalar_preview_limit.setRange(1, 100000)
         self.scalar_preview_limit.setValue(1000)
-        self.scalar_judge = QtWidgets.QCheckBox("Independent herd7 + riscv.cat outcome cross-check")
-        self.scalar_judge.setChecked(False)
+        verification_row = QtWidgets.QHBoxLayout()
+        self.scalar_judge = QtWidgets.QCheckBox("Verify generated outcomes")
+        self.scalar_judge.setChecked(True)
+        self.scalar_solver_backend = QtWidgets.QComboBox()
+        self.scalar_solver_backend.addItem("Embedded RVWMO (offline)", "embedded")
+        self.scalar_solver_backend.addItem("External herd7 + riscv.cat", "herd7")
+        self.scalar_solver_backend.addItem("Cross-check embedded and herd7", "crosscheck")
+        verification_row.addWidget(self.scalar_judge)
+        verification_row.addWidget(self.scalar_solver_backend, 1)
         form.addRow("Generation engine", self.scalar_engine)
         form.addRow("Output directory", self.scalar_out)
         form.addRow("Generation scope", generation_scope)
         form.addRow("Maximum preview rows", self.scalar_preview_limit)
-        form.addRow("Outcome verification", self.scalar_judge)
+        form.addRow("Outcome verification", verification_row)
         layout.addLayout(form)
 
         self.scalar_cross_group = QtWidgets.QGroupBox("Native relation domain")
@@ -325,8 +338,11 @@ class _LitmusLinkQtWindow:
             skeleton_grid.addWidget(check, index // 5, index % 5)
             self.scalar_skeleton_checks.append(check)
         cross_layout.addWidget(self.scalar_skeleton_widget)
-        cross_layout.addWidget(QtWidgets.QLabel("Local ordering mechanisms"))
-        mechanism_row = QtWidgets.QHBoxLayout()
+        self.scalar_mechanism_label = QtWidgets.QLabel("Local ordering mechanisms")
+        cross_layout.addWidget(self.scalar_mechanism_label)
+        self.scalar_mechanism_widget = QtWidgets.QWidget()
+        mechanism_row = QtWidgets.QHBoxLayout(self.scalar_mechanism_widget)
+        mechanism_row.setContentsMargins(0, 0, 0, 0)
         for name in self.options["native_scalar"]["mechanisms"]:
             check = QtWidgets.QCheckBox(name)
             check.setProperty("axis_value", name)
@@ -334,7 +350,7 @@ class _LitmusLinkQtWindow:
             mechanism_row.addWidget(check)
             self.scalar_mechanism_checks.append(check)
         mechanism_row.addStretch(1)
-        cross_layout.addLayout(mechanism_row)
+        cross_layout.addWidget(self.scalar_mechanism_widget)
         cross_layout.addWidget(QtWidgets.QLabel("Event annotations (non-P modes lower to legal AMOs)"))
         annotation_row = QtWidgets.QHBoxLayout()
         for name in self.options["native_scalar"]["annotations"]:
@@ -378,6 +394,66 @@ class _LitmusLinkQtWindow:
         enumerate_layout.addRow("Maximum accesses per hart", self.scalar_max_accesses)
         enumerate_layout.addRow("Cycle constraints", flags)
         layout.addWidget(self.scalar_enumerate_group)
+
+        self.scalar_diy_group = QtWidgets.QGroupBox("Diy-compatible generation policy")
+        self.scalar_diy_group.setObjectName("ScalarParameterGroup")
+        diy_layout = QtWidgets.QFormLayout(self.scalar_diy_group)
+        diy_defaults = self.options["native_scalar"]["diy"]
+        self.scalar_diy_safe = QtWidgets.QPlainTextEdit("\n".join(diy_defaults["safe"]))
+        self.scalar_diy_relax = QtWidgets.QPlainTextEdit("\n".join(diy_defaults["relax"]))
+        self.scalar_diy_reject = QtWidgets.QPlainTextEdit()
+        self.scalar_diy_prefix = QtWidgets.QPlainTextEdit()
+        self.scalar_diy_prefix.setPlaceholderText("Optional; one fixed prefix per line, e.g. PodWW Rfe")
+        for editor in (
+            self.scalar_diy_safe,
+            self.scalar_diy_relax,
+            self.scalar_diy_reject,
+            self.scalar_diy_prefix,
+        ):
+            editor.setMaximumHeight(92)
+        self.scalar_diy_mode = QtWidgets.QComboBox()
+        for mode in diy_defaults["modes"]:
+            self.scalar_diy_mode.addItem(mode, mode)
+        self.scalar_diy_observer = QtWidgets.QComboBox()
+        for observer in diy_defaults["observers"]:
+            self.scalar_diy_observer.addItem(observer, observer)
+        self.scalar_diy_obstype = QtWidgets.QComboBox()
+        for observer_type in diy_defaults["observer_types"]:
+            self.scalar_diy_obstype.addItem(observer_type, observer_type)
+        self.scalar_diy_mix = QtWidgets.QCheckBox("mix distinct relaxations")
+        self.scalar_diy_exact_size = QtWidgets.QCheckBox("require exact cycle size")
+        self.scalar_diy_realdep = QtWidgets.QCheckBox("emit real dependencies")
+        self.scalar_diy_same = QtWidgets.QCheckBox("allow same-location local edges")
+        self.scalar_diy_min_relax = QtWidgets.QSpinBox()
+        self.scalar_diy_min_relax.setRange(0, 16)
+        self.scalar_diy_min_relax.setValue(1)
+        self.scalar_diy_max_relax = QtWidgets.QSpinBox()
+        self.scalar_diy_max_relax.setRange(0, 16)
+        self.scalar_diy_max_relax.setValue(1)
+        self.scalar_diy_min_relax.setEnabled(False)
+        self.scalar_diy_max_relax.setEnabled(False)
+        self.scalar_diy_mix.toggled.connect(self.scalar_diy_min_relax.setEnabled)
+        self.scalar_diy_mix.toggled.connect(self.scalar_diy_max_relax.setEnabled)
+        relax_counts = QtWidgets.QHBoxLayout()
+        relax_counts.addWidget(QtWidgets.QLabel("min"))
+        relax_counts.addWidget(self.scalar_diy_min_relax)
+        relax_counts.addWidget(QtWidgets.QLabel("max"))
+        relax_counts.addWidget(self.scalar_diy_max_relax)
+        relax_counts.addStretch(1)
+        diy_flags = QtWidgets.QHBoxLayout()
+        for flag in (self.scalar_diy_mix, self.scalar_diy_exact_size, self.scalar_diy_realdep, self.scalar_diy_same):
+            diy_flags.addWidget(flag)
+        diy_flags.addStretch(1)
+        diy_layout.addRow("Safe relaxations", self.scalar_diy_safe)
+        diy_layout.addRow("Tested relaxations", self.scalar_diy_relax)
+        diy_layout.addRow("Rejected sequences", self.scalar_diy_reject)
+        diy_layout.addRow("Fixed prefixes", self.scalar_diy_prefix)
+        diy_layout.addRow("Cycle policy", self.scalar_diy_mode)
+        diy_layout.addRow("Relaxation cardinality", relax_counts)
+        diy_layout.addRow("Observer policy", self.scalar_diy_observer)
+        diy_layout.addRow("Observer implementation", self.scalar_diy_obstype)
+        diy_layout.addRow("Policy flags", diy_flags)
+        layout.addWidget(self.scalar_diy_group)
         layout.addStretch(1)
         self._update_scalar_engine()
         return tab
@@ -385,10 +461,16 @@ class _LitmusLinkQtWindow:
     def _update_scalar_engine(self) -> None:
         if not hasattr(self, "scalar_engine"):
             return
-        templates = self.scalar_engine.currentData() == "native_templates"
+        engine = self.scalar_engine.currentData()
+        templates = engine == "native_templates"
+        diy = engine == "native_diy"
         self.scalar_skeleton_label.setVisible(templates)
         self.scalar_skeleton_widget.setVisible(templates)
+        self.scalar_mechanism_label.setVisible(not diy)
+        self.scalar_mechanism_widget.setVisible(not diy)
+        self.scalar_include_same.setVisible(not diy)
         self.scalar_enumerate_group.setVisible(not templates)
+        self.scalar_diy_group.setVisible(diy)
 
     def _build_profile_tab(self) -> Any:
         QtWidgets = self.QtWidgets
@@ -608,11 +690,13 @@ class _LitmusLinkQtWindow:
         self.output_hint.setObjectName("OutputHint")
         controls.addWidget(self.output_hint, 1)
         self.preview_button = QtWidgets.QPushButton("Preview Cases")
+        self.verify_button = QtWidgets.QPushButton("Verify Preview")
         self.audit_button = QtWidgets.QPushButton("Run Audit")
         self.generate_button = QtWidgets.QPushButton("Generate Files")
         self.generate_button.setObjectName("GenerateButton")
-        self.action_buttons = [self.preview_button, self.audit_button, self.generate_button]
+        self.action_buttons = [self.preview_button, self.verify_button, self.audit_button, self.generate_button]
         self.preview_button.clicked.connect(lambda: self._run_action("preview", "Preview Cases"))
+        self.verify_button.clicked.connect(lambda: self._run_action("verify", "Verify Preview"))
         self.audit_button.clicked.connect(lambda: self._run_action("audit", "Run Audit"))
         self.generate_button.clicked.connect(lambda: self._run_action("generate", "Generate Files"))
         for button in self.action_buttons:
@@ -735,11 +819,12 @@ class _LitmusLinkQtWindow:
                 "limit": None if self.scalar_all_cases.isChecked() else self.scalar_limit.value(),
                 "sample_limit": sample_limit,
                 "judge": self.scalar_judge.isChecked(),
+                "solver_backend": str(self.scalar_solver_backend.currentData()),
                 "summary_only": self.summary_only.isChecked(),
             }
             payload["mechanisms"] = self._selected(self.scalar_mechanism_checks)
             payload["annotations"] = self._selected(self.scalar_annotation_checks)
-            payload["include_same"] = self.scalar_include_same.isChecked()
+            payload["include_same"] = self.scalar_diy_same.isChecked() if engine == "native_diy" else self.scalar_include_same.isChecked()
             if engine == "native_templates":
                 payload["skeletons"] = self._selected(self.scalar_skeleton_checks)
             else:
@@ -753,6 +838,22 @@ class _LitmusLinkQtWindow:
                         "include_internal": self.scalar_include_internal.isChecked(),
                     }
                 )
+                if engine == "native_diy":
+                    payload["diy"] = {
+                        "safe": _text_relaxations(self.scalar_diy_safe.toPlainText()),
+                        "relax": _text_relaxations(self.scalar_diy_relax.toPlainText()),
+                        "reject": _text_relaxations(self.scalar_diy_reject.toPlainText()),
+                        "prefixes": _text_prefixes(self.scalar_diy_prefix.toPlainText()),
+                        "mode": str(self.scalar_diy_mode.currentData()),
+                        "mix": self.scalar_diy_mix.isChecked(),
+                        "min_relax": self.scalar_diy_min_relax.value(),
+                        "max_relax": self.scalar_diy_max_relax.value(),
+                        "observer": str(self.scalar_diy_observer.currentData()),
+                        "observer_type": str(self.scalar_diy_obstype.currentData()),
+                        "exact_size": self.scalar_diy_exact_size.isChecked(),
+                        "realdep": self.scalar_diy_realdep.isChecked(),
+                        "moreedges": False,
+                    }
             return payload
         if current is self.profile_tab:
             return {
@@ -836,7 +937,7 @@ class _LitmusLinkQtWindow:
         if isinstance(result, dict):
             self.summary_view.setPlainText(_summary_text(label, result, self._current_out_dir()))
             self.raw_json.setPlainText(json.dumps(result, indent=2, sort_keys=True))
-            if label == "Preview Cases":
+            if label in {"Preview Cases", "Verify Preview"}:
                 self._populate_preview_list(result)
         else:
             self.summary_view.setPlainText(str(result))
@@ -1191,6 +1292,41 @@ _STATUS_COLORS = {
 
 def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status.upper())
+
+
+def _text_relaxations(text: str) -> list[str]:
+    """Split GUI relaxation text on newlines/top-level commas.
+
+    Bracketed compositional relaxations such as ``[Rfe,Fence.rw.rwdRR]``
+    remain one token.
+    """
+    out: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for character in text:
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth = max(depth - 1, 0)
+        if character in {",", "\n", ";"} and depth == 0:
+            token = "".join(current).strip()
+            if token:
+                out.append(token)
+            current = []
+        else:
+            current.append(character)
+    token = "".join(current).strip()
+    if token:
+        out.append(token)
+    return out
+
+
+def _text_prefixes(text: str) -> list[list[str]]:
+    return [
+        [token for token in line.replace(";", " ").split() if token]
+        for line in text.splitlines()
+        if line.strip()
+    ]
 
 
 def _status_color(status: str) -> str:

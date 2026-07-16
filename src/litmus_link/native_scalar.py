@@ -28,7 +28,9 @@ from .native_cycles import (
     validate_cycle,
     vertex_directions,
 )
+from .native_diy import DiyConfig, enumerate_diy_cycles
 from .native_edges import EXTERNAL, LOCAL, READ, SAME, WRITE, NativeEdge, edge_by_label, edge_catalog, edges_for_shape
+from .rvwmo_solver import solve_rvwmo
 from .toolchain import RISCV_CAT, ToolchainError, herd_judge
 
 
@@ -208,7 +210,7 @@ def native_relation_cycles(
     )
 
 
-def lower_native_cycle(cycle: NativeCycle) -> NativeLoweredCase:
+def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLoweredCase:
     decision = validate_cycle(cycle.edges)
     if not decision.accepted:
         raise NativeGenerationError(f"cannot lower invalid native cycle: {decision.reason}")
@@ -283,6 +285,7 @@ def lower_native_cycle(cycle: NativeCycle) -> NativeLoweredCase:
                     target_data=memory_regs[target],
                     registers=register_pool,
                     label_index=vertex,
+                    realdep=realdep,
                 )
                 for middle_index, (middle_kind, middle_instruction, role) in enumerate(middle):
                     events.append(
@@ -350,6 +353,7 @@ def lower_native_cycle(cycle: NativeCycle) -> NativeLoweredCase:
             "read_values": {str(key): value for key, value in sorted(read_values.items())},
             "final_values": {location_names[key]: value for key, value in sorted(final_values.items())},
             "annotations": list(annotations),
+            "real_dependencies": realdep,
         },
     )
 
@@ -363,6 +367,7 @@ def generate_native_templates(
     annotations: Sequence[str] = NATIVE_ANNOTATIONS,
     limit: int | None = None,
     judge: bool = True,
+    solver_backend: str = "embedded",
     diagrams: bool = False,
     timeout: int = 180,
 ) -> dict:
@@ -380,6 +385,7 @@ def generate_native_templates(
         available=available,
         limit=limit,
         judge=judge,
+        solver_backend=solver_backend,
         diagrams=diagrams,
         timeout=timeout,
     )
@@ -399,6 +405,7 @@ def generate_native_relations(
     annotations: Sequence[str] = ("P",),
     limit: int | None = None,
     judge: bool = True,
+    solver_backend: str = "embedded",
     diagrams: bool = False,
     timeout: int = 180,
 ) -> dict:
@@ -434,8 +441,41 @@ def generate_native_relations(
         available=available,
         limit=limit,
         judge=judge,
+        solver_backend=solver_backend,
         diagrams=diagrams,
         timeout=timeout,
+    )
+
+
+def generate_native_diy(
+    *,
+    out_dir: Path,
+    config: DiyConfig,
+    annotations: Sequence[str] = ("P",),
+    limit: int | None = None,
+    judge: bool = True,
+    solver_backend: str = "embedded",
+    diagrams: bool = False,
+    timeout: int = 180,
+) -> dict:
+    base_cycles, audit = enumerate_diy_cycles(config)
+    selected_annotations = _validate_annotations(annotations)
+    available = _annotated_count(base_cycles, selected_annotations)
+    audit = dict(audit)
+    audit["annotations"] = list(selected_annotations)
+    audit["base_cycles"] = len(base_cycles)
+    audit["accepted"] = available
+    return _write_native_cases(
+        annotated_native_cycles(base_cycles, selected_annotations),
+        out_dir,
+        audit=audit,
+        available=available,
+        limit=limit,
+        judge=judge,
+        solver_backend=solver_backend,
+        diagrams=diagrams,
+        timeout=timeout,
+        realdep=config.realdep,
     )
 
 
@@ -447,8 +487,10 @@ def _write_native_cases(
     available: int,
     limit: int | None,
     judge: bool,
+    solver_backend: str,
     diagrams: bool,
     timeout: int,
+    realdep: bool = False,
 ) -> dict:
     if limit is not None and limit < 1:
         raise NativeGenerationError("native generation limit must be at least 1")
@@ -456,9 +498,10 @@ def _write_native_cases(
     selected = islice(cycles, limit) if limit is not None else cycles
     filenames: list[str] = []
     verdicts: Counter[str] = Counter()
+    backend = _validate_solver_backend(solver_backend)
     for cycle in selected:
-        case = lower_native_cycle(cycle)
-        solver = _judge_native(case, judge=judge, timeout=timeout)
+        case = lower_native_cycle(cycle, realdep=realdep)
+        solver = _judge_native(case, judge=judge, backend=backend, timeout=timeout)
         verdicts[solver["status"]] += 1
         (out_dir / f"{case.name}.litmus").write_text(case.litmus, encoding="utf-8")
         (out_dir / f"{case.name}.solver.json").write_text(
@@ -496,6 +539,7 @@ def _write_native_cases(
         "generation_limit": limit,
         "generation_limited": len(filenames) < available,
         "judge": judge,
+        "solver_backend": backend if judge else "none",
         "verdicts": dict(sorted(verdicts.items())),
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
@@ -640,6 +684,7 @@ def _lower_local_edge(
     target_data: str,
     registers: _RegisterPool,
     label_index: int,
+    realdep: bool,
 ) -> list[tuple[str, str, str]]:
     if edge.relation in {"po", "rf", "fr", "co"}:
         return []
@@ -649,14 +694,24 @@ def _lower_local_edge(
         raise NativeGenerationError(f"no native lowering for local edge {edge.label}")
     if edge.mechanism == "addr":
         temporary = registers.temp()
+        calculation = (
+            f"andi {temporary},{source_register},128"
+            if realdep
+            else f"xor {temporary},{source_register},{source_register}"
+        )
         return [
-            ("dep", f"xor {temporary},{source_register},{source_register}", "addr-dep"),
+            ("dep", calculation, "addr-dep"),
             ("dep", f"add {target_address},{target_address},{temporary}", "addr-dep"),
         ]
     if edge.mechanism == "data":
         temporary = registers.temp()
+        calculation = (
+            f"andi {temporary},{source_register},128"
+            if realdep
+            else f"xor {temporary},{source_register},{source_register}"
+        )
         return [
-            ("dep", f"xor {temporary},{source_register},{source_register}", "data-dep"),
+            ("dep", calculation, "data-dep"),
             ("dep", f"add {target_data},{target_data},{temporary}", "data-dep"),
         ]
     if edge.mechanism in {"ctrl", "ctrl_fencei"}:
@@ -705,7 +760,13 @@ def _render_native_litmus(
     )
 
 
-def _judge_native(case: NativeLoweredCase, *, judge: bool, timeout: int) -> dict:
+def _judge_native(
+    case: NativeLoweredCase,
+    *,
+    judge: bool,
+    backend: str,
+    timeout: int,
+) -> dict:
     if not judge:
         return {
             "schema": "litmus-link.native-solver.v1",
@@ -714,8 +775,53 @@ def _judge_native(case: NativeLoweredCase, *, judge: bool, timeout: int) -> dict
             "model": "riscv.cat",
             "allowed": None,
             "verdict": "unchecked",
-            "reason": "independent herd7 cross-check disabled by the user",
+            "reason": "RVWMO outcome checking disabled by the user",
         }
+    if backend == "embedded":
+        return solve_rvwmo(
+            case.case_ir,
+            timeout_seconds=float(timeout),
+        ).to_json()
+    if backend == "crosscheck":
+        embedded = solve_rvwmo(
+            case.case_ir,
+            timeout_seconds=float(timeout),
+        ).to_json()
+        external = _judge_native_herd7(case, timeout=timeout)
+        agree = (
+            embedded.get("status") == "verified"
+            and external.get("status") == "verified"
+            and embedded.get("allowed") == external.get("allowed")
+        )
+        if not agree:
+            return {
+                "schema": "litmus-link.native-solver.v2",
+                "status": "conflict",
+                "tool": "litmus-link-rvwmo+herd7",
+                "model": "riscv.cat",
+                "backend": "crosscheck",
+                "allowed": None,
+                "verdict": "conflict",
+                "reason": "Embedded RVWMO and herd7 did not produce the same verified verdict.",
+                "embedded": embedded,
+                "herd7": external,
+            }
+        return {
+            "schema": "litmus-link.native-solver.v2",
+            "status": "verified",
+            "tool": "litmus-link-rvwmo+herd7",
+            "model": "riscv.cat",
+            "backend": "crosscheck",
+            "allowed": embedded["allowed"],
+            "verdict": embedded["verdict"],
+            "reason": "Embedded RVWMO and herd7 agree.",
+            "embedded": embedded,
+            "herd7": external,
+        }
+    return _judge_native_herd7(case, timeout=timeout)
+
+
+def _judge_native_herd7(case: NativeLoweredCase, *, timeout: int) -> dict:
     try:
         verdict = herd_judge(case.litmus, timeout=timeout)
     except ToolchainError as exc:
@@ -736,6 +842,13 @@ def _judge_native(case: NativeLoweredCase, *, judge: bool, timeout: int) -> dict
         "condition": verdict.condition,
         "raw_output": verdict.raw,
     }
+
+
+def _validate_solver_backend(value: str) -> str:
+    backend = str(value or "embedded").lower()
+    if backend not in {"embedded", "herd7", "crosscheck"}:
+        raise NativeGenerationError(f"unknown native solver backend: {value}")
+    return backend
 
 
 def _native_name(cycle: NativeCycle) -> str:

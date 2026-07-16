@@ -25,10 +25,19 @@ from .models import GENERATED, Combination
 from .native_scalar import (
     DEFAULT_NATIVE_MECHANISMS,
     NATIVE_ANNOTATIONS,
+    generate_native_diy,
     generate_native_relations,
     generate_native_templates,
     native_catalog,
     native_template_audit,
+)
+from .native_diy import (
+    DEFAULT_DIY_RELAX,
+    DEFAULT_DIY_SAFE,
+    DIY_MODES,
+    DIY_OBSERVERS,
+    DIY_OBSERVER_TYPES,
+    DiyConfig,
 )
 from .profiles import (
     ALIAS_MODES,
@@ -102,7 +111,17 @@ def options_payload() -> Dict[str, Any]:
         "param_axes": PARAM_AXIS_VALUES,
         "features": feature_description_catalog(),
         "scalar": scalar_catalog(),
-        "native_scalar": native_catalog(),
+        "native_scalar": {
+            **native_catalog(),
+            "diy": {
+                "safe": list(DEFAULT_DIY_SAFE),
+                "relax": list(DEFAULT_DIY_RELAX),
+                "modes": list(DIY_MODES),
+                "observers": list(DIY_OBSERVERS),
+                "observer_types": list(DIY_OBSERVER_TYPES),
+            },
+            "solver_backends": ["embedded", "herd7", "crosscheck"],
+        },
     }
 
 
@@ -184,6 +203,7 @@ def _run_scalar_generator(
     engine = str(payload.get("engine", "cross"))
     selected_limit = _optional_positive_int(payload.get("limit")) if limit is None else limit
     selected_judge = bool(payload.get("judge", True)) if judge is None else judge
+    solver_backend = str(payload.get("solver_backend", "embedded"))
     timeout = _positive_int(payload.get("timeout", 180), "timeout")
     if engine == "native_templates":
         presets = _string_list(payload.get("skeletons")) or ["MP"]
@@ -196,6 +216,7 @@ def _run_scalar_generator(
             annotations=_string_list(payload.get("annotations")) or NATIVE_ANNOTATIONS,
             limit=selected_limit,
             judge=selected_judge,
+            solver_backend=solver_backend,
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
         )
@@ -214,6 +235,45 @@ def _run_scalar_generator(
             annotations=_string_list(payload.get("annotations")) or ("P",),
             limit=selected_limit,
             judge=selected_judge,
+            solver_backend=solver_backend,
+            diagrams=bool(payload.get("diagrams", False)),
+            timeout=timeout,
+        )
+    if engine == "native_diy":
+        diy = payload.get("diy", {}) if isinstance(payload.get("diy"), dict) else {}
+        return generate_native_diy(
+            out_dir=out_dir,
+            config=DiyConfig(
+                safe=tuple(_string_list(diy.get("safe")) or DEFAULT_DIY_SAFE),
+                relax=tuple(_string_list(diy.get("relax")) or DEFAULT_DIY_RELAX),
+                reject=tuple(_string_list(diy.get("reject"))),
+                prefixes=tuple(
+                    tuple(str(token) for token in prefix)
+                    for prefix in diy.get("prefixes", [])
+                    if isinstance(prefix, (list, tuple))
+                ),
+                min_size=_positive_int(payload.get("min_size", 2), "min_size"),
+                size=_positive_int(payload.get("size", 4), "size"),
+                nprocs=_positive_int(payload.get("nprocs", 2), "nprocs"),
+                exact_procs=bool(payload.get("exact_procs", False)),
+                upto=not bool(diy.get("exact_size", False)),
+                mode=str(diy.get("mode", "default")),
+                mix=bool(diy.get("mix", False)),
+                min_relax=int(diy.get("min_relax", 1)),
+                max_relax=int(diy.get("max_relax", 1)),
+                max_accesses_per_proc=_optional_positive_int(payload.get("max_accesses_per_proc")),
+                include_same=bool(payload.get("include_same", False)),
+                include_internal=bool(payload.get("include_internal", True)),
+                observer=str(diy.get("observer", "avoid")),
+                observer_type=str(diy.get("observer_type", "straight")),
+                realdep=bool(diy.get("realdep", False)),
+                unrollatomic=_optional_nonnegative_int(diy.get("unrollatomic")),
+                moreedges=bool(diy.get("moreedges", False)),
+            ),
+            annotations=_string_list(payload.get("annotations")) or ("P",),
+            limit=selected_limit,
+            judge=selected_judge,
+            solver_backend=solver_backend,
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
         )
@@ -367,6 +427,18 @@ def _optional_positive_int(value: Any) -> int | None:
     if value in {None, ""}:
         return None
     return _positive_int(value, "limit")
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("value must be an integer") from exc
+    if parsed < 0:
+        raise ValueError("value must be non-negative")
+    return parsed
 
 
 def _is_scalar_corpus_combination(combination: Combination) -> bool:

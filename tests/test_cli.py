@@ -42,15 +42,58 @@ def test_cli_scalar_catalog_and_tools(capsys) -> None:  # type: ignore[no-untype
 def test_cli_native_catalog_and_generation(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     assert main(["native", "catalog"]) == 0
     catalog_output = capsys.readouterr().out
-    assert '"MP": 260' in catalog_output
+    assert '"MP": 416' in catalog_output
     out = tmp_path / "native-mp"
     assert main([
         "native", "templates", "--skeleton", "MP", "--limit", "3",
         "--no-judge", "--out", str(out),
     ]) == 0
     report_output = capsys.readouterr().out
-    assert '"available_litmus": 66560' in report_output
+    assert '"available_litmus": 106496' in report_output
     assert len(validate_path(out / "@all")) == 3
+
+
+def test_cli_native_diy_and_verify(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "native-diy"
+    assert main([
+        "native", "diy", "--limit", "3", "--solver-backend", "embedded",
+        "--out", str(out),
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["available_litmus"] == 30
+    assert report["verdicts"] == {"verified": 3}
+    assert main(["verify", str(out / "@all"), "--backend", "embedded"]) == 0
+    verified = json.loads(capsys.readouterr().out)
+    assert verified["counts"] == {"verified": 3}
+
+
+def test_cli_native_diy_prefix(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "native-prefix"
+    assert main([
+        "native", "diy", "--prefix", "PodWW Rfe", "--limit", "2",
+        "--no-judge", "--out", str(out),
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["available_litmus"] == 107
+    assert report["audit"]["expanded_prefixes"]
+
+
+def test_cli_native_diy_min_relax_implies_mix(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "native-mix"
+    assert main([
+        "native", "diy", "--min-relax", "2", "--no-judge", "--out", str(out),
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["available_litmus"] == 3
+    assert report["audit"]["config"]["mix"] is True
+
+
+def test_cli_verify_fails_when_embedded_backend_cannot_model_file(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    litmus = tmp_path / "external.litmus"
+    litmus.write_text("RISCV External\n{}\n P0;\n nop;\nexists (1=1)\n", encoding="utf-8")
+    assert main(["verify", str(litmus), "--backend", "embedded"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["counts"] == {"not_applicable": 1}
 
 
 @pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
@@ -153,11 +196,44 @@ def test_gui_native_scalar_preview_is_exhaustive_for_configured_mp_domain() -> N
             "judge": False,
         }
     )
-    assert preview["available_litmus"] == 66560
+    assert preview["available_litmus"] == 106496
     assert preview["displayed_litmus"] == 3
     assert all(item["name"].startswith("NATIVE_MP_") for item in preview["sample"])
     assert all(item["decision"]["reason"].startswith("Scalar RVWMO test exhaustively") for item in preview["sample"])
     assert all(len(item["case_ir"]["relations"]) == 4 for item in preview["sample"])
+
+
+def test_gui_native_diy_preview_uses_embedded_verification() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_diy",
+            "sample_limit": 4,
+            "judge": True,
+            "solver_backend": "embedded",
+            "annotations": ["P"],
+            "diy": {},
+        }
+    )
+    assert preview["available_litmus"] == 30
+    assert preview["displayed_litmus"] == 4
+    assert all(item["solver"]["backend"] == "embedded" for item in preview["sample"])
+    assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
+
+
+def test_gui_native_diy_preview_accepts_fixed_prefixes() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_diy",
+            "sample_limit": 2,
+            "judge": False,
+            "annotations": ["P"],
+            "diy": {"prefixes": [["PodWW", "Rfe"]]},
+        }
+    )
+    assert preview["available_litmus"] == 107
+    assert preview["displayed_litmus"] == 2
 
 
 def test_qt_gui_check(capsys) -> None:  # type: ignore[no-untyped-def]
