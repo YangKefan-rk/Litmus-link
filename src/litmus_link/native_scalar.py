@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .diagram import render_diagram
-from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation
+from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation, MemoryAccess
+from .memory_layout import ALIGNED_LAYOUT, MemoryLayoutConfig
 from .native_cycles import (
     EnumerationReport,
     NativeCycle,
@@ -210,7 +211,12 @@ def native_relation_cycles(
     )
 
 
-def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLoweredCase:
+def lower_native_cycle(
+    cycle: NativeCycle,
+    *,
+    realdep: bool = False,
+    memory_layout: MemoryLayoutConfig = ALIGNED_LAYOUT,
+) -> NativeLoweredCase:
     decision = validate_cycle(cycle.edges)
     if not decision.accepted:
         raise NativeGenerationError(f"cannot lower invalid native cycle: {decision.reason}")
@@ -219,13 +225,39 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
     locations = location_ids(cycle.edges)
     nvertices = len(cycle.edges)
     annotations = _cycle_annotations(cycle)
+    if not memory_layout.is_aligned and any(annotation != "P" for annotation in annotations):
+        raise NativeGenerationError("misaligned layouts support ordinary scalar load/store events only")
     proc_orders = _program_orders(cycle.edges, procs)
-    write_values, read_values, final_values = _memory_values(cycle.edges, directions, locations)
+    write_values, read_values, final_values, rf_source = _memory_values(cycle.edges, directions, locations)
     location_names = {index: _location_name(index) for index in sorted(set(locations))}
+    memory_accesses = {
+        vertex: memory_layout.access_for(location_names[locations[vertex]], vertex)
+        for vertex in range(nvertices)
+    }
+    if memory_layout.is_aligned:
+        actual_write_values = write_values
+        actual_read_values = read_values
+        final_byte_values: dict[str, int] = {}
+    else:
+        actual_write_values, actual_read_values, final_byte_values = _mixed_values(
+            directions,
+            locations,
+            memory_accesses,
+            write_values,
+            rf_source,
+            location_names,
+        )
 
     address_regs: dict[tuple[int, int], str] = {}
     memory_regs: dict[int, str] = {}
-    init_lines: list[str] = [f"{location_names[index]}=0;" for index in sorted(location_names)]
+    init_lines: list[str] = [
+        (
+            f"{location_names[index]}=0;"
+            if memory_layout.is_aligned
+            else f"uint8_t {location_names[index]}[128];"
+        )
+        for index in sorted(location_names)
+    ]
     hart_events: list[list[LitmusEvent]] = []
     instruction_rows: list[list[str]] = []
 
@@ -240,7 +272,7 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
             register = register_pool.value()
             memory_regs[vertex] = register
             if directions[vertex] == WRITE:
-                init_lines.append(f"{proc}:{register}={write_values[vertex]};")
+                init_lines.append(f"{proc}:{register}={_hex_value(actual_write_values[vertex])};")
 
         events: list[LitmusEvent] = []
         instructions: list[str] = []
@@ -249,14 +281,15 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
             address = address_regs[(proc, location)]
             register = memory_regs[vertex]
             annotation = annotations[vertex]
+            access = memory_accesses[vertex]
             if directions[vertex] == READ:
-                instruction = _load_instruction(register, address, annotation)
+                instruction = _load_instruction(register, address, annotation, access)
                 kind = "load" if annotation == "P" else "amo"
-                value = str(read_values[vertex])
+                value = _hex_value(actual_read_values[vertex])
             else:
-                instruction = _store_instruction(register, address, annotation)
+                instruction = _store_instruction(register, address, annotation, access)
                 kind = "store" if annotation == "P" else "amo"
-                value = str(write_values[vertex])
+                value = _hex_value(actual_write_values[vertex])
             events.append(
                 LitmusEvent(
                     event_id=f"v{vertex}",
@@ -267,6 +300,7 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
                     register=register,
                     value=value,
                     role="cycle-event",
+                    memory_access=access,
                 )
             )
             instructions.append(instruction)
@@ -312,24 +346,30 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
         for index, edge in enumerate(cycle.edges)
     ]
     exists_terms = [
-        f"{procs[vertex]}:{memory_regs[vertex]}={read_values[vertex]}"
+        f"{procs[vertex]}:{memory_regs[vertex]}={_hex_value(actual_read_values[vertex])}"
         for vertex in range(nvertices)
         if directions[vertex] == READ
     ]
-    exists_terms.extend(
-        f"{location_names[location]}={value}" for location, value in sorted(final_values.items())
-    )
+    if memory_layout.is_aligned:
+        exists_terms.extend(
+            f"{location_names[location]}={value}" for location, value in sorted(final_values.items())
+        )
+    else:
+        exists_terms.extend(
+            f"{location}=0x{value:02x}" for location, value in sorted(final_byte_values.items())
+        )
     if not exists_terms:
         raise NativeGenerationError("native cycle has no observable read or final-memory outcome")
     exists = "(" + " /\\ ".join(exists_terms) + ")"
-    name = _native_name(cycle)
+    base_name = _native_name(cycle)
+    name = base_name if memory_layout.is_aligned else f"{base_name}_{_safe_name(memory_layout.id)}"
     cycle_text = " ".join(cycle.labels)
     case_ir = LitmusCaseIR(
         name=name,
         display_name=name,
         combination_name=name,
         skeleton=cycle.family or "Native",
-        variant="native-exhaustive",
+        variant=f"native-exhaustive_{memory_layout.id}",
         cycle=cycle_text,
         init_lines=init_lines,
         harts=hart_events,
@@ -337,8 +377,19 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
         exists=exists,
         expected_outcome="solver_required",
         model="rvwmo-herd7",
-        description=f"Native exhaustive scalar cycle ({cycle.family or 'unclassified'}): {cycle_text}",
-        tags=["native", "scalar", "rvwmo", cycle.family or "unclassified"],
+        description=(
+            f"Native exhaustive scalar cycle ({cycle.family or 'unclassified'}), "
+            f"memory layout {memory_layout.id}: {cycle_text}"
+        ),
+        tags=[
+            "native",
+            "scalar",
+            "rvwmo",
+            cycle.family or "unclassified",
+            memory_layout.mode,
+            memory_layout.boundary,
+            "no-mag" if not memory_layout.is_aligned else "aligned",
+        ],
     )
     litmus = _render_native_litmus(name, cycle_text, init_lines, instruction_rows, exists)
     return NativeLoweredCase(
@@ -351,9 +402,13 @@ def lower_native_cycle(cycle: NativeCycle, *, realdep: bool = False) -> NativeLo
             "location_ids": list(locations),
             "write_values": {str(key): value for key, value in sorted(write_values.items())},
             "read_values": {str(key): value for key, value in sorted(read_values.items())},
+            "actual_write_values": {str(key): value for key, value in sorted(actual_write_values.items())},
+            "actual_read_values": {str(key): value for key, value in sorted(actual_read_values.items())},
             "final_values": {location_names[key]: value for key, value in sorted(final_values.items())},
+            "final_byte_values": dict(sorted(final_byte_values.items())),
             "annotations": list(annotations),
             "real_dependencies": realdep,
+            "memory_layout": memory_layout.to_json(),
         },
     )
 
@@ -370,13 +425,21 @@ def generate_native_templates(
     solver_backend: str = "embedded",
     diagrams: bool = False,
     timeout: int = 180,
+    memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
 ) -> dict:
     base_cycles, audit = native_template_cycles(presets, mechanisms, include_same=include_same)
     selected_annotations = _validate_annotations(annotations)
-    available = _annotated_count(base_cycles, selected_annotations)
+    selected_layouts = _validate_memory_layouts(memory_layouts)
+    annotated_count = _annotated_count(base_cycles, selected_annotations)
+    available, excluded_atomic = _memory_layout_count(
+        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    )
     audit = dict(audit)
     audit["annotations"] = list(selected_annotations)
     audit["base_cycles"] = len(base_cycles)
+    audit["annotated_cycles"] = annotated_count
+    audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
     audit["accepted"] = available
     return _write_native_cases(
         annotated_native_cycles(base_cycles, selected_annotations),
@@ -388,6 +451,7 @@ def generate_native_templates(
         solver_backend=solver_backend,
         diagrams=diagrams,
         timeout=timeout,
+        memory_layouts=selected_layouts,
     )
 
 
@@ -408,6 +472,7 @@ def generate_native_relations(
     solver_backend: str = "embedded",
     diagrams: bool = False,
     timeout: int = 180,
+    memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
 ) -> dict:
     base_cycles = native_relation_cycles(
         mechanisms=mechanisms,
@@ -432,10 +497,18 @@ def generate_native_relations(
         "annotations": list(_validate_annotations(annotations)),
         "base_cycles": len(base_cycles),
     }
-    available = _annotated_count(base_cycles, annotations)
+    selected_annotations = _validate_annotations(annotations)
+    selected_layouts = _validate_memory_layouts(memory_layouts)
+    annotated_count = _annotated_count(base_cycles, selected_annotations)
+    available, excluded_atomic = _memory_layout_count(
+        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    )
+    audit["annotated_cycles"] = annotated_count
+    audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
     audit["accepted"] = available
     return _write_native_cases(
-        annotated_native_cycles(base_cycles, annotations),
+        annotated_native_cycles(base_cycles, selected_annotations),
         out_dir,
         audit=audit,
         available=available,
@@ -444,6 +517,7 @@ def generate_native_relations(
         solver_backend=solver_backend,
         diagrams=diagrams,
         timeout=timeout,
+        memory_layouts=selected_layouts,
     )
 
 
@@ -457,13 +531,21 @@ def generate_native_diy(
     solver_backend: str = "embedded",
     diagrams: bool = False,
     timeout: int = 180,
+    memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
 ) -> dict:
     base_cycles, audit = enumerate_diy_cycles(config)
     selected_annotations = _validate_annotations(annotations)
-    available = _annotated_count(base_cycles, selected_annotations)
+    selected_layouts = _validate_memory_layouts(memory_layouts)
+    annotated_count = _annotated_count(base_cycles, selected_annotations)
+    available, excluded_atomic = _memory_layout_count(
+        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    )
     audit = dict(audit)
     audit["annotations"] = list(selected_annotations)
     audit["base_cycles"] = len(base_cycles)
+    audit["annotated_cycles"] = annotated_count
+    audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
     audit["accepted"] = available
     return _write_native_cases(
         annotated_native_cycles(base_cycles, selected_annotations),
@@ -476,6 +558,7 @@ def generate_native_diy(
         diagrams=diagrams,
         timeout=timeout,
         realdep=config.realdep,
+        memory_layouts=selected_layouts,
     )
 
 
@@ -491,16 +574,18 @@ def _write_native_cases(
     diagrams: bool,
     timeout: int,
     realdep: bool = False,
+    memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
 ) -> dict:
     if limit is not None and limit < 1:
         raise NativeGenerationError("native generation limit must be at least 1")
     out_dir.mkdir(parents=True, exist_ok=True)
-    selected = islice(cycles, limit) if limit is not None else cycles
+    lowered_domain = _cycles_with_layouts(cycles, memory_layouts)
+    selected = islice(lowered_domain, limit) if limit is not None else lowered_domain
     filenames: list[str] = []
     verdicts: Counter[str] = Counter()
     backend = _validate_solver_backend(solver_backend)
-    for cycle in selected:
-        case = lower_native_cycle(cycle, realdep=realdep)
+    for cycle, memory_layout in selected:
+        case = lower_native_cycle(cycle, realdep=realdep, memory_layout=memory_layout)
         solver = _judge_native(case, judge=judge, backend=backend, timeout=timeout)
         verdicts[solver["status"]] += 1
         (out_dir / f"{case.name}.litmus").write_text(case.litmus, encoding="utf-8")
@@ -553,6 +638,44 @@ def _write_native_cases(
     return report
 
 
+def _cycles_with_layouts(
+    cycles: Iterable[NativeCycle],
+    memory_layouts: Sequence[MemoryLayoutConfig],
+) -> Iterable[tuple[NativeCycle, MemoryLayoutConfig]]:
+    for cycle in cycles:
+        plain = all(annotation == "P" for annotation in _cycle_annotations(cycle))
+        for layout in memory_layouts:
+            if layout.is_aligned or plain:
+                yield cycle, layout
+
+
+def _validate_memory_layouts(
+    memory_layouts: Sequence[MemoryLayoutConfig],
+) -> tuple[MemoryLayoutConfig, ...]:
+    selected = tuple(dict.fromkeys(memory_layouts or (ALIGNED_LAYOUT,)))
+    if not all(isinstance(layout, MemoryLayoutConfig) for layout in selected):
+        raise NativeGenerationError("memory_layouts must contain MemoryLayoutConfig values")
+    return selected
+
+
+def _memory_layout_count(
+    base_cycle_count: int,
+    annotated_cycle_count: int,
+    annotations: Sequence[str],
+    memory_layouts: Sequence[MemoryLayoutConfig],
+) -> tuple[int, int]:
+    aligned = sum(layout.is_aligned for layout in memory_layouts)
+    misaligned = len(memory_layouts) - aligned
+    plain_cycles = base_cycle_count if "P" in annotations else 0
+    accepted = annotated_cycle_count * aligned + plain_cycles * misaligned
+    excluded_atomic = (annotated_cycle_count - plain_cycles) * misaligned
+    if accepted == 0:
+        raise NativeGenerationError(
+            "selected misaligned layouts require the ordinary P annotation"
+        )
+    return accepted, excluded_atomic
+
+
 def _program_orders(edges: Sequence[NativeEdge], procs: Sequence[int]) -> list[list[int]]:
     vertices_by_proc: dict[int, set[int]] = defaultdict(set)
     outgoing: dict[int, int] = {}
@@ -591,7 +714,7 @@ def _memory_values(
     edges: Sequence[NativeEdge],
     directions: Sequence[str],
     locations: Sequence[int],
-) -> tuple[dict[int, int], dict[int, int], dict[int, int]]:
+) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
     writes = [vertex for vertex, direction in enumerate(directions) if direction == WRITE]
     reads = [vertex for vertex, direction in enumerate(directions) if direction == READ]
     rf_source: dict[int, int] = {}
@@ -649,7 +772,84 @@ def _memory_values(
         vertex: write_values[rf_source[vertex]] if vertex in rf_source else 0
         for vertex in reads
     }
+    return write_values, read_values, final_values, rf_source
+
+
+def _mixed_values(
+    directions: Sequence[str],
+    locations: Sequence[int],
+    accesses: dict[int, MemoryAccess],
+    write_ordinals: dict[int, int],
+    rf_source: dict[int, int],
+    location_names: dict[int, str],
+) -> tuple[dict[int, int], dict[int, int], dict[str, int]]:
+    byte_tags = {
+        vertex: _write_byte_tag(ordinal)
+        for vertex, ordinal in write_ordinals.items()
+    }
+    write_values = {
+        vertex: _repeat_byte(byte_tags[vertex], accesses[vertex].size_bytes)
+        for vertex in write_ordinals
+    }
+    read_values: dict[int, int] = {}
+    for vertex, direction in enumerate(directions):
+        if direction != READ:
+            continue
+        access = accesses[vertex]
+        source = rf_source.get(vertex)
+        source_bytes = set(accesses[source].covered_bytes) if source is not None else set()
+        source_tag = byte_tags[source] if source is not None else 0
+        value = 0
+        for byte_index, absolute_byte in enumerate(access.covered_bytes):
+            if absolute_byte in source_bytes:
+                value |= source_tag << (8 * byte_index)
+        read_values[vertex] = value
+
+    final_values: dict[str, int] = {}
+    for location in sorted(set(locations)):
+        writes = sorted(
+            (
+                vertex
+                for vertex, direction in enumerate(directions)
+                if direction == WRITE and locations[vertex] == location
+            ),
+            key=lambda vertex: write_ordinals[vertex],
+        )
+        image: dict[int, int] = {}
+        for vertex in writes:
+            for absolute_byte in accesses[vertex].covered_bytes:
+                image[absolute_byte] = byte_tags[vertex]
+        base = location_names[location]
+        final_values.update({f"{base}[{offset}]": value for offset, value in image.items()})
+
+    for vertex, source in rf_source.items():
+        overlap = set(accesses[vertex].covered_bytes) & set(accesses[source].covered_bytes)
+        if not overlap:
+            raise NativeGenerationError(
+                f"memory layout removed required rf overlap v{source}->v{vertex}"
+            )
     return write_values, read_values, final_values
+
+
+def _write_byte_tag(ordinal: int) -> int:
+    # Native cycle lowering currently emits only a handful of writes per
+    # location.  Keep each byte nonzero and unique so target read values select
+    # their intended rf source rather than an initial byte.
+    if ordinal < 1 or ordinal > 255:
+        raise NativeGenerationError("mixed-size lowering supports at most 255 writes per location")
+    return ordinal
+
+
+def _repeat_byte(byte: int, size: int) -> int:
+    return sum(byte << (8 * index) for index in range(size))
+
+
+def _hex_value(value: int) -> str:
+    return f"0x{value:x}"
+
+
+def _safe_name(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value)
 
 
 class _RegisterPool:
@@ -823,7 +1023,16 @@ def _judge_native(
 
 def _judge_native_herd7(case: NativeLoweredCase, *, timeout: int) -> dict:
     try:
-        verdict = herd_judge(case.litmus, timeout=timeout)
+        mixed = any(
+            event.memory_access is not None
+            and event.memory_access.atomicity_model == "byte_level_no_mag"
+            for event in case.case_ir.events()
+        )
+        verdict = herd_judge(
+            case.litmus,
+            timeout=timeout,
+            variants=("mixed", "unaligned") if mixed else (),
+        )
     except ToolchainError as exc:
         raise NativeGenerationError(f"herd7 cross-check failed for {case.name}: {exc}") from exc
     status = "verified" if verdict.outcome in {"observable", "forbidden"} else "unknown"
@@ -833,6 +1042,7 @@ def _judge_native_herd7(case: NativeLoweredCase, *, timeout: int) -> dict:
         "tool": "herd7",
         "model": "riscv.cat",
         "model_path": str(RISCV_CAT),
+        "variants": ["mixed", "unaligned"] if mixed else [],
         "allowed": verdict.allowed,
         "verdict": verdict.outcome,
         "observation": verdict.observation,
@@ -874,16 +1084,28 @@ def _cycle_annotations(cycle: NativeCycle) -> tuple[str, ...]:
     return cycle.annotations or ("P",) * cycle.size
 
 
-def _load_instruction(destination: str, address: str, annotation: str) -> str:
+def _load_instruction(
+    destination: str,
+    address: str,
+    annotation: str,
+    access: MemoryAccess,
+) -> str:
     if annotation == "P":
-        return f"lw {destination},0({address})"
+        opcode = {1: "lbu", 2: "lhu", 4: "lwu", 8: "ld"}[access.size_bytes]
+        return f"{opcode} {destination},{access.offset_bytes}({address})"
     suffix = _amo_suffix(annotation)
     return f"amoor.w{suffix} {destination},x0,({address})"
 
 
-def _store_instruction(data: str, address: str, annotation: str) -> str:
+def _store_instruction(
+    data: str,
+    address: str,
+    annotation: str,
+    access: MemoryAccess,
+) -> str:
     if annotation == "P":
-        return f"sw {data},0({address})"
+        opcode = {1: "sb", 2: "sh", 4: "sw", 8: "sd"}[access.size_bytes]
+        return f"{opcode} {data},{access.offset_bytes}({address})"
     suffix = _amo_suffix(annotation)
     return f"amoswap.w{suffix} x0,{data},({address})"
 

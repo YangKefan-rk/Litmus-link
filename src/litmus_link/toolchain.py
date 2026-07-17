@@ -281,7 +281,12 @@ def _strip_nondeterministic(raw: str) -> str:
     )
 
 
-def herd_judge(litmus_text: str, *, timeout: int = 120) -> HerdVerdict:
+def herd_judge(
+    litmus_text: str,
+    *,
+    timeout: int = 120,
+    variants: Sequence[str] = (),
+) -> HerdVerdict:
     """Run herd7 on one litmus test and parse its per-outcome verdict."""
     if not HERD.exists():
         raise ToolchainError(f"herd7 not found at {HERD}")
@@ -290,12 +295,16 @@ def herd_judge(litmus_text: str, *, timeout: int = 120) -> HerdVerdict:
     workdir = Path(tempfile.mkdtemp(prefix="ll-herd-"))
     test_path = workdir / "t.litmus"
     test_path.write_text(litmus_text)
-    cmd = [str(HERD), "-I", str(HERDTOOLS_LIB), "-model", str(RISCV_CAT), str(test_path)]
+    cmd = [str(HERD), "-I", str(HERDTOOLS_LIB), "-model", str(RISCV_CAT)]
+    selected_variants = tuple(dict.fromkeys(str(value) for value in variants if str(value)))
+    if selected_variants:
+        cmd += ["-variant", ",".join(selected_variants)]
+    cmd.append(str(test_path))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         raw = _strip_nondeterministic(proc.stdout)
-        if proc.returncode != 0 and not raw.strip():
-            raise ToolchainError(f"herd7 failed: {proc.stderr.strip()}")
+        if not raw.strip() and (proc.returncode != 0 or proc.stderr.strip()):
+            raise ToolchainError(f"herd7 failed: {proc.stderr.strip() or f'rc={proc.returncode}'}")
         return _parse_herd(raw)
     except subprocess.TimeoutExpired as exc:
         raise ToolchainError(f"herd7 timed out after {timeout}s") from exc
