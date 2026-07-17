@@ -125,6 +125,25 @@ class LitmusEvent:
     role: str = ""
     memory_access: MemoryAccess | None = None
 
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "LitmusEvent":
+        access = data.get("memory_access")
+        return cls(
+            event_id=str(data["event_id"]),
+            hart=int(data["hart"]),
+            kind=str(data["kind"]),
+            instruction=str(data["instruction"]),
+            location=str(data.get("location", "")),
+            register=str(data.get("register", "")),
+            value=str(data.get("value", "")),
+            role=str(data.get("role", "")),
+            memory_access=(
+                MemoryAccess.from_json(access)
+                if isinstance(access, Mapping)
+                else None
+            ),
+        )
+
     def to_json(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
@@ -146,6 +165,16 @@ class LitmusRelation:
     kind: str
     label: str = ""
     local: bool = False
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "LitmusRelation":
+        return cls(
+            src=str(data["src"]),
+            dst=str(data["dst"]),
+            kind=str(data["kind"]),
+            label=str(data.get("label", "")),
+            local=bool(data.get("local", False)),
+        )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -173,6 +202,31 @@ class LitmusCaseIR:
     model: str
     description: str = ""
     tags: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "LitmusCaseIR":
+        return cls(
+            name=str(data["name"]),
+            display_name=str(data.get("display_name", data["name"])),
+            combination_name=str(data.get("combination_name", data["name"])),
+            skeleton=str(data.get("skeleton", "Native")),
+            variant=str(data.get("variant", "native")),
+            cycle=str(data.get("cycle", "")),
+            init_lines=[str(value) for value in data.get("init_lines", [])],
+            harts=[
+                [LitmusEvent.from_json(event) for event in hart]
+                for hart in data.get("harts", [])
+            ],
+            relations=[
+                LitmusRelation.from_json(relation)
+                for relation in data.get("relations", [])
+            ],
+            exists=str(data.get("exists", "")),
+            expected_outcome=str(data.get("expected_outcome", "solver_required")),
+            model=str(data.get("model", "rvwmo")),
+            description=str(data.get("description", "")),
+            tags=[str(value) for value in data.get("tags", [])],
+        )
 
     def events(self) -> list[LitmusEvent]:
         return [event for hart in self.harts for event in hart]

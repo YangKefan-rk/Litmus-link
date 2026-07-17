@@ -367,25 +367,7 @@ def _scalar_preview_items(out_dir: Path, report: Dict[str, Any]) -> list[Dict[st
 
 
 def _case_ir_from_json(data: Dict[str, Any]) -> LitmusCaseIR:
-    return LitmusCaseIR(
-        name=str(data["name"]),
-        display_name=str(data.get("display_name", data["name"])),
-        combination_name=str(data.get("combination_name", data["name"])),
-        skeleton=str(data.get("skeleton", "Native")),
-        variant=str(data.get("variant", "native-exhaustive")),
-        cycle=str(data.get("cycle", "")),
-        init_lines=[str(value) for value in data.get("init_lines", [])],
-        harts=[
-            [LitmusEvent(**event) for event in hart]
-            for hart in data.get("harts", [])
-        ],
-        relations=[LitmusRelation(**relation) for relation in data.get("relations", [])],
-        exists=str(data.get("exists", "")),
-        expected_outcome=str(data.get("expected_outcome", "solver_required")),
-        model=str(data.get("model", "rvwmo-herd7")),
-        description=str(data.get("description", "")),
-        tags=[str(value) for value in data.get("tags", [])],
-    )
+    return LitmusCaseIR.from_json(data)
 
 
 def _herd_verdict_from_scalar_solver(solver: Dict[str, Any]) -> HerdVerdict | None:

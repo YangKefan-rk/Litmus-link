@@ -47,6 +47,10 @@ class MemoryEvent:
     aq: bool = False
     rl: bool = False
     amo: bool = False
+    instruction_id: str = ""
+    byte_offset: int | None = None
+    access_size: int = 0
+    atomicity_model: str = "location_atomic"
 
     @property
     def rcsc(self) -> bool:
@@ -66,6 +70,10 @@ class MemoryEvent:
             "aq": self.aq,
             "rl": self.rl,
             "amo": self.amo,
+            "instruction_id": self.instruction_id or self.event_id,
+            "byte_offset": self.byte_offset,
+            "access_size": self.access_size,
+            "atomicity_model": self.atomicity_model,
         }
 
 
@@ -258,9 +266,9 @@ def _memory_events(case: LitmusCaseIR) -> tuple[MemoryEvent, ...]:
                 raise RvwmoSolverError(f"memory event {event.event_id} has no location")
             if event.register.startswith("v") or event.instruction.lstrip().startswith("v"):
                 raise RvwmoSolverError("embedded RVWMO solver currently supports scalar memory events only")
-            classified = _classify_event(event, hart, order)
-            memory.append(classified)
-            locations.add(classified.location)
+            classified = _classify_events(event, hart, order)
+            memory.extend(classified)
+            locations.update(item.location for item in classified)
             order += 1
     if not memory:
         raise RvwmoSolverError("case has no scalar memory events")
@@ -277,12 +285,49 @@ def _memory_events(case: LitmusCaseIR) -> tuple[MemoryEvent, ...]:
                 read_value=None,
                 write_value=init.get(location, 0),
                 initial=True,
+                instruction_id=f"init:{location}",
+                byte_offset=_location_byte_offset(location),
+                access_size=1 if _location_byte_offset(location) is not None else 0,
+                atomicity_model="initial",
             )
         )
     ids = [event.event_id for event in memory]
     if len(ids) != len(set(ids)):
         raise RvwmoSolverError("case contains duplicate memory event ids")
     return tuple(memory)
+
+
+def _classify_events(event: LitmusEvent, hart: int, order: int) -> tuple[MemoryEvent, ...]:
+    access = event.memory_access
+    if access is not None and access.atomicity_model == "byte_level_no_mag":
+        if event.kind not in {"load", "store"}:
+            raise RvwmoSolverError(
+                f"byte-level no-MAG access {event.event_id} must be a plain load/store"
+            )
+        value = _integer(event.value, f"event {event.event_id} value") if event.value else None
+        if value is None:
+            raise RvwmoSolverError(f"memory event {event.event_id} has no target value")
+        out: list[MemoryEvent] = []
+        for byte_index, absolute_byte in enumerate(access.covered_bytes):
+            byte_value = (value >> (8 * byte_index)) & 0xFF
+            out.append(
+                MemoryEvent(
+                    event_id=f"{event.event_id}.b{byte_index}",
+                    hart=hart,
+                    order=order,
+                    location=access.byte_location(absolute_byte),
+                    read=event.kind == "load",
+                    write=event.kind == "store",
+                    read_value=byte_value if event.kind == "load" else None,
+                    write_value=byte_value if event.kind == "store" else None,
+                    instruction_id=event.event_id,
+                    byte_offset=absolute_byte,
+                    access_size=access.size_bytes,
+                    atomicity_model="byte_level_no_mag",
+                )
+            )
+        return tuple(out)
+    return (_classify_event(event, hart, order),)
 
 
 def _classify_event(event: LitmusEvent, hart: int, order: int) -> MemoryEvent:
@@ -293,19 +338,31 @@ def _classify_event(event: LitmusEvent, hart: int, order: int) -> MemoryEvent:
     if event.kind == "load":
         if value is None:
             raise RvwmoSolverError(f"load {event.event_id} has no target read value")
-        return MemoryEvent(event.event_id, hart, order, event.location, True, False, value, None, aq=aq, rl=rl)
+        return MemoryEvent(
+            event.event_id, hart, order, event.location, True, False, value, None,
+            aq=aq, rl=rl, instruction_id=event.event_id,
+        )
     if event.kind == "store":
         if value is None:
             raise RvwmoSolverError(f"store {event.event_id} has no write value")
-        return MemoryEvent(event.event_id, hart, order, event.location, False, True, None, value, aq=aq, rl=rl)
+        return MemoryEvent(
+            event.event_id, hart, order, event.location, False, True, None, value,
+            aq=aq, rl=rl, instruction_id=event.event_id,
+        )
     if "amoor" in instruction:
         if value is None:
             raise RvwmoSolverError(f"AMO load {event.event_id} has no target read value")
-        return MemoryEvent(event.event_id, hart, order, event.location, True, True, value, value, aq=aq, rl=rl, amo=True)
+        return MemoryEvent(
+            event.event_id, hart, order, event.location, True, True, value, value,
+            aq=aq, rl=rl, amo=True, instruction_id=event.event_id,
+        )
     if "amoswap" in instruction:
         if value is None:
             raise RvwmoSolverError(f"AMO store {event.event_id} has no write value")
-        return MemoryEvent(event.event_id, hart, order, event.location, True, True, None, value, aq=aq, rl=rl, amo=True)
+        return MemoryEvent(
+            event.event_id, hart, order, event.location, True, True, None, value,
+            aq=aq, rl=rl, amo=True, instruction_id=event.event_id,
+        )
     raise RvwmoSolverError(f"unsupported AMO instruction in {event.event_id}: {event.instruction}")
 
 
@@ -322,11 +379,16 @@ def _initial_values(lines: Sequence[str]) -> dict[str, int]:
 def _final_values(exists: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for location, value in re.findall(
-        r"(?<![:\w])([A-Za-z_]\w*)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))",
+        r"(?<![:\w])([A-Za-z_]\w*(?:\[\d+\])?)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))",
         exists,
     ):
         out[location] = int(value, 0)
     return out
+
+
+def _location_byte_offset(location: str) -> int | None:
+    match = re.fullmatch(r"[A-Za-z_]\w*\[(\d+)\]", location)
+    return int(match.group(1)) if match else None
 
 
 def _static_relations(
@@ -340,8 +402,12 @@ def _static_relations(
         if event.hart is not None:
             by_hart[event.hart].append(event)
     for sequence in by_hart.values():
-        sequence.sort(key=lambda event: event.order)
-        po.update((left.event_id, right.event_id) for index, left in enumerate(sequence) for right in sequence[index + 1 :])
+        po.update(
+            (left.event_id, right.event_id)
+            for left in sequence
+            for right in sequence
+            if left.order < right.order
+        )
     po_loc = {
         pair for pair in po
         if event_map[pair[0]].location == event_map[pair[1]].location
@@ -349,16 +415,26 @@ def _static_relations(
     addr: Relation = set()
     data: Relation = set()
     ctrl: Relation = set()
+    by_instruction: dict[str, list[MemoryEvent]] = defaultdict(list)
+    for event in events:
+        by_instruction[event.instruction_id or event.event_id].append(event)
     for relation in case.relations:
-        if relation.src not in event_map or relation.dst not in event_map:
+        sources = by_instruction.get(relation.src, ())
+        targets = by_instruction.get(relation.dst, ())
+        if not sources or not targets:
             continue
+        lifted = {
+            (source.event_id, target.event_id)
+            for source in sources
+            for target in targets
+        }
         label = relation.label.lower()
         if "addr" in label:
-            addr.add((relation.src, relation.dst))
+            addr.update(lifted)
         if "data" in label:
-            data.add((relation.src, relation.dst))
+            data.update(lifted)
         if "ctrl" in label:
-            ctrl.add((relation.src, relation.dst))
+            ctrl.update(lifted)
     fence = _fence_relation(case, events)
     return _StaticRelations(event_map, po, po_loc, fence, addr, data, ctrl)
 
@@ -367,13 +443,15 @@ def _fence_relation(
     case: LitmusCaseIR,
     events: Sequence[MemoryEvent],
 ) -> Relation:
-    by_id = {event.event_id: event for event in events}
+    by_instruction: dict[str, list[MemoryEvent]] = defaultdict(list)
+    for event in events:
+        by_instruction[event.instruction_id or event.event_id].append(event)
     out: Relation = set()
     for sequence in case.harts:
         memory_positions = [
-            (index, by_id[event.event_id])
+            (index, memory)
             for index, event in enumerate(sequence)
-            if event.event_id in by_id
+            for memory in by_instruction.get(event.event_id, ())
         ]
         for index, event in enumerate(sequence):
             if event.kind != "fence":

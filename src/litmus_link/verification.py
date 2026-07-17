@@ -176,22 +176,7 @@ def _load_case_ir(litmus_path: Path) -> LitmusCaseIR | None:
     if not isinstance(data, dict):
         return None
     try:
-        return LitmusCaseIR(
-            name=str(data["name"]),
-            display_name=str(data.get("display_name", data["name"])),
-            combination_name=str(data.get("combination_name", data["name"])),
-            skeleton=str(data.get("skeleton", "Native")),
-            variant=str(data.get("variant", "native")),
-            cycle=str(data.get("cycle", "")),
-            init_lines=[str(value) for value in data.get("init_lines", [])],
-            harts=[[LitmusEvent(**event) for event in hart] for hart in data.get("harts", [])],
-            relations=[LitmusRelation(**relation) for relation in data.get("relations", [])],
-            exists=str(data.get("exists", "")),
-            expected_outcome=str(data.get("expected_outcome", "solver_required")),
-            model=str(data.get("model", "rvwmo")),
-            description=str(data.get("description", "")),
-            tags=[str(value) for value in data.get("tags", [])],
-        )
+        return LitmusCaseIR.from_json(data)
     except (KeyError, TypeError, ValueError):
         return None
 
