@@ -29,6 +29,91 @@ VECTOR_CYCLE_VARIANTS = [
 
 
 @dataclass(frozen=True)
+class MemoryAccess:
+    """Byte-addressed footprint of one scalar memory instruction.
+
+    ``byte_level_no_mag`` is the only misaligned atomicity model currently
+    supported.  It deliberately carries no whole-instruction atomicity
+    guarantee; ordering relations still belong to the parent instruction.
+    """
+
+    base_symbol: str
+    offset_bytes: int
+    size_bytes: int
+    covered_bytes: tuple[int, ...]
+    natural_aligned: bool
+    boundary: str
+    atomicity_model: str
+
+    def __post_init__(self) -> None:
+        if self.size_bytes not in {1, 2, 4, 8}:
+            raise ValueError(f"unsupported scalar access size: {self.size_bytes}")
+        if self.offset_bytes < 0:
+            raise ValueError("memory access offset must be non-negative")
+        expected = tuple(range(self.offset_bytes, self.offset_bytes + self.size_bytes))
+        if self.covered_bytes != expected:
+            raise ValueError("covered_bytes must exactly match offset_bytes and size_bytes")
+        if self.natural_aligned != (self.offset_bytes % self.size_bytes == 0):
+            raise ValueError("natural_aligned does not match offset and access size")
+        if self.atomicity_model not in {"aligned_atomic", "byte_level_no_mag"}:
+            raise ValueError(f"unknown scalar atomicity model: {self.atomicity_model}")
+        if self.atomicity_model == "byte_level_no_mag" and self.natural_aligned:
+            raise ValueError("byte_level_no_mag is reserved for misaligned accesses")
+
+    @classmethod
+    def create(cls, base_symbol: str, offset_bytes: int, size_bytes: int) -> "MemoryAccess":
+        aligned = offset_bytes % size_bytes == 0
+        return cls(
+            base_symbol=base_symbol,
+            offset_bytes=offset_bytes,
+            size_bytes=size_bytes,
+            covered_bytes=tuple(range(offset_bytes, offset_bytes + size_bytes)),
+            natural_aligned=aligned,
+            boundary=_access_boundary(offset_bytes, size_bytes),
+            atomicity_model="aligned_atomic" if aligned else "byte_level_no_mag",
+        )
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "MemoryAccess":
+        return cls(
+            base_symbol=str(data["base_symbol"]),
+            offset_bytes=int(data["offset_bytes"]),
+            size_bytes=int(data["size_bytes"]),
+            covered_bytes=tuple(int(value) for value in data["covered_bytes"]),
+            natural_aligned=bool(data["natural_aligned"]),
+            boundary=str(data["boundary"]),
+            atomicity_model=str(data["atomicity_model"]),
+        )
+
+    def byte_location(self, byte_offset: int) -> str:
+        if byte_offset not in self.covered_bytes:
+            raise ValueError(f"byte {byte_offset} is outside this memory access")
+        return f"{self.base_symbol}[{byte_offset}]"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "base_symbol": self.base_symbol,
+            "offset_bytes": self.offset_bytes,
+            "size_bytes": self.size_bytes,
+            "covered_bytes": list(self.covered_bytes),
+            "natural_aligned": self.natural_aligned,
+            "boundary": self.boundary,
+            "atomicity_model": self.atomicity_model,
+            "whole_access_atomic": self.atomicity_model == "aligned_atomic",
+            "mag_bytes": None,
+        }
+
+
+def _access_boundary(offset: int, size: int) -> str:
+    end = offset + size - 1
+    if offset // 64 != end // 64:
+        return "cross64"
+    if offset // 16 != end // 16:
+        return "cross16_same_line"
+    return "same16"
+
+
+@dataclass(frozen=True)
 class LitmusEvent:
     event_id: str
     hart: int
@@ -38,6 +123,7 @@ class LitmusEvent:
     register: str = ""
     value: str = ""
     role: str = ""
+    memory_access: MemoryAccess | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -49,6 +135,7 @@ class LitmusEvent:
             "register": self.register,
             "value": self.value,
             "role": self.role,
+            "memory_access": self.memory_access.to_json() if self.memory_access else None,
         }
 
 
