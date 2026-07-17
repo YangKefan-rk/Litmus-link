@@ -232,9 +232,11 @@ class _LitmusLinkQtWindow:
         for index, (number, title) in enumerate(steps):
             layout.addWidget(self._flow_step(number, title), 1)
             if index < len(steps) - 1:
-                arrow = QtWidgets.QLabel("->")
+                arrow = QtWidgets.QLabel()
                 arrow.setObjectName("FlowArrow")
                 arrow.setAlignment(_align_center(self.QtCore))
+                arrow.setPixmap(_standard_arrow_icon(QtWidgets, self.window).pixmap(22, 22))
+                arrow.setFixedWidth(30)
                 layout.addWidget(arrow)
         return frame
 
@@ -1289,7 +1291,7 @@ class _LitmusPreviewDialog:
         cycle = analysis.get("cycle", "")
         tokens = " -> ".join(analysis.get("cycle_tokens", []))
         exists = analysis.get("exists", "")
-        forbidden = analysis.get("forbidden_outcome", "")
+        outcome = analysis.get("outcome_interpretation", analysis.get("forbidden_outcome", ""))
         png = diagram.get("png", "")
         axes = combination.get("name", self.item.get("name", ""))
         lines = [
@@ -1309,7 +1311,7 @@ class _LitmusPreviewDialog:
             f"Dependency ring: {tokens}",
             "",
             f"Exists: {exists}",
-            f"Forbidden outcome: {forbidden}",
+            f"Outcome interpretation: {outcome}",
         ]
         return "\n".join(lines)
 
@@ -1346,6 +1348,12 @@ def _user_role(QtCore: Any) -> Any:
     if hasattr(qt, "ItemDataRole"):
         return qt.ItemDataRole.UserRole
     return qt.UserRole
+
+
+def _standard_arrow_icon(QtWidgets: Any, widget: Any) -> Any:
+    style = getattr(QtWidgets, "QStyle")
+    standard = style.StandardPixmap if hasattr(style, "StandardPixmap") else style
+    return widget.style().standardIcon(standard.SP_ArrowRight)
 
 
 def _exec_dialog(dialog: Any) -> int:

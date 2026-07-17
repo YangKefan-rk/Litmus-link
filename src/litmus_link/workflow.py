@@ -656,6 +656,8 @@ def _preview_analysis(
         "cycle": cycle,
         "cycle_tokens": tokens,
         "exists": exists,
+        "outcome_interpretation": forbidden,
+        # Kept for compatibility with existing saved preview payloads.
         "forbidden_outcome": forbidden,
         "solver_status": solver.get("status") if solver else "not_applicable",
         "solver_verdict": solver.get("verdict") if solver else "unmodeled",
@@ -706,18 +708,13 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
         status = solver.get("status")
         verdict = solver.get("verdict")
         cross = solver.get("cross_check", "")
-        if solver.get("model") in {"rvwmo-herd7", "riscv.cat"}:
-            # Verdict is a property of the OUTCOME, decided by the real herd7.
-            if status == "verified" and verdict == "forbidden":
-                return f"herd7 + riscv.cat: the exists outcome is FORBIDDEN (never observed) under RVWMO: {exists}"
-            if status == "verified" and verdict in {"allowed", "observable"}:
-                return f"herd7 + riscv.cat: the exists outcome is OBSERVABLE (architecturally allowed) under RVWMO: {exists}"
-            return "herd7 verdict unavailable for this corpus test."
-        tool = "native RVWMO checker" + (" (confirmed by herd7/riscv.cat)" if cross == "agree" else "")
+        model = str(solver.get("model", ""))
+        formal_rvwmo = model == "rvwmo-herd7" or model.startswith("riscv.cat")
+        tool = _solver_display_name(solver, cross)
         if status == "verified" and verdict == "forbidden":
-            return f"Verified forbidden by {tool}: {exists}"
-        if status == "verified" and verdict == "allowed":
-            return f"Verified allowed by {tool}: {exists}"
+            return f"FORBIDDEN by {tool}: the exists outcome must never be observed under the modeled RVWMO rules: {exists}"
+        if status == "verified" and verdict in {"allowed", "observable"}:
+            return f"OBSERVABLE by {tool}: the exists outcome is architecturally allowed under the modeled RVWMO rules: {exists}"
         if status == "conflict":
             return f"Conflict between native checker and herd7 ({solver.get('reason', '')}); native verdict {verdict} reported as primary."
         if status == "not_applicable":
@@ -725,12 +722,29 @@ def _forbidden_text(combination: Combination, decision: Dict[str, Any], exists: 
             if fusion.get("status") == "analyzed":
                 return f"Extension-prose ordering analysis ({fusion.get('verdict')}, informative -- not a herd verdict): {fusion.get('reason', '')}"
             return "No formal RVWMO forbidden assertion is emitted for this extension/prose-spec case."
+        if formal_rvwmo:
+            return f"Formal RVWMO verdict unavailable from {tool}: {solver.get('reason', '')}"
     outcome = str(combination.params.get("outcome", ""))
     if outcome == "forbidden":
         return f"Requested forbidden outcome, but solver verification is still required: {exists}"
     if decision.get("expected_kind") in {"rvwmo-herd", "rvwmo-nc", "rvwmo-vector"}:
         return "RVWMO decides whether the exists outcome is allowed or forbidden for this scalar main-memory case."
     return "No formal forbidden assertion is emitted; this is a hardware-observation/prose-spec outcome."
+
+
+def _solver_display_name(solver: Dict[str, Any], cross_check: str) -> str:
+    backend = str(solver.get("backend", ""))
+    model = str(solver.get("model", ""))
+    tool = str(solver.get("tool", ""))
+    if backend == "crosscheck" or cross_check == "agree":
+        return "embedded RVWMO and herd7/riscv.cat cross-check"
+    if backend == "embedded" or tool == "litmus-link-rvwmo":
+        if model == "riscv.cat+byte_level_no_mag":
+            return "the embedded RVWMO byte-level no-MAG solver"
+        return "the embedded RVWMO solver"
+    if tool == "herd7" or model == "rvwmo-herd7":
+        return "herd7 + riscv.cat"
+    return tool or model or "the configured solver"
 
 
 def _harts_from_litmus(litmus: str) -> list[str]:

@@ -266,6 +266,12 @@ def test_gui_native_preview_expands_misaligned_layout_configuration() -> None:
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
     assert any("mixed-size" in item["litmus"] or "mixed_" in item["name"] for item in preview["sample"])
     assert any(",60(" in item["litmus"] for item in preview["sample"])
+    for item in preview["sample"]:
+        interpretation = item["analysis"]["outcome_interpretation"]
+        assert "hardware-observation/prose-spec" not in interpretation
+        expected = "FORBIDDEN" if item["solver"]["verdict"] == "forbidden" else "OBSERVABLE"
+        assert expected in interpretation
+        assert "byte-level no-MAG solver" in interpretation
 
 
 def test_gui_options_expose_only_no_mag_atomicity() -> None:
