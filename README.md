@@ -116,10 +116,56 @@ commands remain available for comparison, but the Qt GUI does not use them.
 The native diy strategy has cycle-set differential tests against official
 `diy7` for all ten generation modes, exact size/hart bounds, mixed tested
 relaxations, observer policies, and fixed prefixes. This compatibility claim
-is limited to the current scalar, naturally aligned RISC-V edge domain.
-Mixed-size/partial-overlap atoms and explicit LR/SC success/failure scaffolding
-are not silently approximated; they remain unsupported until their lowering,
-outcomes, and RVWMO execution events can be checked end to end.
+is limited to cycle construction: Litmus-link performs its own mixed-size and
+misaligned address-layout lowering after the logical cycle has been built.
+Explicit LR/SC success/failure scaffolding remains unsupported and is not
+silently approximated.
+
+## Scalar Mixed-Size And Misaligned Accesses
+
+The native generator can expand every selected logical cycle over real scalar
+mixed-size and misaligned layouts. The current target model intentionally has
+one mode only: `byte_level_no_mag`. There is no MAG16/MAG32 option. Each
+misaligned load/store is expanded into byte sub-events for `rf/co/fr/po-loc`,
+while program order, dependencies, and fences are lifted from the parent
+instruction to all of its bytes. Torn observations are therefore permitted,
+but the split bytes cannot escape RVWMO ordering constraints.
+
+Generate MP with all homogeneous 16/32/64-bit misaligned widths, mixed-width
+partial overlaps, and within-16-B/cross-16-B/cross-64-B layouts:
+
+```sh
+litmus-link native templates --skeleton MP --annotation P \
+  --memory-layout aligned \
+  --memory-layout misaligned \
+  --memory-layout mixed \
+  --solver-backend embedded \
+  --out out/native-mp-misaligned
+```
+
+Select one boundary and width for a targeted run:
+
+```sh
+litmus-link native templates --skeleton MP --annotation P \
+  --memory-layout misaligned \
+  --misalign-width 64 \
+  --misalign-boundary cross64 \
+  --solver-backend embedded \
+  --out out/native-mp-cross64
+```
+
+This domain contains only legal cacheable ordinary scalar loads/stores. It does
+not generate misaligned LR/SC/AMO, NC/IO fault cases, Vector misalignment, or
+exception/CSR checks. Non-plain `Aq/Rl/AR` AMO annotations are machine-counted
+as excluded when combined with a misaligned layout. The generated metadata
+records the exact byte range, boundary, `mag_bytes: null`, and
+`whole_access_atomic: false`.
+
+External comparison requests `herd7 -variant mixed,unaligned`. Some herdtools7
+revisions, including the locally pinned RISC-V build, parse those variants but
+report that mixed mode is not implemented for RISC-V. In that environment use
+the offline embedded backend; Litmus-link reports an explicit external-tool
+error instead of claiming an `unknown` verdict.
 
 ## GUI
 
@@ -193,7 +239,8 @@ Verification is split by semantic scope:
   per-location `co`, derives `fr`, implements RISC-V PPO rules `r1-r13`, and
   checks the Coherence, Model, and Atomic axioms from `riscv.cat`. A forbidden
   verdict is returned only after exhaustive bounded search; a timeout or
-  candidate limit returns `inconclusive`.
+  candidate limit returns `inconclusive`. Misaligned cases use the explicitly
+  labeled `riscv.cat+byte_level_no_mag` extension and byte-addressed events.
 - **External comparison** uses `herd7 + riscv.cat`. Select `crosscheck` to
   require both implementations to return the same verified `allowed` value.
   The embedded backend currently consumes Litmus-link `case_ir` metadata;

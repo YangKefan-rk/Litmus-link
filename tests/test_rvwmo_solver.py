@@ -71,6 +71,9 @@ def test_embedded_byte_level_no_mag_preserves_rvwmo_ordering(
         event.atomicity_model in {"byte_level_no_mag", "initial"}
         for event in verdict.events
     )
+    payload = verdict.to_json()
+    assert payload["model"] == "riscv.cat+byte_level_no_mag"
+    assert payload["model_extensions"] == ["mixed-size", "unaligned", "byte-level-no-mag"]
 
 
 def test_byte_level_no_mag_allows_a_torn_read_without_sync() -> None:

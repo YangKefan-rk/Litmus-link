@@ -59,6 +59,10 @@ class MemoryAccess:
             raise ValueError(f"unknown scalar atomicity model: {self.atomicity_model}")
         if self.atomicity_model == "byte_level_no_mag" and self.natural_aligned:
             raise ValueError("byte_level_no_mag is reserved for misaligned accesses")
+        if self.atomicity_model == "aligned_atomic" and not self.natural_aligned:
+            raise ValueError("aligned_atomic requires a naturally aligned access")
+        if self.boundary != _access_boundary(self.offset_bytes, self.size_bytes):
+            raise ValueError("memory access boundary does not match its byte range")
 
     @classmethod
     def create(cls, base_symbol: str, offset_bytes: int, size_bytes: int) -> "MemoryAccess":

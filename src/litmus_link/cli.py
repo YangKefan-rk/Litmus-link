@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     native_templates.add_argument("--annotation", action="append", choices=NATIVE_ANNOTATIONS, help="repeat to select P/Aq/Rl/AR; default: all")
     native_templates.add_argument("--out", required=True, type=Path)
     native_templates.add_argument("--limit", type=int, help="maximum files to write; audit still reports the complete finite domain")
-    native_templates.add_argument("--no-judge", action="store_true", help="skip the independent herd7/riscv.cat cross-check")
+    native_templates.add_argument("--no-judge", action="store_true", help="skip outcome verification")
     native_templates.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_templates.add_argument("--diagrams", action="store_true", help="write PNG and diagram JSON for every generated case")
     native_templates.add_argument("--timeout", type=int, default=180)

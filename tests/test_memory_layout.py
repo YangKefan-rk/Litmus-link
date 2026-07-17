@@ -79,6 +79,22 @@ def test_native_lowering_emits_real_cross_line_misaligned_assembly() -> None:
     assert all(access is not None and access.boundary == "cross64" for access in accesses)
 
 
+def test_mixed_native_lowering_varies_widths_within_each_location() -> None:
+    layout = next(
+        item for item in expand_memory_layouts(("mixed",), boundaries=("same16",))
+    )
+    case = lower_native_cycle(_mp_cycle(), memory_layout=layout)
+    by_location = {}
+    for event in case.case_ir.events():
+        if event.memory_access is not None:
+            by_location.setdefault(event.location, []).append(event.memory_access)
+    assert by_location
+    for accesses in by_location.values():
+        assert {access.size_bytes for access in accesses} == {2, 4}
+        assert all_accesses_overlap(accesses)
+        assert len({access.covered_bytes for access in accesses}) == 2
+
+
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")
 def test_real_misaligned_litmus_is_accepted_by_herd_mixed_unaligned() -> None:
     layout = next(

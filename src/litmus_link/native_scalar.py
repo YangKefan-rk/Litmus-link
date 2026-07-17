@@ -230,8 +230,16 @@ def lower_native_cycle(
     proc_orders = _program_orders(cycle.edges, procs)
     write_values, read_values, final_values, rf_source = _memory_values(cycle.edges, directions, locations)
     location_names = {index: _location_name(index) for index in sorted(set(locations))}
+    event_ordinals: dict[int, int] = {}
+    for location in sorted(set(locations)):
+        for ordinal, vertex in enumerate(
+            vertex for vertex in range(nvertices) if locations[vertex] == location
+        ):
+            event_ordinals[vertex] = ordinal
     memory_accesses = {
-        vertex: memory_layout.access_for(location_names[locations[vertex]], vertex)
+        vertex: memory_layout.access_for(
+            location_names[locations[vertex]], event_ordinals[vertex]
+        )
         for vertex in range(nvertices)
     }
     if memory_layout.is_aligned:

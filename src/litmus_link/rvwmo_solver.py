@@ -118,13 +118,21 @@ class EmbeddedVerdict:
     example_cycles: Mapping[str, tuple[str, ...]] | None = None
 
     def to_json(self) -> dict:
+        no_mag = any(event.atomicity_model == "byte_level_no_mag" for event in self.events)
         return {
             "schema": "litmus-link.embedded-rvwmo.v1",
             "status": self.status,
             "tool": "litmus-link-rvwmo",
             "backend": "embedded",
-            "model": "riscv.cat",
-            "model_revision": "herdtools7-7.58-riscv-cat",
+            "model": "riscv.cat+byte_level_no_mag" if no_mag else "riscv.cat",
+            "model_revision": (
+                "litmus-link-byte-level-no-mag-v1"
+                if no_mag
+                else "herdtools7-7.58-riscv-cat"
+            ),
+            "model_extensions": (
+                ["mixed-size", "unaligned", "byte-level-no-mag"] if no_mag else []
+            ),
             "verdict": self.verdict,
             "allowed": self.allowed,
             "candidates": self.candidates,
