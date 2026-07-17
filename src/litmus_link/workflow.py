@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -174,7 +175,13 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         if use_corpus
         else audit_summary(name, summary_combinations, source=source)
     )
-    return {"profile": name, "source": source, "report": report, "sample": sample}
+    return {
+        "profile": name,
+        "source": source,
+        "report": report,
+        "sample": sample,
+        "classification_counts": _preview_classification_counts(sample),
+    }
 
 
 _DIAGRAM_DIR = Path(gettempdir()) / "litmus-link-preview-diagrams"
@@ -203,6 +210,7 @@ def _scalar_preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "displayed_litmus": len(sample),
         "generation_limited": report.get("generation_limited", False),
         "sample": sample,
+        "classification_counts": _preview_classification_counts(sample),
     }
 
 
@@ -639,6 +647,78 @@ def _preview_item(
         "diagram": diagram,
         "analysis": _preview_analysis(combination, decision, litmus, case_ir, solver),
     }
+
+
+def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    items = list(sample)
+    groups: Dict[str, Counter[str]] = {
+        "status": Counter(),
+        "verdict": Counter(),
+        "skeleton": Counter(),
+        "category": Counter(),
+        "memory_layout": Counter(),
+        "attribute": Counter(),
+        "memory_event": Counter(),
+        "vector": Counter(),
+        "cmo": Counter(),
+        "tlb": Counter(),
+    }
+    for item in items:
+        combination = item.get("combination", {}) or {}
+        decision = item.get("decision", {}) or {}
+        solver = item.get("solver", {}) or {}
+        groups["status"][_count_value(decision.get("status"), "unknown")] += 1
+        groups["verdict"][_preview_verdict(solver)] += 1
+        for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
+            groups[key][_count_value(combination.get(key), "none")] += 1
+        groups["memory_layout"][_preview_memory_layout(item)] += 1
+    return {
+        "displayed_cases": len(items),
+        "groups": {
+            key: dict(sorted(counter.items()))
+            for key, counter in groups.items()
+            if counter
+        },
+    }
+
+
+def _preview_verdict(solver: Dict[str, Any]) -> str:
+    status = str(solver.get("status", ""))
+    verdict = str(solver.get("verdict", ""))
+    if status == "verified" and verdict in {"allowed", "observable"}:
+        return "observable"
+    if status == "verified" and verdict == "forbidden":
+        return "forbidden"
+    return verdict or status or "unchecked"
+
+
+def _preview_memory_layout(item: Dict[str, Any]) -> str:
+    case_ir = item.get("case_ir", {}) or {}
+    accesses = [
+        event.get("memory_access")
+        for hart in case_ir.get("harts", [])
+        for event in hart
+        if isinstance(event.get("memory_access"), dict)
+    ]
+    if accesses:
+        no_mag = [
+            access for access in accesses
+            if access.get("atomicity_model") == "byte_level_no_mag"
+        ]
+        if no_mag:
+            sizes = {int(access.get("size_bytes", 0)) for access in no_mag}
+            variant = str(case_ir.get("variant", "")).lower()
+            return "mixed" if len(sizes) > 1 or "mixed" in variant else "misaligned"
+        return "aligned"
+    combination = item.get("combination", {}) or {}
+    params = combination.get("params", {}) or {}
+    footprint = str(params.get("footprint", ""))
+    return footprint or "unspecified"
+
+
+def _count_value(value: Any, default: str) -> str:
+    text = str(value or "").strip()
+    return text or default
 
 
 def _preview_analysis(

@@ -263,6 +263,11 @@ def test_gui_native_preview_expands_misaligned_layout_configuration() -> None:
     )
     assert preview["available_litmus"] == 6
     assert preview["displayed_litmus"] == 6
+    classifications = preview["classification_counts"]
+    assert classifications["displayed_cases"] == 6
+    assert classifications["groups"]["status"] == {"generated": 6}
+    assert classifications["groups"]["skeleton"] == {"MP": 6}
+    assert classifications["groups"]["memory_layout"] == {"misaligned": 4, "mixed": 2}
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
     assert any("mixed-size" in item["litmus"] or "mixed_" in item["name"] for item in preview["sample"])
     assert any(",60(" in item["litmus"] for item in preview["sample"])

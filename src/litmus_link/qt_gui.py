@@ -744,6 +744,19 @@ class _LitmusLinkQtWindow:
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
         self.summary_view.setPlainText("Choose scalar generation, a profile, or a custom rule, then run Preview Cases, Run Audit, or Generate Files.")
+        self.preview_page = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QVBoxLayout(self.preview_page)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(8)
+        self.preview_stats_label = QtWidgets.QLabel("Preview classification: no sample loaded")
+        self.preview_stats_label.setObjectName("PreviewStatsLabel")
+        self.preview_stats = QtWidgets.QTreeWidget()
+        self.preview_stats.setObjectName("PreviewStats")
+        self.preview_stats.setHeaderLabels(["Classification", "Value", "Count"])
+        self.preview_stats.setRootIsDecorated(True)
+        self.preview_stats.setAlternatingRowColors(True)
+        self.preview_stats.setMaximumHeight(220)
+        self.preview_stats.setUniformRowHeights(True)
         self.preview_table = QtWidgets.QTableWidget()
         self.preview_table.setObjectName("PreviewTable")
         self.preview_table.setColumnCount(5)
@@ -756,6 +769,9 @@ class _LitmusLinkQtWindow:
         self.preview_table.setSelectionMode(_single_selection(QtWidgets))
         self.preview_table.itemDoubleClicked.connect(self._open_preview_detail)
         _configure_preview_header(self.preview_table, QtWidgets)
+        preview_layout.addWidget(self.preview_stats_label)
+        preview_layout.addWidget(self.preview_stats)
+        preview_layout.addWidget(self.preview_table, 1)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.rule_json = QtWidgets.QPlainTextEdit()
@@ -764,7 +780,7 @@ class _LitmusLinkQtWindow:
         self.raw_json = QtWidgets.QPlainTextEdit()
         self.raw_json.setReadOnly(True)
         self.result_tabs.addTab(self.summary_view, "Summary")
-        self.result_tabs.addTab(self.preview_table, "Preview Litmus")
+        self.result_tabs.addTab(self.preview_page, "Preview Litmus")
         self.result_tabs.addTab(self.log_view, "Log")
         self.result_tabs.addTab(self.rule_json, "Rule JSON")
         self.result_tabs.addTab(self.raw_json, "Raw JSON")
@@ -1091,6 +1107,7 @@ class _LitmusLinkQtWindow:
         # so the count matches the audit summary instead of silently dropping
         # everything without a rendered litmus body.
         self.preview_items = list(result.get("sample", []))
+        self._populate_preview_statistics(result.get("classification_counts", {}) or {})
         table.setRowCount(len(self.preview_items))
         for row, item in enumerate(self.preview_items):
             decision = item.get("decision", {}) or {}
@@ -1115,6 +1132,39 @@ class _LitmusLinkQtWindow:
             empty = QtWidgets.QTableWidgetItem("No cases in this preview sample.")
             table.setItem(0, 0, empty)
         table.resizeColumnsToContents()
+
+    def _populate_preview_statistics(self, statistics: Dict[str, Any]) -> None:
+        QtWidgets = self.QtWidgets
+        tree = self.preview_stats
+        tree.clear()
+        displayed = int(statistics.get("displayed_cases", len(self.preview_items)) or 0)
+        self.preview_stats_label.setText(
+            f"Preview classification: {displayed} displayed case{'s' if displayed != 1 else ''}"
+        )
+        labels = {
+            "status": "Generation status",
+            "verdict": "Solver verdict",
+            "skeleton": "Skeleton",
+            "category": "Category",
+            "memory_layout": "Memory layout",
+            "attribute": "Memory attribute",
+            "memory_event": "Memory event",
+            "vector": "Vector axis",
+            "cmo": "CMO axis",
+            "tlb": "TLB axis",
+        }
+        groups = statistics.get("groups", {}) or {}
+        for key, values in groups.items():
+            if not isinstance(values, dict):
+                continue
+            total = sum(int(count) for count in values.values())
+            parent = QtWidgets.QTreeWidgetItem([labels.get(key, key), "", str(total)])
+            for value, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+                parent.addChild(QtWidgets.QTreeWidgetItem(["", str(value), str(count)]))
+            parent.setExpanded(True)
+            tree.addTopLevelItem(parent)
+        for column in range(3):
+            tree.resizeColumnToContents(column)
 
     def _open_preview_detail(self, item: Any) -> None:
         index = item.data(_user_role(self.QtCore))
@@ -1517,6 +1567,9 @@ def _stylesheet() -> str:
     QTableWidget#PreviewTable { background: #ffffff; border: 1px solid #cfd9e6; border-radius: 7px; gridline-color: #e7edf5; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
     QTableWidget#PreviewTable::item { padding: 5px 8px; }
     QTableWidget#PreviewTable::item:selected { background: #e0f2fe; color: #0c4a6e; }
+    QLabel#PreviewStatsLabel { color: #0f766e; font-weight: 700; padding: 2px 4px; }
+    QTreeWidget#PreviewStats { background: #f8fafc; border: 1px solid #cfd9e6; border-radius: 6px; alternate-background-color: #ffffff; }
+    QTreeWidget#PreviewStats::item { padding: 3px 6px; }
     QHeaderView::section { background: #172033; color: #ffffff; padding: 6px 8px; border: none; border-right: 1px solid #2a3650; font-weight: 700; }
     QCheckBox { spacing: 7px; padding: 3px 6px; border-radius: 5px; }
     QCheckBox[choice_state="on"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
