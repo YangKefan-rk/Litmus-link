@@ -69,7 +69,7 @@ def _slot(QtCore: Any, *types: object) -> Any:
 def _make_worker_class(QtCore: Any) -> Any:
     class ActionWorker(QtCore.QObject):
         started = _signal(QtCore, str)
-        progress = _signal(QtCore, str)
+        progress = _signal(QtCore, object)
         finished = _signal(QtCore, str, object)
         failed = _signal(QtCore, str, str)
 
@@ -78,28 +78,48 @@ def _make_worker_class(QtCore: Any) -> Any:
             self.action = action
             self.label = label
             self.payload = payload
+            self._last_percent = -1
+            self._last_message = ""
+
+        def _stage(self, message: str) -> None:
+            self.progress.emit({"current": 0, "total": 0, "message": message})
+
+        def _report_progress(self, current: int, total: int, message: str) -> None:
+            current = max(int(current), 0)
+            total = max(int(total), 0)
+            percent = min(100, int(current * 100 / total)) if total else -1
+            if total and percent == self._last_percent and message == self._last_message and current < total:
+                return
+            if total and percent == self._last_percent and current < total:
+                return
+            self._last_percent = percent
+            self._last_message = message
+            self.progress.emit({"current": current, "total": total, "message": message})
 
         def run(self) -> None:
             try:
                 self.started.emit(self.label)
-                self.progress.emit("Preparing request payload")
+                self._stage("Preparing request payload")
                 if self.action == "preview":
-                    self.progress.emit("Expanding sample combinations")
+                    self._stage("Expanding sample combinations")
                     result = preview_payload(self.payload)
                 elif self.action == "verify":
-                    self.progress.emit("Generating preview cases and checking RVWMO outcomes")
+                    self._stage("Generating preview cases and checking RVWMO outcomes")
                     verify_payload = dict(self.payload)
                     verify_payload["judge"] = True
                     result = preview_payload(verify_payload)
                 elif self.action == "audit":
-                    self.progress.emit("Classifying combinations with legality rules")
+                    self._stage("Classifying combinations with legality rules")
                     result = audit_payload(self.payload)
                 elif self.action == "generate":
-                    self.progress.emit("Writing .litmus, .meta.json, @all, and audit report")
-                    result = generate_payload(self.payload)
+                    self._stage("Preparing output and counting cases")
+                    result = generate_payload(
+                        self.payload,
+                        progress_callback=self._report_progress,
+                    )
                 else:
                     raise ValueError(f"unknown action: {self.action}")
-                self.progress.emit("Finalizing result summary")
+                self._report_progress(1, 1, "Finalizing result summary")
                 self.finished.emit(self.label, result)
             except Exception as exc:
                 self.failed.emit(self.label, str(exc))
@@ -117,9 +137,9 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
         def handle_started(self, label: str) -> None:
             self.owner._handle_started(label)
 
-        @_slot(QtCore, str)
-        def handle_progress(self, message: str) -> None:
-            self.owner._append_log(message)
+        @_slot(QtCore, object)
+        def handle_progress(self, payload: object) -> None:
+            self.owner._handle_progress(payload)
 
         @_slot(QtCore, str, object)
         def handle_finished(self, label: str, result: object) -> None:
@@ -170,6 +190,7 @@ class _LitmusLinkQtWindow:
         self.elapsed_timer = QtCore.QTimer(self.window)
         self.elapsed_timer.timeout.connect(self._update_elapsed)
         self.started_at = 0.0
+        self.active_label = ""
         self.suspend_rule_sync = False
         self.worker_class = _make_worker_class(QtCore)
         self.ui_receiver = _make_ui_receiver_class(QtCore)(self)
@@ -1035,9 +1056,11 @@ class _LitmusLinkQtWindow:
 
     def _handle_started(self, label: str) -> None:
         self.started_at = time.monotonic()
+        self.active_label = label
         self.status_label.setText(f"{label} running")
         self.elapsed_label.setText("Elapsed: 0.0s")
         self.progress_bar.setRange(0, 0)
+        self.progress_bar.setFormat("Preparing...")
         self.log_view.clear()
         self.raw_json.clear()
         self.summary_view.setPlainText(f"{label} is running. Progress messages are shown in the Log tab.")
@@ -1048,10 +1071,31 @@ class _LitmusLinkQtWindow:
         self.elapsed_timer.start(250)
         self.result_tabs.setCurrentWidget(self.log_view)
 
+    def _handle_progress(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            message = str(payload.get("message", "Working"))
+            current = max(int(payload.get("current", 0) or 0), 0)
+            total = max(int(payload.get("total", 0) or 0), 0)
+        else:
+            message = str(payload)
+            current = 0
+            total = 0
+        if total > 0:
+            percent = min(100, int(current * 100 / total))
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(percent)
+            self.progress_bar.setFormat(f"{percent}%  ({current:,}/{total:,})")
+        else:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat("Working...")
+        self.status_label.setText(f"{self.active_label}: {message}")
+        self._append_log(message)
+
     def _handle_finished(self, label: str, result: object) -> None:
         elapsed = time.monotonic() - self.started_at
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(1)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat("100%  Complete")
         self.status_label.setText(f"{label} finished")
         self.elapsed_label.setText(f"Elapsed: {elapsed:.1f}s")
         self.elapsed_timer.stop()
@@ -1071,8 +1115,9 @@ class _LitmusLinkQtWindow:
 
     def _handle_failed(self, label: str, message: str) -> None:
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
-        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Failed")
         self.status_label.setText(f"{label} failed")
         self.elapsed_label.setText(f"Elapsed: {elapsed:.1f}s")
         self.elapsed_timer.stop()

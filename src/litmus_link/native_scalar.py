@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from itertools import islice, product
 from math import gcd
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from .diagram import render_diagram
 from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation, MemoryAccess
@@ -37,6 +37,9 @@ from .toolchain import RISCV_CAT, ToolchainError, herd_judge
 
 class NativeGenerationError(RuntimeError):
     pass
+
+
+ProgressCallback = Callable[[int, int, str], None]
 
 
 @dataclass(frozen=True)
@@ -434,6 +437,7 @@ def generate_native_templates(
     diagrams: bool = False,
     timeout: int = 180,
     memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     base_cycles, audit = native_template_cycles(presets, mechanisms, include_same=include_same)
     selected_annotations = _validate_annotations(annotations)
@@ -460,6 +464,7 @@ def generate_native_templates(
         diagrams=diagrams,
         timeout=timeout,
         memory_layouts=selected_layouts,
+        progress_callback=progress_callback,
     )
 
 
@@ -481,6 +486,7 @@ def generate_native_relations(
     diagrams: bool = False,
     timeout: int = 180,
     memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     base_cycles = native_relation_cycles(
         mechanisms=mechanisms,
@@ -526,6 +532,7 @@ def generate_native_relations(
         diagrams=diagrams,
         timeout=timeout,
         memory_layouts=selected_layouts,
+        progress_callback=progress_callback,
     )
 
 
@@ -540,6 +547,7 @@ def generate_native_diy(
     diagrams: bool = False,
     timeout: int = 180,
     memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     base_cycles, audit = enumerate_diy_cycles(config)
     selected_annotations = _validate_annotations(annotations)
@@ -567,6 +575,7 @@ def generate_native_diy(
         timeout=timeout,
         realdep=config.realdep,
         memory_layouts=selected_layouts,
+        progress_callback=progress_callback,
     )
 
 
@@ -583,6 +592,7 @@ def _write_native_cases(
     timeout: int,
     realdep: bool = False,
     memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     if limit is not None and limit < 1:
         raise NativeGenerationError("native generation limit must be at least 1")
@@ -592,6 +602,9 @@ def _write_native_cases(
     filenames: list[str] = []
     verdicts: Counter[str] = Counter()
     backend = _validate_solver_backend(solver_backend)
+    target_total = min(available, limit) if limit is not None else available
+    if progress_callback is not None:
+        progress_callback(0, target_total, f"Generating 0/{target_total} native cases")
     for cycle, memory_layout in selected:
         case = lower_native_cycle(cycle, realdep=realdep, memory_layout=memory_layout)
         solver = _judge_native(case, judge=judge, backend=backend, timeout=timeout)
@@ -621,6 +634,14 @@ def _write_native_cases(
             json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         filenames.append(f"{case.name}.litmus")
+        if progress_callback is not None:
+            progress_callback(
+                len(filenames),
+                target_total,
+                f"Generated {len(filenames)}/{target_total}: {case.name}",
+            )
+    if progress_callback is not None:
+        progress_callback(target_total, target_total, "Finalizing native indexes and reports")
     (out_dir / "@all").write_text("\n".join(filenames) + ("\n" if filenames else ""), encoding="utf-8")
     report = {
         "schema": "litmus-link.native-generation.v1",

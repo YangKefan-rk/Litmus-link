@@ -6,7 +6,7 @@ from collections import Counter
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Callable, Dict, Iterable, Tuple
 
 from .corpus_ir import corpus_to_ir
 from .corpus_riscv import corpus_available, judge as corpus_judge, parse_litmus, skeleton_counts, tests_for_skeleton
@@ -220,6 +220,7 @@ def _run_scalar_generator(
     *,
     limit: int | None = None,
     judge: bool | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Dict[str, Any]:
     engine = str(payload.get("engine", "cross"))
     selected_limit = _optional_positive_int(payload.get("limit")) if limit is None else limit
@@ -242,6 +243,7 @@ def _run_scalar_generator(
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
             memory_layouts=memory_layouts,
+            progress_callback=progress_callback,
         )
     if engine == "native_cycles":
         mechanisms = _string_list(payload.get("mechanisms")) or list(DEFAULT_NATIVE_MECHANISMS)
@@ -262,6 +264,7 @@ def _run_scalar_generator(
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
             memory_layouts=memory_layouts,
+            progress_callback=progress_callback,
         )
     if engine == "native_diy":
         diy = payload.get("diy", {}) if isinstance(payload.get("diy"), dict) else {}
@@ -301,6 +304,7 @@ def _run_scalar_generator(
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
             memory_layouts=memory_layouts,
+            progress_callback=progress_callback,
         )
     if engine == "cross":
         presets = _string_list(payload.get("skeletons")) or ["MP"]
@@ -866,13 +870,20 @@ def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return write_audit_for_combinations(name, combinations, out_dir, source=source, summary_only=summary_only)
 
 
-def generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def generate_payload(
+    payload: Dict[str, Any],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Dict[str, Any]:
     out_dir = Path(str(payload.get("out") or "out/gui-generated"))
     mode = str(payload.get("mode", "profile"))
     if mode == "scalar":
-        return _run_scalar_generator(payload, out_dir)
+        return _run_scalar_generator(payload, out_dir, progress_callback=progress_callback)
     if mode == "profile":
-        return generate_profile(str(payload.get("profile") or "smoke"), out_dir)
+        return generate_profile(
+            str(payload.get("profile") or "smoke"),
+            out_dir,
+            progress_callback=progress_callback,
+        )
     name, combinations, source = _combinations_from_payload(payload)
     if source == "gui" and corpus_available():
         compute_verdicts = bool(payload.get("compute_verdicts", True))
@@ -882,8 +893,15 @@ def generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             name, list(combinations), out_dir, source,
             generation_limit=int(limit) if limit is not None else None,
             compute_verdicts=compute_verdicts,
+            progress_callback=progress_callback,
         )
-    return generate_combinations(name, combinations, out_dir, source=source)
+    return generate_combinations(
+        name,
+        combinations,
+        out_dir,
+        source=source,
+        progress_callback=progress_callback,
+    )
 
 
 # __LL_CORPUS_GENERATE__
@@ -904,7 +922,18 @@ def _corpus_meta(test, verdict_json: Dict[str, Any] | None) -> Dict[str, Any]:
     }
 
 
-def _write_corpus_family(combination, out_dir, generation_limit, compute_verdicts, generated_names, solver_counts, seen_names, errors) -> int:
+def _write_corpus_family(
+    combination,
+    out_dir,
+    generation_limit,
+    compute_verdicts,
+    generated_names,
+    solver_counts,
+    seen_names,
+    errors,
+    progress_callback=None,
+    progress_total=0,
+) -> int:
     written = 0
     remaining = None if generation_limit is None else max(generation_limit - len(generated_names), 0)
     if remaining == 0:
@@ -931,13 +960,27 @@ def _write_corpus_family(combination, out_dir, generation_limit, compute_verdict
         )
         generated_names.append(f"{test.unique_id}.litmus")
         written += 1
+        if progress_callback is not None:
+            progress_callback(
+                min(len(generated_names), progress_total),
+                progress_total,
+                f"Generated {len(generated_names)}/{progress_total}: {test.unique_id}",
+            )
     return written
 
 
 # __LL_CORPUS_GENERATE2__
 
 
-def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=None, compute_verdicts=False) -> Dict[str, Any]:
+def _gui_corpus_generate(
+    name,
+    combinations,
+    out_dir,
+    source,
+    generation_limit=None,
+    compute_verdicts=False,
+    progress_callback=None,
+) -> Dict[str, Any]:
     """Generate GUI custom-rule output, serving scalar RVWMO families from the
     real corpus. .litmus files are written immediately; herd7 verdicts + diagrams
     are computed only when compute_verdicts is set (default: deferred/on-demand)."""
@@ -952,6 +995,10 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
     errors: list[Dict[str, Any]] = []
     total = len(combinations)
     generated_litmus = 0
+    progress_total = min(available_litmus, generation_limit) if generation_limit is not None else available_litmus
+    progress_total = max(progress_total, 1)
+    if progress_callback is not None:
+        progress_callback(0, progress_total, f"Generating 0/{min(available_litmus, progress_total)} cases")
     for combination in combinations:
         if generation_limit is not None and generated_litmus >= generation_limit:
             break
@@ -960,6 +1007,7 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
             generated_litmus += _write_corpus_family(
                 combination, out_dir, generation_limit, compute_verdicts,
                 generated_names, solver_counts, seen_names, errors,
+                progress_callback, progress_total,
             )
             continue
         decision = evaluate(combination)
@@ -972,6 +1020,12 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
                 solver_counts[status] = solver_counts.get(status, 0) + 1
                 generated_names.append(fname)
                 generated_litmus += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        min(generated_litmus, progress_total),
+                        progress_total,
+                        f"Generated {generated_litmus}/{progress_total}: {case.name}",
+                    )
         else:
             excluded.append({"combination": combination.to_json(), "decision": decision.to_json()})
 
@@ -998,6 +1052,8 @@ def _gui_corpus_generate(name, combinations, out_dir, source, generation_limit=N
         (out_dir / "generation-errors.json").write_text(json.dumps(errors, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if progress_callback is not None:
+        progress_callback(progress_total, progress_total, "Finalized indexes and audit report")
     return report
 
 

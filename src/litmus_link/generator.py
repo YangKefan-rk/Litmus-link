@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Tuple
 
 from .diagram import render_diagram
 from .models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, GeneratedCase, HAND_REQUIRED, MISSING, count_by_status
@@ -11,6 +11,9 @@ from .litmus_ir import case_count
 from .renderer import render_cases
 from .rules import evaluate
 from .solver import solve_generated_case
+
+
+ProgressCallback = Callable[[int, int, str], None]
 
 
 def audit_profile(profile: str) -> Tuple[List[Tuple[object, Decision]], Dict[str, object]]:
@@ -47,11 +50,40 @@ def audit_combinations(profile: str, combinations: Iterable[Combination], source
     return rows, report
 
 
-def generate_profile(profile: str, out_dir: Path) -> Dict[str, object]:
-    return generate_combinations(profile, profile_combinations(profile), out_dir)
+def generate_profile(
+    profile: str,
+    out_dir: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> Dict[str, object]:
+    total_cases = None
+    if progress_callback is not None:
+        progress_callback(0, 0, f"Counting generated cases for profile {profile}")
+        preflight = audit_summary(profile, profile_combinations(profile))
+        total_cases = int(preflight.get("generated_litmus", 0))
+    return generate_combinations(
+        profile,
+        profile_combinations(profile),
+        out_dir,
+        progress_callback=progress_callback,
+        total_cases_hint=total_cases,
+    )
 
 
-def generate_combinations(profile: str, combinations: Iterable[Combination], out_dir: Path, source: str | None = None) -> Dict[str, object]:
+def generate_combinations(
+    profile: str,
+    combinations: Iterable[Combination],
+    out_dir: Path,
+    source: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+    total_cases_hint: int | None = None,
+) -> Dict[str, object]:
+    if progress_callback is not None and total_cases_hint is None:
+        combinations = list(combinations)
+        total_cases_hint = sum(
+            case_count(combination, decision)
+            for combination in combinations
+            if (decision := evaluate(combination)).status == GENERATED
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     generated_names: List[str] = []
     counts = _empty_counts()
@@ -61,6 +93,9 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
 
     seen_names: set[str] = set()
     collisions = 0
+    progress_total = max(int(total_cases_hint or 0), 1)
+    if progress_callback is not None:
+        progress_callback(0, progress_total, f"Generating 0/{int(total_cases_hint or 0)} cases")
     with _JsonArrayWriter(out_dir / "excluded.json") as excluded:
         for combination in combinations:
             total += 1
@@ -84,6 +119,12 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
                     solver_counts[status] = solver_counts.get(status, 0) + 1
                     generated_names.append(fname)
                     generated_cases += 1
+                    if progress_callback is not None:
+                        progress_callback(
+                            min(generated_cases, progress_total),
+                            progress_total,
+                            f"Generated {generated_cases}/{int(total_cases_hint or generated_cases)}: {case.name}",
+                        )
             else:
                 excluded.write({"combination": combination.to_json(), "decision": decision.to_json()})
 
@@ -95,6 +136,8 @@ def generate_combinations(profile: str, combinations: Iterable[Combination], out
 
     (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
     (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if progress_callback is not None:
+        progress_callback(progress_total, progress_total, "Finalized indexes and audit report")
     return report
 
 

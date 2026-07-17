@@ -30,6 +30,22 @@ def test_smoke_generation_round_trip(tmp_path: Path) -> None:
     assert first_meta["test_description"]["features"]
 
 
+def test_profile_generation_reports_exact_case_progress(tmp_path: Path) -> None:
+    updates = []
+    report = generate_profile(
+        "smoke",
+        tmp_path,
+        progress_callback=lambda current, total, message: updates.append((current, total, message)),
+    )
+    determinate = [(current, total) for current, total, _message in updates if total > 0]
+    assert determinate
+    assert determinate[0] == (0, report["generated_litmus"])
+    assert determinate[-1] == (report["generated_litmus"], report["generated_litmus"])
+    assert [current for current, _total in determinate] == sorted(
+        current for current, _total in determinate
+    )
+
+
 def test_full_cross_has_no_missing(tmp_path: Path) -> None:
     report = write_audit("full-cross", tmp_path)
     baseline = json.loads(Path("tests/baselines/full-cross.json").read_text())

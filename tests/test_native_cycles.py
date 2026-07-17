@@ -138,6 +138,22 @@ def test_native_generation_writes_and_validates_without_diytools(tmp_path: Path)
     assert metadata["generated_from"] == "litmus-link-native"
 
 
+def test_native_generation_reports_completed_case_progress(tmp_path: Path) -> None:
+    updates = []
+    report = generate_native_templates(
+        out_dir=tmp_path,
+        presets=["MP"],
+        annotations=["P"],
+        limit=3,
+        judge=False,
+        progress_callback=lambda current, total, message: updates.append((current, total, message)),
+    )
+    assert report["generated_litmus"] == 3
+    assert updates[0][:2] == (0, 3)
+    assert updates[-1][:2] == (3, 3)
+    assert {current for current, total, _message in updates if total == 3} >= {0, 1, 2, 3}
+
+
 def test_native_annotations_expand_to_isa_legal_amo_forms() -> None:
     cycles, _audit = native_template_cycles(["MP"])
     from litmus_link.native_scalar import annotated_native_cycles
