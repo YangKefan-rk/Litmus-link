@@ -67,6 +67,25 @@ def test_cli_native_diy_and_verify(tmp_path: Path, capsys) -> None:  # type: ign
     assert verified["counts"] == {"verified": 3}
 
 
+def test_cli_native_generates_real_no_mag_misaligned_cases(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    out = tmp_path / "native-misaligned"
+    assert main([
+        "native", "templates", "--skeleton", "MP", "--mechanism", "po",
+        "--different-location-only", "--annotation", "P",
+        "--memory-layout", "misaligned", "--misalign-width", "64",
+        "--misalign-boundary", "cross64", "--limit", "1",
+        "--solver-backend", "embedded", "--out", str(out),
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["available_litmus"] == 1
+    assert report["verdicts"] == {"verified": 1}
+    litmus = next(out.glob("*.litmus")).read_text(encoding="utf-8")
+    assert "sd " in litmus and ",60(" in litmus
+    metadata = json.loads(next(out.glob("*.meta.json")).read_text(encoding="utf-8"))
+    assert metadata["native"]["memory_layout"]["atomicity_model"] == "byte_level_no_mag"
+    assert metadata["native"]["memory_layout"]["mag_bytes"] is None
+
+
 def test_cli_native_diy_prefix(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     out = tmp_path / "native-prefix"
     assert main([
@@ -219,6 +238,40 @@ def test_gui_native_diy_preview_uses_embedded_verification() -> None:
     assert preview["displayed_litmus"] == 4
     assert all(item["solver"]["backend"] == "embedded" for item in preview["sample"])
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
+
+
+def test_gui_native_preview_expands_misaligned_layout_configuration() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_templates",
+            "skeletons": ["MP"],
+            "mechanisms": ["po"],
+            "include_same": False,
+            "annotations": ["P"],
+            "sample_limit": 10,
+            "judge": True,
+            "solver_backend": "embedded",
+            "memory_layout": {
+                "enabled": True,
+                "include_aligned": False,
+                "modes": ["misaligned", "mixed"],
+                "width_bits": [16, 64],
+                "boundaries": ["same16", "cross64"],
+            },
+        }
+    )
+    assert preview["available_litmus"] == 6
+    assert preview["displayed_litmus"] == 6
+    assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
+    assert any("mixed-size" in item["litmus"] or "mixed_" in item["name"] for item in preview["sample"])
+    assert any(",60(" in item["litmus"] for item in preview["sample"])
+
+
+def test_gui_options_expose_only_no_mag_atomicity() -> None:
+    memory = options_payload()["native_scalar"]["memory_layout"]
+    assert memory["atomicity_model"] == "byte_level_no_mag"
+    assert memory["mag_supported"] is False
 
 
 def test_gui_native_diy_preview_accepts_fixed_prefixes() -> None:

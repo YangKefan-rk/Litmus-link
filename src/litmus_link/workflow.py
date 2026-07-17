@@ -39,6 +39,12 @@ from .native_diy import (
     DIY_OBSERVER_TYPES,
     DiyConfig,
 )
+from .memory_layout import (
+    MEMORY_LAYOUT_MODES,
+    MISALIGNED_BOUNDARIES,
+    MISALIGNED_WIDTHS,
+    expand_memory_layouts,
+)
 from .profiles import (
     ALIAS_MODES,
     ATTRIBUTES,
@@ -121,6 +127,13 @@ def options_payload() -> Dict[str, Any]:
                 "observer_types": list(DIY_OBSERVER_TYPES),
             },
             "solver_backends": ["embedded", "herd7", "crosscheck"],
+            "memory_layout": {
+                "modes": list(MEMORY_LAYOUT_MODES),
+                "width_bits": [value * 8 for value in MISALIGNED_WIDTHS],
+                "boundaries": list(MISALIGNED_BOUNDARIES),
+                "atomicity_model": "byte_level_no_mag",
+                "mag_supported": False,
+            },
         },
     }
 
@@ -205,6 +218,7 @@ def _run_scalar_generator(
     selected_judge = bool(payload.get("judge", True)) if judge is None else judge
     solver_backend = str(payload.get("solver_backend", "embedded"))
     timeout = _positive_int(payload.get("timeout", 180), "timeout")
+    memory_layouts = _memory_layouts_from_payload(payload)
     if engine == "native_templates":
         presets = _string_list(payload.get("skeletons")) or ["MP"]
         mechanisms = _string_list(payload.get("mechanisms")) or list(DEFAULT_NATIVE_MECHANISMS)
@@ -219,6 +233,7 @@ def _run_scalar_generator(
             solver_backend=solver_backend,
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
+            memory_layouts=memory_layouts,
         )
     if engine == "native_cycles":
         mechanisms = _string_list(payload.get("mechanisms")) or list(DEFAULT_NATIVE_MECHANISMS)
@@ -238,6 +253,7 @@ def _run_scalar_generator(
             solver_backend=solver_backend,
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
+            memory_layouts=memory_layouts,
         )
     if engine == "native_diy":
         diy = payload.get("diy", {}) if isinstance(payload.get("diy"), dict) else {}
@@ -276,6 +292,7 @@ def _run_scalar_generator(
             solver_backend=solver_backend,
             diagrams=bool(payload.get("diagrams", False)),
             timeout=timeout,
+            memory_layouts=memory_layouts,
         )
     if engine == "cross":
         presets = _string_list(payload.get("skeletons")) or ["MP"]
@@ -306,6 +323,30 @@ def _run_scalar_generator(
         limit=selected_limit,
         judge=selected_judge,
         timeout=timeout,
+    )
+
+
+def _memory_layouts_from_payload(payload: Dict[str, Any]):
+    raw = payload.get("memory_layout")
+    if not isinstance(raw, dict) or not bool(raw.get("enabled", False)):
+        return expand_memory_layouts(("aligned",))
+    modes = _string_list(raw.get("modes"))
+    if not modes:
+        raise ValueError("select at least one misaligned memory layout mode")
+    if bool(raw.get("include_aligned", True)):
+        modes = ["aligned", *modes]
+    width_bits = [int(value) for value in raw.get("width_bits", ())]
+    if not width_bits:
+        raise ValueError("select at least one misaligned access width")
+    if any(value not in {16, 32, 64} for value in width_bits):
+        raise ValueError("misaligned width_bits must contain only 16, 32, or 64")
+    boundaries = _string_list(raw.get("boundaries"))
+    if not boundaries:
+        raise ValueError("select at least one misaligned address boundary")
+    return expand_memory_layouts(
+        modes,
+        widths=tuple(value // 8 for value in width_bits),
+        boundaries=boundaries,
     )
 
 

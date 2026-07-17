@@ -1,6 +1,8 @@
 import pytest
+from types import SimpleNamespace
 
-from litmus_link.toolchain import diy_generate, tools_available, diycross_generate, herd_judge, toolchain_info, _parse_herd, _strip_nondeterministic
+import litmus_link.toolchain as toolchain
+from litmus_link.toolchain import ToolchainError, diy_generate, tools_available, diycross_generate, herd_judge, toolchain_info, _parse_herd, _strip_nondeterministic
 
 
 requires_tools = pytest.mark.skipif(
@@ -57,6 +59,49 @@ def test_toolchain_info_has_stable_shape() -> None:
     info = toolchain_info()
     assert set(info["tools"]) == {"diy7", "diycross7", "herd7"}
     assert info["model"]["path"].endswith("riscv.cat")
+
+
+def test_herd_judge_passes_mixed_unaligned_variants(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "herd7"
+    model = tmp_path / "riscv.cat"
+    executable.touch()
+    model.touch()
+    monkeypatch.setattr(toolchain, "HERD", executable)
+    monkeypatch.setattr(toolchain, "RISCV_CAT", model)
+    seen = {}
+
+    def fake_run(command, **_kwargs):  # type: ignore[no-untyped-def]
+        seen["command"] = command
+        return SimpleNamespace(
+            returncode=0,
+            stdout="States 1\nCondition exists (1:x5=1)\nObservation T Sometimes 1 0\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(toolchain.subprocess, "run", fake_run)
+    verdict = herd_judge("RISCV T\n{}\n P0;\n nop;\nexists (1=1)\n", variants=("mixed", "unaligned"))
+    assert verdict.allowed is True
+    assert seen["command"][seen["command"].index("-variant") + 1] == "mixed,unaligned"
+
+
+def test_herd_judge_rejects_stderr_only_user_error(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    executable = tmp_path / "herd7"
+    model = tmp_path / "riscv.cat"
+    executable.touch()
+    model.touch()
+    monkeypatch.setattr(toolchain, "HERD", executable)
+    monkeypatch.setattr(toolchain, "RISCV_CAT", model)
+    monkeypatch.setattr(
+        toolchain.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="Mixed mode not implemented for architecture RISCV",
+        ),
+    )
+    with pytest.raises(ToolchainError, match="Mixed mode not implemented"):
+        herd_judge("RISCV T\n{}\n P0;\n nop;\nexists (1=1)\n", variants=("mixed", "unaligned"))
 
 
 @requires_tools

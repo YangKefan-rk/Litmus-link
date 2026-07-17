@@ -158,6 +158,9 @@ class _LitmusLinkQtWindow:
         self.scalar_skeleton_checks: list[Any] = []
         self.scalar_mechanism_checks: list[Any] = []
         self.scalar_annotation_checks: list[Any] = []
+        self.scalar_memory_mode_checks: list[Any] = []
+        self.scalar_memory_width_checks: list[Any] = []
+        self.scalar_memory_boundary_checks: list[Any] = []
         self.action_buttons: list[Any] = []
         self.axis_group_widgets: Dict[str, Any] = {}
         self.param_group_widgets: Dict[str, Any] = {}
@@ -366,6 +369,68 @@ class _LitmusLinkQtWindow:
         cross_layout.addWidget(self.scalar_include_same)
         layout.addWidget(self.scalar_cross_group)
 
+        self.scalar_memory_group = QtWidgets.QGroupBox("Scalar memory layout")
+        self.scalar_memory_group.setObjectName("AxisGroup")
+        self.scalar_memory_group.setProperty("axis_role", "parameter")
+        memory_layout = QtWidgets.QFormLayout(self.scalar_memory_group)
+        self.scalar_memory_enable = QtWidgets.QCheckBox("Enable mixed / misaligned accesses")
+        self.scalar_memory_enable.toggled.connect(self._update_scalar_memory_layout)
+        self.scalar_memory_include_aligned = QtWidgets.QCheckBox("Include aligned baseline")
+        self.scalar_memory_include_aligned.setChecked(True)
+
+        mode_row = QtWidgets.QHBoxLayout()
+        for label, value in (("Misaligned", "misaligned"), ("Mixed-size misaligned", "mixed")):
+            check = QtWidgets.QCheckBox(label)
+            check.setProperty("axis_value", value)
+            check.setChecked(True)
+            self.scalar_memory_mode_checks.append(check)
+            mode_row.addWidget(check)
+        mode_row.addStretch(1)
+
+        width_row = QtWidgets.QHBoxLayout()
+        for width in self.options["native_scalar"]["memory_layout"]["width_bits"]:
+            check = QtWidgets.QCheckBox(f"{width}-bit")
+            check.setProperty("axis_value", str(width))
+            check.setChecked(True)
+            self.scalar_memory_width_checks.append(check)
+            width_row.addWidget(check)
+        width_row.addStretch(1)
+
+        boundary_labels = {
+            "same16": "Within 16 B",
+            "cross16": "Cross 16 B",
+            "cross64": "Cross 64 B line",
+        }
+        boundary_row = QtWidgets.QHBoxLayout()
+        for boundary in self.options["native_scalar"]["memory_layout"]["boundaries"]:
+            check = QtWidgets.QCheckBox(boundary_labels.get(boundary, boundary))
+            check.setProperty("axis_value", boundary)
+            check.setChecked(True)
+            self.scalar_memory_boundary_checks.append(check)
+            boundary_row.addWidget(check)
+        boundary_row.addStretch(1)
+
+        atomicity = QtWidgets.QLabel("byte_level_no_mag")
+        atomicity.setObjectName("OutputHint")
+        for control in (
+            self.scalar_memory_include_aligned,
+            *self.scalar_memory_mode_checks,
+            *self.scalar_memory_width_checks,
+            *self.scalar_memory_boundary_checks,
+        ):
+            control.toggled.connect(
+                lambda _checked: self._update_scalar_memory_layout(
+                    self.scalar_memory_enable.isChecked()
+                )
+            )
+        memory_layout.addRow("Mode", self.scalar_memory_enable)
+        memory_layout.addRow("Corpus", self.scalar_memory_include_aligned)
+        memory_layout.addRow("Layouts", mode_row)
+        memory_layout.addRow("Widths", width_row)
+        memory_layout.addRow("Boundaries", boundary_row)
+        memory_layout.addRow("Atomicity", atomicity)
+        layout.addWidget(self.scalar_memory_group)
+
         self.scalar_enumerate_group = QtWidgets.QGroupBox("Exhaustive cycle bounds")
         self.scalar_enumerate_group.setObjectName("ScalarParameterGroup")
         enumerate_layout = QtWidgets.QFormLayout(self.scalar_enumerate_group)
@@ -455,8 +520,36 @@ class _LitmusLinkQtWindow:
         diy_layout.addRow("Policy flags", diy_flags)
         layout.addWidget(self.scalar_diy_group)
         layout.addStretch(1)
+        self._update_scalar_memory_layout(False)
         self._update_scalar_engine()
         return tab
+
+    def _update_scalar_memory_layout(self, enabled: bool) -> None:
+        if not hasattr(self, "scalar_memory_group"):
+            return
+        controls = [
+            self.scalar_memory_include_aligned,
+            *self.scalar_memory_mode_checks,
+            *self.scalar_memory_width_checks,
+            *self.scalar_memory_boundary_checks,
+        ]
+        for control in controls:
+            control.setEnabled(enabled)
+            control.setProperty("choice_state", "on" if enabled and control.isChecked() else "base")
+            self._refresh_widget_style(control)
+        self._set_group_state(self.scalar_memory_group, "active" if enabled else "inactive")
+        for check in self.scalar_annotation_checks:
+            annotation = str(check.property("axis_value"))
+            if enabled and annotation != "P":
+                check.setChecked(False)
+                check.setEnabled(False)
+            else:
+                check.setEnabled(True)
+        if enabled:
+            for check in self.scalar_annotation_checks:
+                if str(check.property("axis_value")) == "P":
+                    check.setChecked(True)
+            self.scalar_solver_backend.setCurrentIndex(0)
 
     def _update_scalar_engine(self) -> None:
         if not hasattr(self, "scalar_engine"):
@@ -824,6 +917,17 @@ class _LitmusLinkQtWindow:
             }
             payload["mechanisms"] = self._selected(self.scalar_mechanism_checks)
             payload["annotations"] = self._selected(self.scalar_annotation_checks)
+            payload["memory_layout"] = {
+                "enabled": self.scalar_memory_enable.isChecked(),
+                "include_aligned": self.scalar_memory_include_aligned.isChecked(),
+                "modes": self._selected(self.scalar_memory_mode_checks),
+                "width_bits": [
+                    int(value) for value in self._selected(self.scalar_memory_width_checks)
+                ],
+                "boundaries": self._selected(self.scalar_memory_boundary_checks),
+                "atomicity_model": "byte_level_no_mag",
+                "mag_bytes": None,
+            }
             payload["include_same"] = self.scalar_diy_same.isChecked() if engine == "native_diy" else self.scalar_include_same.isChecked()
             if engine == "native_templates":
                 payload["skeletons"] = self._selected(self.scalar_skeleton_checks)

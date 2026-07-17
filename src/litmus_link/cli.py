@@ -28,6 +28,7 @@ from .native_diy import (
     DiyConfig,
     NativeDiyError,
 )
+from .memory_layout import expand_memory_layouts
 from .qt_gui import QtGuiError, qt_binding_status, run_qt_gui
 from .rule_file import RuleFileError, load_rule_file, rule_field_values
 from .rules import list_rules
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     native_templates.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_templates.add_argument("--diagrams", action="store_true", help="write PNG and diagram JSON for every generated case")
     native_templates.add_argument("--timeout", type=int, default=180)
+    _add_native_memory_arguments(native_templates)
 
     native_cycles = native_sub.add_parser("enumerate", help="enumerate all canonical cycles in a bounded native edge domain")
     native_cycles.add_argument("--mechanism", action="append", choices=sorted(DEFAULT_NATIVE_MECHANISMS), help="repeat to select local mechanisms; communication is always included")
@@ -153,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     native_cycles.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_cycles.add_argument("--diagrams", action="store_true")
     native_cycles.add_argument("--timeout", type=int, default=180)
+    _add_native_memory_arguments(native_cycles)
 
     native_diy = native_sub.add_parser("diy", help="run the native diy-compatible safe/relax cycle strategy")
     native_diy.add_argument("--safe", action="append", help="comma-separated safe relaxations; repeatable")
@@ -202,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     native_diy.add_argument("--solver-backend", choices=["embedded", "herd7", "crosscheck"], default="embedded")
     native_diy.add_argument("--diagrams", action="store_true")
     native_diy.add_argument("--timeout", type=int, default=180)
+    _add_native_memory_arguments(native_diy)
 
     args = parser.parse_args(argv)
     try:
@@ -316,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
                     solver_backend=args.solver_backend,
                     diagrams=args.diagrams,
                     timeout=args.timeout,
+                    memory_layouts=_native_memory_layouts(args),
                 )
             elif args.native_command == "enumerate":
                 report = generate_native_relations(
@@ -334,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
                     solver_backend=args.solver_backend,
                     diagrams=args.diagrams,
                     timeout=args.timeout,
+                    memory_layouts=_native_memory_layouts(args),
                 )
             else:
                 report = generate_native_diy(
@@ -371,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                     solver_backend=args.solver_backend,
                     diagrams=args.diagrams,
                     timeout=args.timeout,
+                    memory_layouts=_native_memory_layouts(args),
                 )
             print(json.dumps(report, indent=2, sort_keys=True))
             verdicts = report.get("verdicts", {})
@@ -384,6 +391,36 @@ def main(argv: list[str] | None = None) -> int:
 def _require_profile_or_rule_file(profile: str | None, rule_file: Path | None) -> None:
     if bool(profile) == bool(rule_file):
         raise ValueError("provide exactly one of --profile or --rule-file")
+
+
+def _add_native_memory_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--memory-layout",
+        action="append",
+        choices=["aligned", "misaligned", "mixed"],
+        help="repeat to select aligned, homogeneous misaligned, or mixed-size misaligned layouts",
+    )
+    parser.add_argument(
+        "--misalign-width",
+        action="append",
+        type=int,
+        choices=[16, 32, 64],
+        help="repeat to select homogeneous misaligned access widths; default: all",
+    )
+    parser.add_argument(
+        "--misalign-boundary",
+        action="append",
+        choices=["same16", "cross16", "cross64"],
+        help="repeat to select real address-boundary layouts; default: all",
+    )
+
+
+def _native_memory_layouts(args: argparse.Namespace):
+    return expand_memory_layouts(
+        args.memory_layout or ("aligned",),
+        widths=tuple(value // 8 for value in (args.misalign_width or (16, 32, 64))),
+        boundaries=args.misalign_boundary or ("same16", "cross16", "cross64"),
+    )
 
 
 def _split_edges(values: list[str]) -> tuple[str, ...]:
