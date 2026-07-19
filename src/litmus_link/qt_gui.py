@@ -1122,9 +1122,6 @@ class _LitmusLinkQtWindow:
             self.summary_view.setPlainText(str(result))
             self.raw_json.setPlainText(json.dumps({"result": str(result)}, indent=2, sort_keys=True))
         self.result_tabs.setCurrentWidget(self.summary_view)
-        for button in self.action_buttons:
-            button.setEnabled(True)
-        self.refresh_rule_button.setEnabled(True)
 
     def _handle_failed(self, label: str, message: str) -> None:
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
@@ -1135,13 +1132,13 @@ class _LitmusLinkQtWindow:
         self.elapsed_label.setText(f"Elapsed: {elapsed:.1f}s")
         self.elapsed_timer.stop()
         self._show_error(f"{label} failed", message)
-        for button in self.action_buttons:
-            button.setEnabled(True)
-        self.refresh_rule_button.setEnabled(True)
 
     def _clear_worker(self) -> None:
         self.active_thread = None
         self.active_worker = None
+        for button in self.action_buttons:
+            button.setEnabled(True)
+        self.refresh_rule_button.setEnabled(True)
 
     def _append_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")

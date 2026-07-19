@@ -40,6 +40,9 @@ def test_preview_action_can_run_twice(qt_app) -> None:  # type: ignore[no-untype
     ui.window.show()
     for _ in range(2):
         ui.preview_button.click()
+        # A second click can arrive before the worker's started signal reaches
+        # the GUI thread; it must be rejected without creating another thread.
+        ui.preview_button.click()
         _process_until(app, lambda: ui.active_thread is None)
         assert ui.preview_items
     ui.window.close()
