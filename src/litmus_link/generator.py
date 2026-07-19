@@ -54,6 +54,7 @@ def generate_profile(
     profile: str,
     out_dir: Path,
     progress_callback: ProgressCallback | None = None,
+    diagrams: bool = False,
 ) -> Dict[str, object]:
     total_cases = None
     if progress_callback is not None:
@@ -66,6 +67,7 @@ def generate_profile(
         out_dir,
         progress_callback=progress_callback,
         total_cases_hint=total_cases,
+        diagrams=diagrams,
     )
 
 
@@ -76,6 +78,7 @@ def generate_combinations(
     source: str | None = None,
     progress_callback: ProgressCallback | None = None,
     total_cases_hint: int | None = None,
+    diagrams: bool = False,
 ) -> Dict[str, object]:
     if progress_callback is not None and total_cases_hint is None:
         combinations = list(combinations)
@@ -89,6 +92,7 @@ def generate_combinations(
     counts = _empty_counts()
     total = 0
     generated_cases = 0
+    generated_diagrams = 0
     solver_counts = _empty_solver_counts()
 
     seen_names: set[str] = set()
@@ -115,7 +119,9 @@ def generate_combinations(
                         collisions += 1
                         continue
                     seen_names.add(case.name)
-                    status, fname = write_one_generated_case(case, out_dir)
+                    status, fname = write_one_generated_case(case, out_dir, diagrams=diagrams)
+                    if diagrams and case.case_ir is not None:
+                        generated_diagrams += 1
                     solver_counts[status] = solver_counts.get(status, 0) + 1
                     generated_names.append(fname)
                     generated_cases += 1
@@ -131,6 +137,8 @@ def generate_combinations(
     report = _report(profile, total, counts, source)
     report["generated_litmus"] = generated_cases
     report["solver"] = solver_counts
+    report["diagram_mode"] = "eager" if diagrams else "on_demand"
+    report["generated_diagrams"] = generated_diagrams
     if collisions:
         report["name_collisions_skipped"] = collisions
 
@@ -212,8 +220,13 @@ def _with_artifacts(case: GeneratedCase, solver: Dict[str, object], diagram: Dic
     return replace(case, solver=solver, diagram=diagram)
 
 
-def write_one_generated_case(case: GeneratedCase, out_dir: Path) -> tuple[str, str]:
-    """Solve, draw, and write the .litmus/.meta.json/.solver.json for one case.
+def write_one_generated_case(
+    case: GeneratedCase,
+    out_dir: Path,
+    *,
+    diagrams: bool = False,
+) -> tuple[str, str]:
+    """Solve and write one case, drawing its diagram only when requested.
 
     Returns (solver_status, litmus_filename). Shared by the profile/CLI generate
     loop and the GUI corpus generate path so they stay byte-identical.
@@ -221,7 +234,7 @@ def write_one_generated_case(case: GeneratedCase, out_dir: Path) -> tuple[str, s
     solver_result = solve_generated_case(case)
     solver_json = solver_result.to_json()
     diagram_json = None
-    if case.case_ir is not None:
+    if diagrams and case.case_ir is not None:
         diagram_json = render_diagram(case.case_ir, solver_json, out_dir).summary
     case = _with_artifacts(case, solver_json, diagram_json)
     litmus_path = out_dir / f"{case.name}.litmus"

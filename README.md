@@ -35,14 +35,14 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 
 ## Commands
 
-- `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `.solver.json`, diagram files when an IR is available, `@all`, and `audit-report.json`.
+- `litmus-link generate --profile <name> --out <dir>` generates `.litmus`, `.meta.json`, `.solver.json`, `@all`, and `audit-report.json`. PNG diagrams are rendered on demand in the GUI; pass `--diagrams` only when an eager batch is required.
 - `litmus-link generate --rule-file <json> --out <dir>` generates from user-defined axes or explicit cases instead of a built-in profile.
 - `litmus-link validate <dir-or-@all>` validates index references, metadata, naming, and legality status.
 - `litmus-link asm-check <@all> --gcc <tool>` optionally extracts generated instruction bodies and asks a RISC-V assembler to accept them. This is a syntax smoke check, not a litmus semantic proof.
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
-- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Custom-rule generation computes solver results and PNG diagrams by default; use the advanced defer switch only for very large corpus dumps.
+- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Preview and corpus generation defer PNG rendering until a case is opened; solver checks can be deferred separately for large corpus dumps.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
 - `litmus-link native templates` exhausts the configured variants of named scalar skeletons without invoking diy7/diycross7 or reading an existing corpus.
 - `litmus-link native enumerate` enumerates every canonical cycle in a user-bounded native relation grammar.

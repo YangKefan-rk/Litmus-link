@@ -58,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument("--profile")
     gen.add_argument("--rule-file", type=Path, help="JSON file describing user-defined generation axes or cases")
     gen.add_argument("--out", required=True, type=Path)
+    gen.add_argument(
+        "--diagrams",
+        action="store_true",
+        help="eagerly write PNG diagrams for every case; default: render on demand in the GUI",
+    )
 
     audit = sub.add_parser("audit", help="audit a profile without generating litmus files")
     audit.add_argument("--profile")
@@ -213,9 +218,15 @@ def main(argv: list[str] | None = None) -> int:
             _require_profile_or_rule_file(args.profile, args.rule_file)
             if args.rule_file:
                 rule_set = load_rule_file(args.rule_file)
-                report = generate_combinations(rule_set.name, rule_set.combinations, args.out, source=str(args.rule_file))
+                report = generate_combinations(
+                    rule_set.name,
+                    rule_set.combinations,
+                    args.out,
+                    source=str(args.rule_file),
+                    diagrams=args.diagrams,
+                )
             else:
-                report = generate_profile(args.profile, args.out)
+                report = generate_profile(args.profile, args.out, diagrams=args.diagrams)
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0 if report.get("missing", 0) == 0 else 1
         if args.command == "audit":

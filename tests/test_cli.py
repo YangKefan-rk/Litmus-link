@@ -179,7 +179,7 @@ def test_gui_scalar_mp_preview_uses_full_official_family() -> None:
     assert len(preview["sample"]) == 18
     assert all(not item["name"].startswith("LL_custom_") for item in preview["sample"])
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
-    assert all(Path(item["diagram"]["png"]).exists() for item in preview["sample"])
+    assert all(item["diagram"]["status"] in {"deferred", "ready"} for item in preview["sample"])
 
 
 @pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
@@ -330,7 +330,7 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
     assert "out/qt-custom/audit-report.json" in summary
 
 
-def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Path) -> None:
+def test_gui_generate_corpus_computes_solver_and_defers_diagrams_by_default(tmp_path: Path) -> None:
     from litmus_link.corpus_riscv import corpus_available
 
     if not corpus_available():
@@ -348,7 +348,29 @@ def test_gui_generate_corpus_computes_solver_and_diagram_by_default(tmp_path: Pa
     assert report["generated_litmus"] == 2
     assert len(list(out.glob("*.litmus"))) == 2
     assert len(list(out.glob("*.solver.json"))) == 2
+    assert len(list(out.glob("*.diagram.png"))) == 0
+    assert report["diagram_mode"] == "on_demand"
+    assert report["generated_diagrams"] == 0
+
+
+def test_gui_generate_corpus_can_explicitly_write_diagrams(tmp_path: Path) -> None:
+    from litmus_link.corpus_riscv import corpus_available
+
+    if not corpus_available():
+        return
+    out = tmp_path / "gui-mp-diagrams"
+    report = generate_payload(
+        {
+            "mode": "rule",
+            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
+            "out": str(out),
+            "generate_limit": 2,
+            "diagrams": True,
+        }
+    )
     assert len(list(out.glob("*.diagram.png"))) == 2
+    assert report["diagram_mode"] == "eager"
+    assert report["generated_diagrams"] == 2
 
 
 def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> None:
@@ -370,7 +392,7 @@ def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> Non
     assert report["generation_limited"] is True
     assert len(list(out.glob("*.litmus"))) == 3
     assert len(list(out.glob("*.solver.json"))) == 3
-    assert len(list(out.glob("*.diagram.png"))) == 3
+    assert len(list(out.glob("*.diagram.png"))) == 0
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:

@@ -50,8 +50,9 @@ def test_generation() -> None:
         check(bool(first_meta["test_description"]["summary"]), "metadata test description summary missing")
         check(bool(first_meta.get("case_ir", {}).get("relations")), "metadata case IR relations missing")
         check(first_meta.get("solver", {}).get("status") in {"verified", "conflict", "not_applicable"}, "metadata solver status missing")
-        check(first_meta.get("diagram", {}).get("schema") == "litmus-link.diagram.v1", "metadata diagram summary missing")
-        check((root / "smoke" / entries[0]).with_suffix(".diagram.png").exists(), "diagram PNG missing")
+        check("diagram" not in first_meta, "default generation should defer diagram rendering")
+        check(not (root / "smoke" / entries[0]).with_suffix(".diagram.png").exists(), "default generation wrote an eager diagram PNG")
+        check(report.get("diagram_mode") == "on_demand", "default diagram mode should be on-demand")
         full = write_audit("full-cross", root / "audit")
         baseline = json.loads(Path("tests/baselines/full-cross.json").read_text())
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
@@ -167,7 +168,7 @@ def test_cli() -> None:
         check(preview["sample"][0]["litmus"].startswith("RISCV "), "GUI preview should include rendered litmus")
         check(bool(preview["sample"][0]["analysis"]["cycle"]), "GUI preview should include cycle analysis")
         check("solver" in preview["sample"][0], "GUI preview should include solver result")
-        check("diagram" in preview["sample"][0], "GUI preview should include diagram result")
+        check(preview["sample"][0].get("diagram", {}).get("status") in {"deferred", "ready"}, "GUI preview should include a deferred diagram descriptor")
         mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 6})
         from litmus_link.corpus_riscv import corpus_available as _corpus_available
         if _corpus_available():

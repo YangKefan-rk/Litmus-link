@@ -655,6 +655,8 @@ def _write_native_cases(
         "judge": judge,
         "solver_backend": backend if judge else "none",
         "verdicts": dict(sorted(verdicts.items())),
+        "diagram_mode": "eager" if diagrams else "on_demand",
+        "generated_diagrams": len(filenames) if diagrams else 0,
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
     }

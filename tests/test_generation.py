@@ -1,8 +1,9 @@
 import json
+import shutil
 from pathlib import Path
 
 from litmus_link.generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
-from litmus_link.workflow import preview_payload
+from litmus_link.workflow import materialize_preview_diagram, preview_payload
 from litmus_link.models import Combination
 from litmus_link.profiles import profile_combinations
 from litmus_link.rule_file import RuleFileError, load_rule_file
@@ -18,16 +19,27 @@ def test_smoke_generation_round_trip(tmp_path: Path) -> None:
     assert len(entries) == report["generated_litmus"]
     first_meta = json.loads((tmp_path / entries[0]).with_suffix(".meta.json").read_text())
     first_solver = json.loads((tmp_path / entries[0]).with_suffix(".solver.json").read_text())
-    first_diagram = json.loads((tmp_path / entries[0]).with_suffix(".diagram.json").read_text())
     assert first_meta["schema"] == "litmus-link.meta.v1"
     assert first_meta["case_ir"]["variant"]
     assert first_meta["solver"] == first_solver
-    assert first_meta["diagram"]["schema"] == "litmus-link.diagram.v1"
-    assert first_meta["diagram"] == first_diagram
-    assert (tmp_path / entries[0]).with_suffix(".diagram.png").exists()
+    assert "diagram" not in first_meta
+    assert not (tmp_path / entries[0]).with_suffix(".diagram.png").exists()
+    assert report["diagram_mode"] == "on_demand"
+    assert report["generated_diagrams"] == 0
     assert first_solver["status"] in {"verified", "conflict", "not_applicable"}
     assert first_meta["test_description"]["summary"]
     assert first_meta["test_description"]["features"]
+
+
+def test_profile_generation_can_explicitly_write_diagrams(tmp_path: Path) -> None:
+    report = generate_profile("smoke", tmp_path, diagrams=True)
+    entries = validate_path(tmp_path / "@all")
+    first_meta = json.loads((tmp_path / entries[0]).with_suffix(".meta.json").read_text())
+    first_diagram = json.loads((tmp_path / entries[0]).with_suffix(".diagram.json").read_text())
+    assert first_meta["diagram"] == first_diagram
+    assert (tmp_path / entries[0]).with_suffix(".diagram.png").exists()
+    assert report["diagram_mode"] == "eager"
+    assert report["generated_diagrams"] == report["generated_litmus"]
 
 
 def test_profile_generation_reports_exact_case_progress(tmp_path: Path) -> None:
@@ -151,11 +163,34 @@ def test_preview_payload_includes_litmus_and_analysis() -> None:
     assert first["case_ir"]["relations"]
     assert first["solver"]["status"] in {"verified", "conflict", "not_applicable"}
     assert first["diagram"]["schema"] == "litmus-link.diagram.v1"
-    assert Path(first["diagram"]["png"]).exists()
+    assert first["diagram"]["status"] in {"deferred", "ready"}
+    deferred_png = Path(first["diagram"]["png"])
+    shutil.rmtree(deferred_png.parent, ignore_errors=True)
+    assert not deferred_png.exists()
+    rendered = materialize_preview_diagram(first)
+    assert rendered["status"] == "ready"
+    assert rendered["cached"] is False
+    assert Path(rendered["png"]).exists()
+    cached = materialize_preview_diagram(first)
+    assert cached["status"] == "ready"
+    assert cached["cached"] is True
     assert first["analysis"]["solver_status"] == first["solver"]["status"]
     assert first["analysis"]["cycle"]
     assert first["analysis"]["exists"]
     assert "forbidden_outcome" in first["analysis"]
+
+
+def test_preview_payload_does_not_eagerly_call_diagram_renderer(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import litmus_link.workflow as workflow
+
+    def fail_if_called(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("preview must not render PNG diagrams")
+
+    monkeypatch.setattr(workflow, "render_diagram", fail_if_called)
+    preview = workflow.preview_payload({"mode": "profile", "profile": "smoke", "sample_limit": 1})
+    generated = [item for item in preview["sample"] if item.get("litmus")]
+    assert generated
+    assert all(item["diagram"]["status"] in {"deferred", "ready"} for item in generated)
 
 
 def test_mp_cacheable_expands_to_corpus_family() -> None:

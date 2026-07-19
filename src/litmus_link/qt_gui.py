@@ -7,7 +7,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
-from .workflow import PARAM_AXIS_VALUES, audit_payload, generate_payload, options_payload, preview_payload
+from .workflow import (
+    PARAM_AXIS_VALUES,
+    audit_payload,
+    generate_payload,
+    materialize_preview_diagram,
+    options_payload,
+    preview_payload,
+)
 
 
 class QtGuiError(ValueError):
@@ -125,6 +132,41 @@ def _make_worker_class(QtCore: Any) -> Any:
                 self.failed.emit(self.label, str(exc))
 
     return ActionWorker
+
+
+def _make_diagram_worker_class(QtCore: Any) -> Any:
+    class DiagramWorker(QtCore.QObject):
+        finished = _signal(QtCore, object)
+        failed = _signal(QtCore, str)
+
+        def __init__(self, item: Dict[str, Any]) -> None:
+            super().__init__()
+            self.item = item
+
+        def run(self) -> None:
+            try:
+                self.finished.emit(materialize_preview_diagram(self.item))
+            except Exception as exc:
+                self.failed.emit(str(exc))
+
+    return DiagramWorker
+
+
+def _make_diagram_receiver_class(QtCore: Any) -> Any:
+    class DiagramReceiver(QtCore.QObject):
+        def __init__(self, owner: "_LitmusPreviewDialog") -> None:
+            super().__init__()
+            self.owner = owner
+
+        @_slot(QtCore, object)
+        def handle_finished(self, result: object) -> None:
+            self.owner._diagram_ready(result)
+
+        @_slot(QtCore, str)
+        def handle_failed(self, message: str) -> None:
+            self.owner._diagram_failed(message)
+
+    return DiagramReceiver
 
 
 def _make_ui_receiver_class(QtCore: Any) -> Any:
@@ -814,10 +856,10 @@ class _LitmusLinkQtWindow:
         self.summary_only = QtWidgets.QCheckBox("Summary-only audit")
         self.summary_only.setChecked(True)
         controls.addWidget(self.summary_only)
-        self.defer_solver_diagram = QtWidgets.QCheckBox("Defer solver/diagram")
-        self.defer_solver_diagram.setToolTip("Advanced: skip herd7 verdicts and PNG diagrams for large real-corpus generation.")
-        self.defer_solver_diagram.setChecked(False)
-        controls.addWidget(self.defer_solver_diagram)
+        self.defer_solver = QtWidgets.QCheckBox("Defer solver checks")
+        self.defer_solver.setToolTip("Advanced: skip herd7 verdict calculation during large real-corpus generation.")
+        self.defer_solver.setChecked(False)
+        controls.addWidget(self.defer_solver)
         self.output_hint = QtWidgets.QLabel("Output: out/qt-profile")
         self.output_hint.setObjectName("OutputHint")
         controls.addWidget(self.output_hint, 1)
@@ -1012,7 +1054,8 @@ class _LitmusLinkQtWindow:
             "out": self.rule_out.text() or "out/qt-custom",
             "summary_only": self.summary_only.isChecked(),
             "sample_limit": sample_limit,
-            "compute_verdicts": not self.defer_solver_diagram.isChecked(),
+            "compute_verdicts": not self.defer_solver.isChecked(),
+            "diagrams": False,
         }
 
     def _preview_sample_limit(self) -> int:
@@ -1230,8 +1273,8 @@ class _LitmusLinkQtWindow:
     def _update_output_hint(self) -> None:
         if hasattr(self, "output_hint"):
             self.output_hint.setText(f"Output: {self._current_out_dir()}")
-        if hasattr(self, "defer_solver_diagram") and hasattr(self, "mode_tabs"):
-            self.defer_solver_diagram.setVisible(self.mode_tabs.currentWidget() is self.custom_tab)
+        if hasattr(self, "defer_solver") and hasattr(self, "mode_tabs"):
+            self.defer_solver.setVisible(self.mode_tabs.currentWidget() is self.custom_tab)
 
 
 def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
@@ -1269,6 +1312,8 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
                 f"  available litmus: {result.get('available_litmus', result.get('generated_litmus', result.get('generated', 0)))}",
                 f"  solver results: {solver_files}",
                 f"  verdict mode: {result.get('verdict_mode', 'computed')}",
+                f"  diagram mode: {result.get('diagram_mode', 'on_demand')}",
+                f"  generated diagrams: {result.get('generated_diagrams', 0)}",
                 f"  @all: {out_path / '@all'}",
                 f"  generation report: {out_path / 'generation-report.json'}" if str(result.get("schema", "")).startswith("litmus-link.scalar-") else f"  audit report: {out_path / 'audit-report.json'}",
             ]
@@ -1309,9 +1354,15 @@ class _LitmusPreviewDialog:
         self.QtCore = QtCore
         self.QtGui = QtGui
         self.item = item
+        self.diagram_thread = None
+        self.diagram_worker = None
+        self.diagram_worker_class = _make_diagram_worker_class(QtCore)
+        self.diagram_receiver = _make_diagram_receiver_class(QtCore)(self)
         self.dialog = QtWidgets.QDialog(parent)
         self.dialog.setWindowTitle(str(item.get("name", "Litmus preview")))
         self._build_ui()
+        self.dialog.finished.connect(self._handle_dialog_closed)
+        self.QtCore.QTimer.singleShot(0, self._start_diagram_render)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.dialog, name)
@@ -1344,29 +1395,110 @@ class _LitmusPreviewDialog:
         layout.setContentsMargins(0, 0, 0, 0)
         diagram = self.item.get("diagram") or {}
         png = Path(str(diagram.get("png", ""))) if diagram.get("png") else None
-        label = QtWidgets.QLabel()
-        label.setAlignment(_align_center(self.QtCore))
+        self.diagram_label = QtWidgets.QLabel()
+        self.diagram_label.setAlignment(_align_center(self.QtCore))
+        self.diagram_status = QtWidgets.QLabel("Diagram will be rendered when this window opens.")
+        self.diagram_status.setAlignment(_align_center(self.QtCore))
+        self.diagram_progress = QtWidgets.QProgressBar()
+        self.diagram_progress.setRange(0, 0)
+        self.diagram_progress.setTextVisible(False)
         if png and png.exists():
-            pixmap = self.QtGui.QPixmap(str(png))
-            label.setPixmap(pixmap)
-            label.setMinimumSize(pixmap.size())
+            if self._show_diagram_png(png):
+                self.diagram_status.setText("Loaded cached diagram")
+                self.diagram_progress.hide()
         else:
-            label.setText(f"Diagram PNG is not available.\nExpected: {png or '<none>'}")
+            self.diagram_label.setText("Rendering diagram on demand...")
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setWidget(label)
+        scroll.setWidget(self.diagram_label)
+        layout.addWidget(self.diagram_status)
+        layout.addWidget(self.diagram_progress)
         layout.addWidget(scroll, 1)
         return container
 
     def _build_detail_tabs(self) -> Any:
         QtWidgets = self.QtWidgets
         tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._text_view(self._analysis_text()), "Summary")
+        self.summary_detail = self._text_view(self._analysis_text())
+        tabs.addTab(self.summary_detail, "Summary")
         tabs.addTab(self._text_view(str(self.item.get("litmus", ""))), "Litmus")
         tabs.addTab(self._json_view(self.item.get("solver", {})), "Solver")
         tabs.addTab(self._json_view(self.item.get("case_ir", {})), "IR")
-        tabs.addTab(self._json_view(self.item.get("diagram", {})), "Diagram")
+        self.diagram_detail = self._json_view(self.item.get("diagram", {}))
+        tabs.addTab(self.diagram_detail, "Diagram")
         return tabs
+
+    def _start_diagram_render(self) -> None:
+        diagram = self.item.get("diagram") or {}
+        png = Path(str(diagram.get("png", ""))) if diagram.get("png") else None
+        if png and png.exists():
+            if self._show_diagram_png(png):
+                self.diagram_status.setText("Loaded cached diagram")
+                self.diagram_progress.hide()
+            return
+        if not isinstance(self.item.get("case_ir"), dict):
+            self._diagram_failed("this preview case has no case IR to draw")
+            return
+
+        self.diagram_status.setText("Rendering diagram on demand...")
+        self.diagram_progress.show()
+        thread = self.QtCore.QThread(self.dialog)
+        worker = self.diagram_worker_class(self.item)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.diagram_receiver.handle_finished)
+        worker.failed.connect(self.diagram_receiver.handle_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._diagram_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self.diagram_thread = thread
+        self.diagram_worker = worker
+        thread.start()
+
+    def _diagram_ready(self, result: object) -> None:
+        if not isinstance(result, dict):
+            self._diagram_failed("diagram renderer returned an invalid result")
+            return
+        self.item["diagram"] = result
+        png = Path(str(result.get("png", ""))) if result.get("png") else None
+        if not png or not png.exists():
+            self._diagram_failed(f"diagram renderer did not write {png or '<unknown>'}")
+            return
+        if not self._show_diagram_png(png):
+            return
+        self.diagram_status.setText("Loaded cached diagram" if result.get("cached") else "Diagram rendered")
+        self.diagram_progress.hide()
+        self.summary_detail.setPlainText(self._analysis_text())
+        self.diagram_detail.setPlainText(json.dumps(result, indent=2, sort_keys=True))
+
+    def _diagram_failed(self, message: str) -> None:
+        self.diagram_label.clear()
+        self.diagram_label.setText(f"Diagram generation failed:\n{message}")
+        self.diagram_status.setText("Diagram unavailable")
+        self.diagram_progress.hide()
+
+    def _show_diagram_png(self, png: Path) -> bool:
+        pixmap = self.QtGui.QPixmap(str(png))
+        if pixmap.isNull():
+            self._diagram_failed(f"cannot load diagram PNG: {png}")
+            return False
+        self.diagram_label.clear()
+        self.diagram_label.setPixmap(pixmap)
+        self.diagram_label.setMinimumSize(pixmap.size())
+        return True
+
+    def _diagram_thread_finished(self) -> None:
+        self.diagram_thread = None
+        self.diagram_worker = None
+
+    def _handle_dialog_closed(self, _result: int) -> None:
+        thread = self.diagram_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait()
 
     def _text_view(self, text: str) -> Any:
         view = self.QtWidgets.QPlainTextEdit()

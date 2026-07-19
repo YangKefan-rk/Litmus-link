@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from hashlib import sha256
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -11,7 +12,7 @@ from typing import Any, Callable, Dict, Iterable, Tuple
 from .corpus_ir import corpus_to_ir
 from .corpus_riscv import corpus_available, judge as corpus_judge, parse_litmus, skeleton_counts, tests_for_skeleton
 from .descriptions import feature_description_catalog
-from .diagram import render_diagram
+from .diagram import diagram_summary, render_diagram
 from .generator import (
     _coverage_markdown,
     audit_summary,
@@ -185,6 +186,49 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _DIAGRAM_DIR = Path(gettempdir()) / "litmus-link-preview-diagrams"
+
+
+def _deferred_preview_diagram(
+    case_ir: LitmusCaseIR,
+    solver: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Describe a preview diagram without paying the PNG rendering cost."""
+    fingerprint = sha256(
+        json.dumps(
+            {"case_ir": case_ir.to_json(), "solver": solver or {}},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    cache_dir = _DIAGRAM_DIR / fingerprint
+    png_path = cache_dir / f"{case_ir.name}.diagram.png"
+    summary = diagram_summary(case_ir, solver, png_path)
+    summary["status"] = "ready" if png_path.exists() else "deferred"
+    summary["cache_key"] = fingerprint
+    return summary
+
+
+def materialize_preview_diagram(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Render one preview diagram on demand and reuse a content-addressed cache."""
+    case_ir_json = item.get("case_ir")
+    if not isinstance(case_ir_json, dict):
+        raise ValueError("this preview case has no case IR to draw")
+    solver = item.get("solver") if isinstance(item.get("solver"), dict) else None
+    case_ir = _case_ir_from_json(case_ir_json)
+    descriptor = _deferred_preview_diagram(case_ir, solver)
+    png_path = Path(str(descriptor["png"]))
+    json_path = png_path.with_suffix("").with_suffix(".diagram.json")
+    if png_path.exists() and json_path.exists():
+        descriptor["status"] = "ready"
+        descriptor["cached"] = True
+        return descriptor
+
+    result = render_diagram(case_ir, solver, png_path.parent)
+    summary = dict(result.summary)
+    summary["status"] = "ready"
+    summary["cache_key"] = descriptor["cache_key"]
+    summary["cached"] = False
+    return summary
 
 
 def _scalar_preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -381,7 +425,7 @@ def _scalar_preview_items(out_dir: Path, report: Dict[str, Any]) -> list[Dict[st
             if meta.get("schema") == "litmus-link.native-scalar-meta.v1"
             else corpus_to_ir(test, verdict)
         )
-        diagram = render_diagram(ir, solver, _DIAGRAM_DIR).summary
+        diagram = _deferred_preview_diagram(ir, solver)
         combination = Combination(
             profile="scalar",
             category="scalar_rvwmo",
@@ -497,9 +541,11 @@ def _render_preview_items(combination: Combination) -> list:
     items = []
     for case in rendered_cases:
         solver = solve_generated_case(case).to_json()
-        diagram = None
-        if case.case_ir is not None:
-            diagram = render_diagram(case.case_ir, solver, _DIAGRAM_DIR).summary
+        diagram = (
+            _deferred_preview_diagram(case.case_ir, solver)
+            if case.case_ir is not None
+            else None
+        )
         items.append(
             _preview_item(
                 combination,
@@ -575,7 +621,7 @@ def _corpus_decision_json(test) -> Dict[str, Any]:
 def _corpus_preview_items(combination: Combination, limit: int) -> list:
     items = []
     for test in tests_for_skeleton(combination.skeleton, limit=limit):
-        # One malformed corpus sample (parse/IR/diagram/PIL error) must not
+        # One malformed corpus sample (parse/IR error) must not
         # take down the whole preview list. do_POST only catches
         # ValueError/RuleFileError/FileNotFoundError, so anything else here
         # would 500 the request and lose every other valid sample. Degrade the
@@ -584,7 +630,7 @@ def _corpus_preview_items(combination: Combination, limit: int) -> list:
             verdict = _safe_corpus_judge(test)
             ir = corpus_to_ir(test, verdict)
             solver = _corpus_solver_json(verdict)
-            diagram = render_diagram(ir, solver, _DIAGRAM_DIR).summary
+            diagram = _deferred_preview_diagram(ir, solver)
             items.append(
                 _preview_item(
                     combination,
@@ -883,16 +929,21 @@ def generate_payload(
             str(payload.get("profile") or "smoke"),
             out_dir,
             progress_callback=progress_callback,
+            diagrams=bool(payload.get("diagrams", False)),
         )
     name, combinations, source = _combinations_from_payload(payload)
     if source == "gui" and corpus_available():
         compute_verdicts = bool(payload.get("compute_verdicts", True))
+        diagrams = bool(payload.get("diagrams", False))
+        if diagrams:
+            compute_verdicts = True
         rule = payload.get("rule") if isinstance(payload.get("rule"), dict) else {}
         limit = payload.get("generate_limit", rule.get("generate_limit", rule.get("limit")))
         return _gui_corpus_generate(
             name, list(combinations), out_dir, source,
             generation_limit=int(limit) if limit is not None else None,
             compute_verdicts=compute_verdicts,
+            diagrams=diagrams,
             progress_callback=progress_callback,
         )
     return generate_combinations(
@@ -901,6 +952,7 @@ def generate_payload(
         out_dir,
         source=source,
         progress_callback=progress_callback,
+        diagrams=bool(payload.get("diagrams", False)),
     )
 
 
@@ -927,17 +979,19 @@ def _write_corpus_family(
     out_dir,
     generation_limit,
     compute_verdicts,
+    diagrams,
     generated_names,
     solver_counts,
     seen_names,
     errors,
     progress_callback=None,
     progress_total=0,
-) -> int:
+) -> tuple[int, int]:
     written = 0
+    rendered_diagrams = 0
     remaining = None if generation_limit is None else max(generation_limit - len(generated_names), 0)
     if remaining == 0:
-        return 0
+        return 0, 0
     for test in tests_for_skeleton(combination.skeleton, limit=remaining):
         if test.unique_id in seen_names:
             continue
@@ -949,7 +1003,9 @@ def _write_corpus_family(
                 verdict = _safe_corpus_judge(test)
                 verdict_json = _corpus_solver_json(verdict)
                 solver_counts[verdict_json["status"]] = solver_counts.get(verdict_json["status"], 0) + 1
-                render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
+                if diagrams:
+                    render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
+                    rendered_diagrams += 1
                 (out_dir / f"{test.unique_id}.solver.json").write_text(
                     json.dumps(verdict_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
                 )
@@ -966,7 +1022,7 @@ def _write_corpus_family(
                 progress_total,
                 f"Generated {len(generated_names)}/{progress_total}: {test.unique_id}",
             )
-    return written
+    return written, rendered_diagrams
 
 
 # __LL_CORPUS_GENERATE2__
@@ -979,11 +1035,12 @@ def _gui_corpus_generate(
     source,
     generation_limit=None,
     compute_verdicts=False,
+    diagrams=False,
     progress_callback=None,
 ) -> Dict[str, Any]:
     """Generate GUI custom-rule output, serving scalar RVWMO families from the
-    real corpus. .litmus files are written immediately; herd7 verdicts + diagrams
-    are computed only when compute_verdicts is set (default: deferred/on-demand)."""
+    real corpus. Solver results are optional and PNG diagrams are independently
+    controlled so large corpus generation can keep drawing fully on demand."""
     out_dir.mkdir(parents=True, exist_ok=True)
     potential_report = _gui_corpus_report(name, combinations, source)
     available_litmus = int(potential_report.get("generated_litmus", 0) or 0)
@@ -995,6 +1052,7 @@ def _gui_corpus_generate(
     errors: list[Dict[str, Any]] = []
     total = len(combinations)
     generated_litmus = 0
+    generated_diagrams = 0
     progress_total = min(available_litmus, generation_limit) if generation_limit is not None else available_litmus
     progress_total = max(progress_total, 1)
     if progress_callback is not None:
@@ -1004,11 +1062,13 @@ def _gui_corpus_generate(
             break
         if _is_scalar_corpus_combination(combination):
             counts[GENERATED] += 1
-            generated_litmus += _write_corpus_family(
-                combination, out_dir, generation_limit, compute_verdicts,
+            written, rendered = _write_corpus_family(
+                combination, out_dir, generation_limit, compute_verdicts, diagrams,
                 generated_names, solver_counts, seen_names, errors,
                 progress_callback, progress_total,
             )
+            generated_litmus += written
+            generated_diagrams += rendered
             continue
         decision = evaluate(combination)
         counts[decision.status] = counts.get(decision.status, 0) + 1
@@ -1016,7 +1076,9 @@ def _gui_corpus_generate(
             for case in render_cases(combination, decision):
                 if generation_limit is not None and generated_litmus >= generation_limit:
                     break
-                status, fname = write_one_generated_case(case, out_dir)
+                status, fname = write_one_generated_case(case, out_dir, diagrams=diagrams)
+                if diagrams and case.case_ir is not None:
+                    generated_diagrams += 1
                 solver_counts[status] = solver_counts.get(status, 0) + 1
                 generated_names.append(fname)
                 generated_litmus += 1
@@ -1042,6 +1104,8 @@ def _gui_corpus_generate(
         "missing": counts["missing"],
         "solver": solver_counts,
         "verdict_mode": "computed" if compute_verdicts else "deferred",
+        "diagram_mode": "eager" if diagrams else "on_demand",
+        "generated_diagrams": generated_diagrams,
         "generation_limit": generation_limit,
         "generation_limited": generation_limit is not None and generated_litmus < available_litmus,
         "generation_errors": len(errors),
