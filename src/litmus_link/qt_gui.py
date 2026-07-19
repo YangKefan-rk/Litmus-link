@@ -39,6 +39,7 @@ def run_qt_gui() -> int:
     app.setApplicationName("Litmus-link")
     app.setStyleSheet(_stylesheet())
     window = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
+    app.aboutToQuit.connect(window.shutdown)
     window.resize(1440, 900)
     window.show()
     exec_fn = getattr(app, "exec", None) or getattr(app, "exec_", None)
@@ -80,11 +81,9 @@ def _make_worker_class(QtCore: Any) -> Any:
         finished = _signal(QtCore, str, object)
         failed = _signal(QtCore, str, str)
 
-        def __init__(self, action: str, label: str, payload: Dict[str, Any]) -> None:
+        def __init__(self) -> None:
             super().__init__()
-            self.action = action
-            self.label = label
-            self.payload = payload
+            self.request_count = 0
             self._last_percent = -1
             self._last_message = ""
 
@@ -103,35 +102,46 @@ def _make_worker_class(QtCore: Any) -> Any:
             self._last_message = message
             self.progress.emit({"current": current, "total": total, "message": message})
 
-        def run(self) -> None:
+        @_slot(QtCore, str, str, object)
+        def run_request(self, action: str, label: str, payload: Dict[str, Any]) -> None:
             try:
-                self.started.emit(self.label)
+                self.request_count += 1
+                self._last_percent = -1
+                self._last_message = ""
+                self.started.emit(label)
                 self._stage("Preparing request payload")
-                if self.action == "preview":
+                if action == "preview":
                     self._stage("Expanding sample combinations")
-                    result = preview_payload(self.payload)
-                elif self.action == "verify":
+                    result = preview_payload(payload)
+                elif action == "verify":
                     self._stage("Generating preview cases and checking RVWMO outcomes")
-                    verify_payload = dict(self.payload)
+                    verify_payload = dict(payload)
                     verify_payload["judge"] = True
                     result = preview_payload(verify_payload)
-                elif self.action == "audit":
+                elif action == "audit":
                     self._stage("Classifying combinations with legality rules")
-                    result = audit_payload(self.payload)
-                elif self.action == "generate":
+                    result = audit_payload(payload)
+                elif action == "generate":
                     self._stage("Preparing output and counting cases")
                     result = generate_payload(
-                        self.payload,
+                        payload,
                         progress_callback=self._report_progress,
                     )
                 else:
-                    raise ValueError(f"unknown action: {self.action}")
+                    raise ValueError(f"unknown action: {action}")
                 self._report_progress(1, 1, "Finalizing result summary")
-                self.finished.emit(self.label, result)
+                self.finished.emit(label, result)
             except Exception as exc:
-                self.failed.emit(self.label, str(exc))
+                self.failed.emit(label, str(exc))
 
     return ActionWorker
+
+
+def _make_action_bus_class(QtCore: Any) -> Any:
+    class ActionBus(QtCore.QObject):
+        request = _signal(QtCore, str, str, object)
+
+    return ActionBus
 
 
 def _make_ui_receiver_class(QtCore: Any) -> Any:
@@ -151,13 +161,11 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
         @_slot(QtCore, str, object)
         def handle_finished(self, label: str, result: object) -> None:
             self.owner._handle_finished(label, result)
+            self.owner._clear_worker()
 
         @_slot(QtCore, str, str)
         def handle_failed(self, label: str, message: str) -> None:
             self.owner._handle_failed(label, message)
-
-        @_slot(QtCore)
-        def handle_thread_finished(self) -> None:
             self.owner._clear_worker()
 
     return UiReceiver
@@ -205,11 +213,31 @@ class _LitmusLinkQtWindow:
         self.active_label = ""
         self.suspend_rule_sync = False
         self.worker_class = _make_worker_class(QtCore)
+        self.action_bus_class = _make_action_bus_class(QtCore)
         self.ui_receiver = _make_ui_receiver_class(QtCore)(self)
+        self.action_thread = QtCore.QThread(self.window)
+        self.action_worker = self.worker_class()
+        self.action_bus = self.action_bus_class(self.window)
+        self.action_worker.moveToThread(self.action_thread)
+        self.action_bus.request.connect(self.action_worker.run_request)
+        self.action_worker.started.connect(self.ui_receiver.handle_started)
+        self.action_worker.progress.connect(self.ui_receiver.handle_progress)
+        self.action_worker.finished.connect(self.ui_receiver.handle_finished)
+        self.action_worker.failed.connect(self.ui_receiver.handle_failed)
+        self.action_thread.start()
         self._build_ui()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.window, name)
+
+    def shutdown(self) -> None:
+        """Stop the single persistent action thread before Qt tears down widgets."""
+        thread = getattr(self, "action_thread", None)
+        if thread is None or not thread.isRunning():
+            return
+        self.action_worker.deleteLater()
+        thread.quit()
+        thread.wait()
 
     def _build_ui(self) -> None:
         QtWidgets = self.QtWidgets
@@ -1049,23 +1077,9 @@ class _LitmusLinkQtWindow:
             self._show_error("Invalid configuration", str(exc))
             return
 
-        thread = self.QtCore.QThread(self.window)
-        worker = self.worker_class(action, label, payload)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.started.connect(self.ui_receiver.handle_started)
-        worker.progress.connect(self.ui_receiver.handle_progress)
-        worker.finished.connect(self.ui_receiver.handle_finished)
-        worker.failed.connect(self.ui_receiver.handle_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self.ui_receiver.handle_thread_finished)
-        self.active_thread = thread
-        self.active_worker = worker
-        thread.start()
+        self.active_thread = self.action_thread
+        self.active_worker = self.action_worker
+        self.action_bus.request.emit(action, label, payload)
 
     def _handle_started(self, label: str) -> None:
         self.started_at = time.monotonic()
