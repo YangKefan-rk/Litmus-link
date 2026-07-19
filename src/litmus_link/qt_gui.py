@@ -134,41 +134,6 @@ def _make_worker_class(QtCore: Any) -> Any:
     return ActionWorker
 
 
-def _make_diagram_worker_class(QtCore: Any) -> Any:
-    class DiagramWorker(QtCore.QObject):
-        finished = _signal(QtCore, object)
-        failed = _signal(QtCore, str)
-
-        def __init__(self, item: Dict[str, Any]) -> None:
-            super().__init__()
-            self.item = item
-
-        def run(self) -> None:
-            try:
-                self.finished.emit(materialize_preview_diagram(self.item))
-            except Exception as exc:
-                self.failed.emit(str(exc))
-
-    return DiagramWorker
-
-
-def _make_diagram_receiver_class(QtCore: Any) -> Any:
-    class DiagramReceiver(QtCore.QObject):
-        def __init__(self, owner: "_LitmusPreviewDialog") -> None:
-            super().__init__()
-            self.owner = owner
-
-        @_slot(QtCore, object)
-        def handle_finished(self, result: object) -> None:
-            self.owner._diagram_ready(result)
-
-        @_slot(QtCore, str)
-        def handle_failed(self, message: str) -> None:
-            self.owner._diagram_failed(message)
-
-    return DiagramReceiver
-
-
 def _make_ui_receiver_class(QtCore: Any) -> Any:
     class UiReceiver(QtCore.QObject):
         def __init__(self, owner: "_LitmusLinkQtWindow") -> None:
@@ -190,6 +155,10 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
         @_slot(QtCore, str, str)
         def handle_failed(self, label: str, message: str) -> None:
             self.owner._handle_failed(label, message)
+
+        @_slot(QtCore)
+        def handle_thread_finished(self) -> None:
+            self.owner._clear_worker()
 
     return UiReceiver
 
@@ -229,6 +198,7 @@ class _LitmusLinkQtWindow:
         self.preview_items: list[Dict[str, Any]] = []
         self.active_thread = None
         self.active_worker = None
+        self.preview_dialog_open = False
         self.elapsed_timer = QtCore.QTimer(self.window)
         self.elapsed_timer.timeout.connect(self._update_elapsed)
         self.started_at = 0.0
@@ -1092,7 +1062,7 @@ class _LitmusLinkQtWindow:
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._clear_worker)
+        thread.finished.connect(self.ui_receiver.handle_thread_finished)
         self.active_thread = thread
         self.active_worker = worker
         thread.start()
@@ -1255,12 +1225,18 @@ class _LitmusLinkQtWindow:
             tree.resizeColumnToContents(column)
 
     def _open_preview_detail(self, item: Any) -> None:
+        if self.preview_dialog_open:
+            return
         index = item.data(_user_role(self.QtCore))
         if index is None or index < 0 or index >= len(self.preview_items):
             return
         dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.QtGui, self.preview_items[index], self.window)
         dialog.resize(1180, 860)
-        _exec_dialog(dialog)
+        self.preview_dialog_open = True
+        try:
+            _exec_dialog(dialog)
+        finally:
+            self.preview_dialog_open = False
 
     def _current_out_dir(self) -> str:
         current = self.mode_tabs.currentWidget()
@@ -1354,15 +1330,11 @@ class _LitmusPreviewDialog:
         self.QtCore = QtCore
         self.QtGui = QtGui
         self.item = item
-        self.diagram_thread = None
-        self.diagram_worker = None
-        self.diagram_worker_class = _make_diagram_worker_class(QtCore)
-        self.diagram_receiver = _make_diagram_receiver_class(QtCore)(self)
+        self.diagram_rendering = False
         self.dialog = QtWidgets.QDialog(parent)
         self.dialog.setWindowTitle(str(item.get("name", "Litmus preview")))
         self._build_ui()
-        self.dialog.finished.connect(self._handle_dialog_closed)
-        self.QtCore.QTimer.singleShot(0, self._start_diagram_render)
+        self.QtCore.QTimer.singleShot(25, self._start_diagram_render)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.dialog, name)
@@ -1429,6 +1401,8 @@ class _LitmusPreviewDialog:
         return tabs
 
     def _start_diagram_render(self) -> None:
+        if self.diagram_rendering:
+            return
         diagram = self.item.get("diagram") or {}
         png = Path(str(diagram.get("png", ""))) if diagram.get("png") else None
         if png and png.exists():
@@ -1440,23 +1414,15 @@ class _LitmusPreviewDialog:
             self._diagram_failed("this preview case has no case IR to draw")
             return
 
+        self.diagram_rendering = True
         self.diagram_status.setText("Rendering diagram on demand...")
         self.diagram_progress.show()
-        thread = self.QtCore.QThread(self.dialog)
-        worker = self.diagram_worker_class(self.item)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self.diagram_receiver.handle_finished)
-        worker.failed.connect(self.diagram_receiver.handle_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(self._diagram_thread_finished)
-        thread.finished.connect(thread.deleteLater)
-        self.diagram_thread = thread
-        self.diagram_worker = worker
-        thread.start()
+        try:
+            self._diagram_ready(materialize_preview_diagram(self.item))
+        except Exception as exc:
+            self._diagram_failed(str(exc))
+        finally:
+            self.diagram_rendering = False
 
     def _diagram_ready(self, result: object) -> None:
         if not isinstance(result, dict):
@@ -1489,16 +1455,6 @@ class _LitmusPreviewDialog:
         self.diagram_label.setPixmap(pixmap)
         self.diagram_label.setMinimumSize(pixmap.size())
         return True
-
-    def _diagram_thread_finished(self) -> None:
-        self.diagram_thread = None
-        self.diagram_worker = None
-
-    def _handle_dialog_closed(self, _result: int) -> None:
-        thread = self.diagram_thread
-        if thread is not None and thread.isRunning():
-            thread.quit()
-            thread.wait()
 
     def _text_view(self, text: str) -> Any:
         view = self.QtWidgets.QPlainTextEdit()
