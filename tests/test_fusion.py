@@ -57,24 +57,23 @@ def test_fence_i_does_not_order_cmo_data_effect() -> None:
     _no_formal_claim(result)
 
 
-def test_fusion_bare_vector_is_ordering_absent() -> None:
-    # Use a non-MP skeleton: MP vector cacheable now gets a real cycle verdict,
-    # while LB/SB vector stays an observation that fusion analyses.
+def test_formal_vector_is_not_routed_through_fusion() -> None:
+    # All six simple Vector skeletons now have a native Vector-aware solver;
+    # extension fusion must not replace that formal result.
     case = _case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="unit_load")
     result = analyze_fusion(case)
-    assert result.verdict == "ordering-absent"
-    vec = next(f for f in result.findings if f.feature.startswith("vector"))
-    assert not vec.covered
+    assert result.status == "not_applicable"
+    assert result.verdict == "prose-spec"
     _no_formal_claim(result)
 
 
 def test_fusion_indexed_ordered_vs_unordered_detail_differs() -> None:
     ordered = analyze_fusion(_case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="indexed_ordered_load"))
     unordered = analyze_fusion(_case(skeleton="LB", memory_event="vector_load", attribute="cacheable", vector="indexed_unordered_load"))
-    o = next(f for f in ordered.findings if f.feature.startswith("vector"))
-    u = next(f for f in unordered.findings if f.feature.startswith("vector"))
-    assert "keep program order" in o.detail
-    assert "no inter-element order" in u.detail.lower()
+    assert ordered.status == "not_applicable"
+    assert unordered.status == "not_applicable"
+    _no_formal_claim(ordered)
+    _no_formal_claim(unordered)
 
 
 def test_fusion_tlb_is_prose_spec() -> None:
@@ -106,7 +105,9 @@ def test_fusion_tlb_is_prose_spec() -> None:
 
 
 def test_fusion_citations_are_present() -> None:
-    case = _case(memory_event="vector_load", attribute="pbmt_nc", vector="unit_load")
+    # Nanhu excludes Vector + PBMT/NC mappings.  Exercise the same citation
+    # invariant with a supported Vector+CMO cacheable cross case instead.
+    case = _case(memory_event="vector_load", attribute="cacheable", vector="unit_load", cmo="flush")
     result = analyze_fusion(case)
     for finding in result.findings:
         assert finding.citation, f"{finding.feature} has no spec citation"

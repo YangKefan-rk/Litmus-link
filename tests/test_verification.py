@@ -7,6 +7,8 @@ import pytest
 
 from litmus_link.native_diy import DEFAULT_DIY_RELAX, DEFAULT_DIY_SAFE, DiyConfig
 from litmus_link.native_scalar import generate_native_diy
+from litmus_link.generator import generate_combinations
+from litmus_link.models import Combination
 from litmus_link.toolchain import tools_available
 from litmus_link.verification import verify_path
 
@@ -38,6 +40,43 @@ def test_verify_path_embedded_does_not_claim_unmodeled_upstream_file(tmp_path: P
     litmus.write_text("RISCV Upstream\n{}\n P0;\n nop;\nexists (1=1)\n", encoding="utf-8")
     report = verify_path(litmus, backend="embedded")
     assert report["counts"] == {"not_applicable": 1}
+
+
+def test_verify_path_dispatches_vector_metadata_to_vector_solver(tmp_path: Path) -> None:
+    combination = Combination(
+        "verify-vector",
+        "vector_mem",
+        "MP",
+        "vector_load",
+        "cacheable",
+        vector="indexed_ordered_load",
+        params={
+            "variant": "fence_rw_rw",
+            "sew": "e32",
+            "lmul": "m1",
+            "mask": "masked",
+            "tail": "ta_ma",
+            "vl": "vl4",
+            "footprint": "same_line",
+        },
+    )
+    report = generate_combinations("verify-vector", [combination], tmp_path)
+    assert report["generated_litmus"] == 1
+    litmus = next(tmp_path.glob("*.litmus"))
+
+    embedded = verify_path(litmus, backend="embedded")
+    result = embedded["results"][0]["result"]
+    assert result["status"] == "verified"
+    assert result["verdict"] == "forbidden"
+    assert result["backend"] == "vector-aware-embedded"
+    assert result["vector_ir"]["config"]["effective_vl"] == 4
+
+    external = verify_path(litmus, backend="herd7")
+    assert external["counts"] == {"not_applicable": 1}
+    crosscheck = verify_path(litmus, backend="crosscheck")
+    cross_result = crosscheck["results"][0]["result"]
+    assert cross_result["status"] == "verified"
+    assert cross_result["cross_check"] == "no_external_vector_model"
 
 
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")

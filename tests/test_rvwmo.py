@@ -1,4 +1,15 @@
-from litmus_link.litmus_ir import _mp_case, _lb_case, _sb_case, _wrc_case, _rwc_case, _iriw_case
+from litmus_link.litmus_ir import (
+    _co_case,
+    _iriw_case,
+    _isa2_case,
+    _lb_case,
+    _mp_case,
+    _r_case,
+    _rwc_case,
+    _s_case,
+    _sb_case,
+    _wrc_case,
+)
 from litmus_link.models import Combination
 from litmus_link.rvwmo import check_rvwmo
 
@@ -10,6 +21,10 @@ BUILDERS = {
     "WRC": _wrc_case,
     "RWC": _rwc_case,
     "IRIW": _iriw_case,
+    "ISA2": _isa2_case,
+    "R": _r_case,
+    "S": _s_case,
+    "Co": _co_case,
 }
 
 # Expected RVWMO verdict per (skeleton, variant): True == forbidden (bad
@@ -19,7 +34,7 @@ BUILDERS = {
 #
 # Key reasoning:
 #  - base: no ordering anywhere -> cycle broken -> allowed everywhere.
-#  - fence_rw_rw: full fence on every ordered hart -> forbidden, EXCEPT RWC.
+#  - fence_rw_rw: full fence on every different-location local edge -> forbidden.
 #  - fence_w_w_r_rw: writers get "fence w,w" (orders W->W only), readers get
 #    "fence r,rw" (orders R->anything). So it forbids MP/LB/WRC/IRIW but NOT SB,
 #    whose writer edges are W->R (R not in the w,w successor set).
@@ -27,19 +42,20 @@ BUILDERS = {
 #      addr_dep  -> rule 9: orders load->{load,store}
 #      ctrl_dep  -> rule 11: orders load->store ONLY
 #      ctrl_fencei == ctrl_dep (fence.i has no data-ordering power in RVWMO)
-#  - RWC: allowed for EVERY variant. Its declared closing edge is a coherence
-#    edge between writes to DIFFERENT addresses (co Wy->Wx). rf/co/fr are
-#    per-location relations, so that edge cannot exist and the cycle never
-#    closes -- no amount of intra-hart ordering can forbid it. (RWC is the
-#    classic test that distinguishes multi-copy-atomic models; RVWMO, being
-#    non-MCA, allows it.) herd7 confirms allowed for all six variants.
+#  - CoRR is forbidden even in the base variant because its local R->R edge is
+#    same-address po-loc. RWC uses the canonical five-edge topology, including
+#    the third hart's W->R edge; no synthetic cross-address co edge is used.
 EXPECTED = {
     "MP":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
     "LB":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": True,  "ctrl_fencei": True},
     "SB":   {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
     "WRC":  {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
-    "RWC":  {"base": False, "fence_rw_rw": False, "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "RWC":  {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
     "IRIW": {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": False, "ctrl_fencei": False},
+    "ISA2": {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "R":    {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": False, "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "S":    {"base": False, "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": False, "ctrl_dep": False, "ctrl_fencei": False},
+    "Co":   {"base": True,  "fence_rw_rw": True,  "fence_w_w_r_rw": True,  "addr_dep": True,  "ctrl_dep": True,  "ctrl_fencei": True},
 }
 
 VARIANTS = ["base", "fence_rw_rw", "fence_w_w_r_rw", "addr_dep", "ctrl_dep", "ctrl_fencei"]

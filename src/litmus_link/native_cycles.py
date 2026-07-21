@@ -2,12 +2,12 @@ from __future__ import annotations
 
 """Exhaustive finite-domain cycle generation for native scalar litmus tests."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import product
 from typing import Iterable, Iterator, Sequence
 
-from .native_edges import DIFFERENT, EXTERNAL, LOCAL, SAME, NativeEdge
+from .native_edges import DIFFERENT, EXTERNAL, LOCAL, SAME, WRITE, NativeEdge
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class NativeCycle:
             raise ValueError("a litmus cycle requires at least two edges")
         if self.annotations and len(self.annotations) != len(self.edges):
             raise ValueError("cycle annotations must contain one mode per event")
-        unknown = set(self.annotations) - {"P", "Aq", "Rl", "AR"}
+        unknown = set(self.annotations) - {"P", "AMO", "Aq", "Rl", "AR"}
         if unknown:
             raise ValueError(f"unknown event annotations: {', '.join(sorted(unknown))}")
 
@@ -114,6 +114,8 @@ def validate_cycle(
         return CycleDecision(False, "hart_constraint_conflict")
     if not _constraints_satisfiable(edges, scope=False):
         return CycleDecision(False, "location_constraint_conflict")
+    if not _coherence_constraints_satisfiable(edges):
+        return CycleDecision(False, "coherence_constraint_cycle")
     components = _process_components(edges)
     nprocs = len(components)
     if max_procs is not None:
@@ -251,6 +253,78 @@ def _constraints_satisfiable(edges: Sequence[NativeEdge], *, scope: bool) -> boo
     owner = {vertex: index for index, component in enumerate(components) for vertex in component}
     for index, edge in enumerate(edges):
         if different_when(edge) and owner[index] == owner[(index + 1) % len(edges)]:
+            return False
+    return True
+
+
+def _coherence_constraints_satisfiable(edges: Sequence[NativeEdge]) -> bool:
+    """Check that the cycle describes at least one coherent execution.
+
+    A relation cycle is only lowerable when its explicit ``co`` edges and the
+    ``co`` constraints implied by ``rf;fr`` can be extended to a strict total
+    write order for each location.  Hart/location equality alone does not
+    catch impossible shapes such as ``Fre Wsi Rfe``: its read observes the
+    second write, while ``fr`` and ``Wsi`` require both opposite write orders.
+    """
+    directions = tuple(edge.src for edge in edges)
+    components = _components(edges, equal_when=lambda edge: edge.location == SAME)
+    locations = {
+        vertex: location
+        for location, component in enumerate(sorted(components, key=min))
+        for vertex in component
+    }
+    rf_source: dict[int, int] = {}
+    constraints: dict[int, set[int]] = defaultdict(set)
+    indegree: dict[int, int] = defaultdict(int)
+
+    def add_constraint(before: int, after: int) -> bool:
+        if before == after:
+            return False
+        if directions[before] != WRITE or directions[after] != WRITE:
+            return False
+        if locations[before] != locations[after]:
+            return False
+        if after not in constraints[before]:
+            constraints[before].add(after)
+            indegree[after] += 1
+        return True
+
+    for vertex, edge in enumerate(edges):
+        target = (vertex + 1) % len(edges)
+        if edge.relation == "rf":
+            previous = rf_source.get(target)
+            if previous is not None and previous != vertex:
+                return False
+            rf_source[target] = vertex
+        elif edge.relation == "co" and not add_constraint(vertex, target):
+            return False
+
+    for vertex, edge in enumerate(edges):
+        if edge.relation != "fr":
+            continue
+        source = rf_source.get(vertex)
+        if source is None:
+            # The read observes the initial write, which is before every
+            # explicit write and therefore adds no ordering among cycle events.
+            continue
+        target = (vertex + 1) % len(edges)
+        if not add_constraint(source, target):
+            return False
+
+    writes = [vertex for vertex, direction in enumerate(directions) if direction == WRITE]
+    for location in sorted(set(locations.values())):
+        location_writes = [vertex for vertex in writes if locations[vertex] == location]
+        ready = sorted(vertex for vertex in location_writes if indegree[vertex] == 0)
+        visited = 0
+        while ready:
+            vertex = ready.pop(0)
+            visited += 1
+            for target in sorted(constraints.get(vertex, ())):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+                    ready.sort()
+        if visited != len(location_writes):
             return False
     return True
 

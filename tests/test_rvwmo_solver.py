@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from litmus_link.litmus_ir import LitmusCaseIR
-from litmus_link.memory_layout import MemoryLayoutConfig
+from litmus_link.memory_layout import MemoryLayoutConfig, expand_memory_layouts
 from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_diy import DEFAULT_DIY_RELAX, DEFAULT_DIY_SAFE, DiyConfig, enumerate_diy_cycles
 from litmus_link.native_edges import edge_by_label
@@ -104,6 +104,21 @@ def test_byte_level_no_mag_allows_a_torn_read_without_sync() -> None:
     }
     assert source_by_read["v1.b0"] == "v0.b0"
     assert source_by_read["v1.b1"].startswith("init:")
+
+
+def test_mixed_size_atomic_is_not_claimed_verified_by_embedded_solver() -> None:
+    layout = next(
+        item
+        for item in expand_memory_layouts(
+            ("atomic_mixed",),
+            atomic_overlaps=("partial_overlap",),
+            event_count=4,
+        )
+    )
+    case = lower_native_cycle(_case(["Rfe", "PodRR", "Fre", "PodWW"]).cycle, memory_layout=layout)
+    verdict = solve_rvwmo(case.case_ir)
+    assert verdict.status == "not_applicable"
+    assert "mixed-size atomic" in verdict.reason
 
 
 def test_memory_access_round_trips_through_case_ir_json() -> None:

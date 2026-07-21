@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional
 
 if TYPE_CHECKING:
     from .litmus_ir import LitmusCaseIR
-
-
-MAX_GENERATED_NAME_LEN = 180
 
 
 GENERATED = "generated"
@@ -27,16 +22,6 @@ DECISION_STATUSES = {
 }
 
 
-def sanitize_token(value: str) -> str:
-    allowed = []
-    for char in value:
-        if char.isalnum() or char in {"_", "+", ".", "-"}:
-            allowed.append(char)
-        else:
-            allowed.append("_")
-    return "".join(allowed).strip("_") or "x"
-
-
 @dataclass(frozen=True)
 class Combination:
     profile: str
@@ -51,23 +36,9 @@ class Combination:
 
     @property
     def name(self) -> str:
-        tokens = [
-            "LL",
-            self.category,
-            self.skeleton,
-            self.memory_event,
-            self.attribute,
-            self.tlb,
-            self.cmo,
-            self.vector,
-        ]
-        for key, value in sorted(self.params.items()):
-            tokens.append(f"{sanitize_token(str(key))}-{sanitize_token(str(value))}")
-        name = sanitize_token("_".join(tokens))
-        if len(name) <= MAX_GENERATED_NAME_LEN:
-            return name
-        digest = hashlib.sha1(json.dumps(dict(self.params), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
-        return sanitize_token("_".join(tokens[:8] + ["params", digest]))
+        from .naming import combination_name
+
+        return combination_name(self)
 
     def axes(self) -> Dict[str, str]:
         return {

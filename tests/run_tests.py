@@ -58,14 +58,16 @@ def test_generation() -> None:
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
             check(full[key] == baseline[key], f"full-cross audit changed from baseline for {key}")
         rows, vector = audit_profile("vector_mem")
-        check(rows and vector["excluded_illegal"] > 0, "vector profile should include illegal exclusions")
-        check(vector["hand_required"] > 0, "vector profile should include HAND cases")
+        check(rows and vector["generated"] == 677520, "vector profile should cover all formal endpoints and configurations")
+        check(vector["generated_litmus"] == 2032560, "vector profile should expand three ordering variants per combination")
+        check(vector["excluded_illegal"] == 0, "vector profile should not include illegal memory types")
+        check(vector["excluded_unsupported"] == 0, "vector profile should not include unsupported memory types")
         stress = audit_summary("stress-large", profile_combinations("stress-large"))
         baseline = json.loads(Path("tests/baselines/stress-large.json").read_text())
         check(stress == baseline, "stress-large audit changed from baseline")
         summary_dir = root / "summary"
         summary = write_audit("stress-large", summary_dir, summary_only=True)
-        check(summary["total_combinations"] == 250360, "summary-only stress-large count mismatch")
+        check(summary["total_combinations"] == 108600, "summary-only stress-large count mismatch")
         check(not (summary_dir / "covered.json").exists(), "summary-only audit should skip detail JSON")
         rule_file = root / "rules.json"
         rule_file.write_text(
@@ -127,7 +129,6 @@ def test_generation() -> None:
             vector="indexed_unordered_load",
             params={
                 "alias": "cacheable_nc",
-                "elem_order": "ordered_elements",
                 "footprint": "cross_page",
                 "lmul": "m1",
                 "mask": "masked",
@@ -138,7 +139,14 @@ def test_generation() -> None:
                 "vl": "vl2",
             },
         ).name
-        check(len(long_name) <= 180 and "params_" in long_name, "long parameterized name should be hashed")
+        check(
+            len(long_name) <= 112
+            and "+Cfg." in long_name
+            and "cacheable" not in long_name
+            and "no_tlb" not in long_name
+            and "no_cmo" not in long_name,
+            "parameterized name should use semantic tokens plus a compact config id",
+        )
         check("MP" in scalar_catalog()["presets"], "scalar preset catalog missing MP")
         if tools_available():
             scalar_report = generate_scalar_cross(

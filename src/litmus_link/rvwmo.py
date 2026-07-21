@@ -6,7 +6,7 @@ herd7 is the reference oracle for RISC-V's RVWMO model, but it is not always
 installed and it cannot reason about the vector/CMO/PBMT/TLB fusion scenarios
 this project also generates. This module is a small, faithful checker for the
 *pure scalar* RVWMO cases the IR builds as canonical dependency cycles
-(MP/LB/SB/WRC/RWC/IRIW and their ordering variants).
+(MP/LB/SB/WRC/RWC/IRIW/ISA2/R/S/CoRR and their ordering variants).
 
 Principle
 ---------
@@ -109,10 +109,8 @@ def check_rvwmo(case_ir: LitmusCaseIR) -> RvwmoResult:
             judgements.append(EdgeJudgement(relation.src, relation.dst, "po", preserved, rule, detail))
         else:
             # rf/co/fr are PER-LOCATION relations. A communication edge between
-            # two DIFFERENT addresses cannot exist (e.g. RWC's declared co
-            # Wy->Wx spans y and x), so it does NOT close the cycle. Trusting it
-            # blindly is what made the native checker over-forbid RWC, which
-            # RVWMO actually allows. Treat a cross-address comm edge as broken.
+            # two DIFFERENT addresses cannot exist, so it does NOT close a
+            # cycle. Treat any malformed cross-address comm edge as broken.
             a = events.get(relation.src)
             b = events.get(relation.dst)
             same_loc = (
@@ -253,4 +251,3 @@ def _ty_label(event: LitmusEvent) -> str:
 
 def _has_role(events: list[LitmusEvent], role: str) -> bool:
     return any(event.role == role for event in events)
-

@@ -35,7 +35,6 @@ VECTOR_FORMS = {
     "unit_load", "unit_store", "strided_load", "strided_store",
     "indexed_ordered_load", "indexed_unordered_load",
     "indexed_ordered_store", "indexed_unordered_store",
-    "segment_load", "segment_store", "fof_load", "fof_segment_load",
 }
 CMO_FORMS = {"clean", "flush", "inval", "zero"}
 ATTRIBUTES = {"cacheable", "pbmt_nc", "nc_alias", "cacheable_nc_alias"}
@@ -255,10 +254,6 @@ def _vector_detail(vector_form: str, covered: bool) -> str:
         "indexed_ordered_store": "Ordered-indexed: element accesses keep program order among themselves.",
         "indexed_unordered_load": "Unordered-indexed: no inter-element order is guaranteed.",
         "indexed_unordered_store": "Unordered-indexed: no inter-element order is guaranteed.",
-        "fof_load": "Fault-only-first: only the first element may fault; later elements are speculative.",
-        "fof_segment_load": "Fault-only-first segment load: only the first segment may fault.",
-        "segment_load": "Segment: each field is a separate element access.",
-        "segment_store": "Segment: each field is a separate element access.",
     }
     base = notes.get(vector_form, "Vector element accesses each obey RVWMO as scalar accesses.")
     order = "A FENCE orders these element accesses against other harts' accesses." if covered else "No FENCE present; element accesses may reorder relative to the observer."
@@ -271,4 +266,3 @@ def _cmo_detail(wrapped: bool, trailing: bool) -> str:
     if trailing:
         return "A trailing FENCE orders the CBO effect before the observation, though it is not the full fence;cbo;fence wrap."
     return "No FENCE orders the CBO; its effect may reorder relative to the observer (weak outcome permitted)."
-

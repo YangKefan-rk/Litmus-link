@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fractions import Fraction
 from itertools import chain, product
 from typing import Any, Dict, Iterable, List, Mapping
 
@@ -18,6 +19,50 @@ HAND_CATEGORIES = [
 
 SKELETONS = ["MP", "LB", "SB", "WRC", "RWC", "IRIW", "ISA2", "R", "S", "Co"]
 
+FORMAL_VECTOR_SKELETONS = list(SKELETONS)
+VECTOR_ENDPOINTS = {
+    "MP": {
+        "load": ["p1_ry", "p1_rx"],
+        "store": ["p0_wx", "p0_wy"],
+    },
+    "LB": {
+        "load": ["p0_rx", "p1_ry"],
+        "store": ["p0_wy", "p1_wx"],
+    },
+    "SB": {
+        "load": ["p0_ry", "p1_rx"],
+        "store": ["p0_wx", "p1_wy"],
+    },
+    "WRC": {
+        "load": ["p1_rx", "p2_ry", "p2_rx"],
+        "store": ["p0_wx", "p1_wy"],
+    },
+    "RWC": {
+        "load": ["p1_rx", "p1_ry", "p2_rx"],
+        "store": ["p0_wx", "p2_wy"],
+    },
+    "IRIW": {
+        "load": ["p2_rx", "p2_ry", "p3_ry", "p3_rx"],
+        "store": ["p0_wx", "p1_wy"],
+    },
+    "ISA2": {
+        "load": ["p1_ry", "p2_rz", "p2_rx"],
+        "store": ["p0_wx", "p0_wy", "p1_wz"],
+    },
+    "R": {
+        "load": ["p1_rx"],
+        "store": ["p0_wx", "p0_wy", "p1_wy"],
+    },
+    "S": {
+        "load": ["p1_rx"],
+        "store": ["p0_wy", "p0_wx", "p1_wy"],
+    },
+    "Co": {
+        "load": ["p1_rx_new", "p1_rx_old"],
+        "store": ["p0_wx"],
+    },
+}
+
 VECTOR_OPS = [
     "unit_load",
     "unit_store",
@@ -27,6 +72,12 @@ VECTOR_OPS = [
     "indexed_unordered_load",
     "indexed_ordered_store",
     "indexed_unordered_store",
+]
+
+# Known RVV forms deliberately outside the first vector-aware solver scope.
+# They are not exposed by profiles/GUI, but rules recognize them so old rule
+# payloads receive an explicit unsupported decision instead of a fake verdict.
+DEFERRED_VECTOR_OPS = [
     "segment_load",
     "segment_store",
     "fof_load",
@@ -40,6 +91,11 @@ ATTRIBUTES = [
     "nc_alias",
     "cacheable_nc_alias",
 ]
+
+# Nanhu's supported vector-memory target domain.  PBMT/IO/NC alias mappings
+# remain available to scalar, CMO, and VM profiles, but not to vector memory.
+NANHU_VECTOR_ATTRIBUTES = ["cacheable"]
+NANHU_VLEN_BITS = 128
 
 CMO_OPS = [
     "clean",
@@ -61,7 +117,7 @@ TLB_OPS = [
 PROFILE_DESCRIPTIONS: Dict[str, str] = {
     "smoke": "Small generated corpus used by make smoke and README examples.",
     "rvwmo_base": "Small in-process scalar IR profile for regression tests; use 'scalar cross/enumerate' for official herdtools generation.",
-    "vector_mem": "Vector memory operations crossed with PBMT/cacheability attributes.",
+    "vector_mem": "Legacy one-endpoint Vector profile retained for rule compatibility; the Qt Vector workflow uses multi-endpoint relation cycles.",
     "cmo_pbmt": "Zicbom/Zicboz CMO operations crossed with PBMT/cacheability attributes.",
     "vm_tlb": "RISC-V page-table, PBMT, and sfence.vma scenarios, mostly HAND-required.",
     "full-cross": "Representative CMO/PBMT/Vector/TLB cross-product audit domain.",
@@ -70,12 +126,67 @@ PROFILE_DESCRIPTIONS: Dict[str, str] = {
 }
 
 VECTOR_WIDTHS = ["e8", "e16", "e32", "e64"]
-VECTOR_LMULS = ["mf2", "m1", "m2", "m4"]
+VECTOR_INDEX_EEWS = ["ei8", "ei16", "ei32", "ei64"]
+VECTOR_LMULS = ["mf8", "mf4", "mf2", "m1", "m2", "m4", "m8"]
+VECTOR_LMUL_FACTORS = {
+    "mf8": Fraction(1, 8),
+    "mf4": Fraction(1, 4),
+    "mf2": Fraction(1, 2),
+    "m1": Fraction(1, 1),
+    "m2": Fraction(2, 1),
+    "m4": Fraction(4, 1),
+    "m8": Fraction(8, 1),
+}
 VECTOR_MASKS = ["unmasked", "masked"]
 VECTOR_TAILS = ["ta_ma", "ta_mu", "tu_ma", "tu_mu"]
 VECTOR_FOOTPRINTS = ["same_line", "cross_line", "cross_page", "misalign", "partial_overlap"]
-VECTOR_LENGTHS = ["vl1", "vl2", "vlmax", "vl_random"]
-ELEMENT_ORDERS = ["single_event", "ordered_elements", "unordered_elements"]
+# The immediate form of vsetivli covers 1/2/4/8/16.  32 and 64 use an
+# initialized AVL register and are included because they are important
+# cache-line boundary cases for e8/e16/e32.  vlmax remains a separate
+# architectural setting (vsetvli with rs1=x0).
+VECTOR_LENGTHS = ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
+
+
+def vector_vlmax(sew: str, lmul: str) -> int | None:
+    if sew not in VECTOR_WIDTHS or lmul not in VECTOR_LMUL_FACTORS:
+        return None
+    capacity = Fraction(NANHU_VLEN_BITS, int(sew[1:])) * VECTOR_LMUL_FACTORS[lmul]
+    if capacity.denominator != 1 or capacity < 1:
+        return None
+    return int(capacity)
+
+
+def vector_effective_vl(sew: str, lmul: str, vl: str) -> int | None:
+    vlmax = vector_vlmax(sew, lmul)
+    if vlmax is None:
+        return None
+    if vl == "vlmax":
+        return vlmax
+    if vl in VECTOR_LENGTHS and vl.startswith("vl") and vl[2:].isdigit():
+        return min(int(vl[2:]), vlmax)
+    return None
+
+
+def vector_same_line_footprint(
+    vector: str,
+    sew: str,
+    lmul: str,
+    mask: str,
+    vl: str,
+) -> bool:
+    effective_vl = vector_effective_vl(sew, lmul, vl)
+    if effective_vl is None or mask not in VECTOR_MASKS:
+        return False
+    active = [
+        index
+        for index in range(effective_vl)
+        if mask == "unmasked" or index % 2 == 0
+    ]
+    if not active:
+        return False
+    element_bytes = int(sew[1:]) // 8
+    stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
+    return max(active) * stride + element_bytes <= 64
 
 CMO_SYNC_SEQUENCES = ["none", "pre_fence", "post_fence", "full_alias_sync", "fence_i_after"]
 VM_CONTEXTS = ["bare", "sv39", "sv39_asid", "sv39_global", "satp_switch"]
@@ -92,21 +203,20 @@ STRESSORS = [
 ]
 LARGE_STRESSORS = ["none", "store_buffer_full", "load_queue_replay"]
 STRESS_VECTOR_CONFIGS = [
-    {"sew": sew, "lmul": lmul, "mask": mask, "tail": tail, "vl": vl, "elem_order": order}
-    for sew, lmul, mask, tail, vl, order in product(
+    {"sew": sew, "lmul": lmul, "mask": mask, "tail": tail, "vl": vl}
+    for sew, lmul, mask, tail, vl in product(
         VECTOR_WIDTHS,
         ["m1", "m4"],
         VECTOR_MASKS,
         ["ta_ma", "tu_mu"],
         ["vl1", "vlmax"],
-        ["single_event", "unordered_elements"],
     )
 ]
 STRESS_CROSS_VECTOR_CONFIGS = [
-    {"sew": "e8", "lmul": "m1", "mask": "unmasked", "tail": "ta_ma", "vl": "vl1", "elem_order": "single_event"},
-    {"sew": "e16", "lmul": "m1", "mask": "masked", "tail": "ta_mu", "vl": "vl2", "elem_order": "ordered_elements"},
-    {"sew": "e32", "lmul": "m2", "mask": "unmasked", "tail": "tu_ma", "vl": "vlmax", "elem_order": "unordered_elements"},
-    {"sew": "e64", "lmul": "m4", "mask": "masked", "tail": "tu_mu", "vl": "vl_random", "elem_order": "unordered_elements"},
+    {"sew": "e8", "lmul": "m1", "mask": "unmasked", "tail": "ta_ma", "vl": "vl1"},
+    {"sew": "e16", "lmul": "m1", "mask": "masked", "tail": "ta_mu", "vl": "vl2"},
+    {"sew": "e32", "lmul": "m2", "mask": "unmasked", "tail": "tu_ma", "vl": "vlmax"},
+    {"sew": "e64", "lmul": "m4", "mask": "masked", "tail": "tu_mu", "vl": "vl4"},
 ]
 
 
@@ -150,11 +260,11 @@ def _smoke() -> List[Combination]:
         Combination("smoke", "rvwmo_base", "MP", "scalar_pair", "cacheable"),
         Combination("smoke", "pbmt_nc", "MP", "scalar_pair", "pbmt_nc"),
         Combination("smoke", "vector_mem", "MP", "vector_load", "cacheable", vector="unit_load"),
-        Combination("smoke", "vector_mem", "LB", "vector_store", "pbmt_nc", vector="unit_store"),
-        Combination("smoke", "vector_mem", "MP", "vector_load", "pbmt_nc", vector="fof_load"),
+        Combination("smoke", "vector_mem", "LB", "vector_store", "cacheable", vector="unit_store"),
+        Combination("smoke", "vector_mem", "MP", "vector_load", "cacheable", vector="indexed_ordered_load"),
         Combination("smoke", "cmo", "MP", "cmo", "cacheable", cmo="flush"),
         Combination("smoke", "cmo", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params=_params(sync="full_alias_sync")),
-        Combination("smoke", "cross", "MP", "vector_store", "cacheable_nc_alias", cmo="flush", vector="unit_store", params=_params(footprint="cross_page", sync="full_alias_sync")),
+        Combination("smoke", "cross", "MP", "vector_store", "cacheable", cmo="flush", vector="unit_store", params=_params(footprint="cross_page")),
     ]
 
 
@@ -163,10 +273,76 @@ def _rvwmo_base(profile: str) -> List[Combination]:
 
 
 def _vector_mem(profile: str) -> List[Combination]:
+    return vector_combinations(profile)
+
+
+def vector_combinations(
+    profile: str,
+    *,
+    skeletons: Iterable[str] = FORMAL_VECTOR_SKELETONS,
+    vectors: Iterable[str] = VECTOR_OPS,
+    widths: Iterable[str] = VECTOR_WIDTHS,
+    lmuls: Iterable[str] = VECTOR_LMULS,
+    masks: Iterable[str] = VECTOR_MASKS,
+    tails: Iterable[str] = VECTOR_TAILS,
+    lengths: Iterable[str] = VECTOR_LENGTHS,
+    index_eews: Iterable[str] = VECTOR_INDEX_EEWS,
+    endpoint_scope: str = "all",
+) -> List[Combination]:
+    """Build the canonical formal Vector domain, optionally with GUI filters."""
+    if endpoint_scope not in {"all", "first"}:
+        raise ValueError("endpoint_scope must be 'all' or 'first'")
+    skeletons = tuple(skeletons)
+    vectors = tuple(vectors)
+    widths = tuple(widths)
+    lmuls = tuple(lmuls)
+    masks = tuple(masks)
+    tails = tuple(tails)
+    lengths = tuple(lengths)
+    index_eews = tuple(index_eews)
     combos = []
-    for vector, attribute in product(VECTOR_OPS, ATTRIBUTES):
-        memory_event = "vector_store" if vector.endswith("store") else "vector_load"
-        combos.append(Combination(profile, "vector_mem", "MP", memory_event, attribute, vector=vector))
+    for skeleton, vector, sew, lmul, mask, tail, vl in product(
+        skeletons,
+        vectors,
+        widths,
+        lmuls,
+        masks,
+        tails,
+        lengths,
+    ):
+        if vector_vlmax(sew, lmul) is None:
+            continue
+        if not vector_same_line_footprint(vector, sew, lmul, mask, vl):
+            continue
+        endpoint_kind = "store" if vector.endswith("store") else "load"
+        memory_event = f"vector_{endpoint_kind}"
+        selected_index_eews = index_eews if "indexed" in vector else [None]
+        endpoints = VECTOR_ENDPOINTS[skeleton][endpoint_kind]
+        if endpoint_scope == "first":
+            endpoints = endpoints[:1]
+        for index_eew, endpoint in product(selected_index_eews, endpoints):
+            params = dict(
+                sew=sew,
+                lmul=lmul,
+                mask=mask,
+                tail=tail,
+                footprint="same_line",
+                vl=vl,
+                vector_event=endpoint,
+            )
+            if index_eew is not None:
+                params["index_eew"] = index_eew
+            combos.append(
+                Combination(
+                    profile,
+                    "vector_mem",
+                    skeleton,
+                    memory_event,
+                    NANHU_VECTOR_ATTRIBUTES[0],
+                    vector=vector,
+                    params=_params(**params),
+                )
+            )
     return combos
 
 
@@ -190,11 +366,8 @@ def _cross(profile: str) -> List[Combination]:
         Combination(profile, "cross", "MP", "cmo", "pbmt_nc", cmo="flush"),
         Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", cmo="flush", params=_params(sync="full_alias_sync")),
         Combination(profile, "cross", "MP", "cmo", "cacheable_nc_alias", tlb="pte_remap", cmo="flush", params=_params(sync="full_alias_sync")),
-        Combination(profile, "cross", "MP", "vector_load", "pbmt_nc", tlb="pte_remap", vector="unit_load", params=_params(footprint="cross_page")),
         Combination(profile, "cross", "MP", "vector_load", "cacheable", cmo="flush", vector="unit_load", params=_params(footprint="cross_page")),
-        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", cmo="flush", vector="unit_load", params=_params(footprint="cross_page", sync="full_alias_sync")),
-        Combination(profile, "cross", "MP", "vector_load", "cacheable_nc_alias", tlb="pte_remap", cmo="flush", vector="unit_load", params=_params(footprint="cross_page", sync="full_alias_sync")),
-        Combination(profile, "cross", "MP", "vector_load", "pbmt_io", vector="fof_load"),
+        Combination(profile, "cross", "MP", "vector_load", "cacheable", tlb="pte_remap", vector="unit_load", params=_params(footprint="cross_page")),
         Combination(profile, "cross", "MP", "cmo", "cacheable", tlb="permission_fault", cmo="flush"),
         Combination(profile, "cross", "MP", "ifetch", "cacheable", tlb="remote_sfence", cmo="flush", params=_params(sync="fence_i_after")),
     ]
@@ -247,7 +420,7 @@ def _stress_vector(
     configs: Iterable[Mapping[str, str]] = STRESS_VECTOR_CONFIGS,
     footprints: Iterable[str] = VECTOR_FOOTPRINTS,
 ) -> Iterable[Combination]:
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
+    attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, attribute, config, footprint, stressor in product(
         SKELETONS,
         VECTOR_OPS,
@@ -332,9 +505,9 @@ def _stress_vector_cmo_pbmt(
     stressors: Iterable[str] = ("none", "store_buffer_full"),
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS,
 ) -> Iterable[Combination]:
-    vectors = ["unit_load", "unit_store", "strided_load", "strided_store", "indexed_ordered_load", "indexed_unordered_load", "segment_load", "segment_store", "fof_load"]
+    vectors = list(VECTOR_OPS)
     cmos = ["clean", "flush", "inval", "zero"]
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
+    attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, cmo, attribute, config, footprint, sync, alias, stressor in product(
         SKELETONS,
         vectors,
@@ -365,8 +538,8 @@ def _stress_vector_tlb(
     stressors: Iterable[str] = ("none", "load_queue_replay"),
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS[:3],
 ) -> Iterable[Combination]:
-    vectors = ["unit_load", "unit_store", "strided_load", "indexed_ordered_load", "indexed_unordered_load", "fof_load"]
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
+    vectors = list(VECTOR_OPS)
+    attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, tlb, attribute, config, footprint, vm, shootdown, pte_state, stressor in product(
         SKELETONS,
         vectors,
@@ -424,10 +597,13 @@ def _stress_cmo_tlb(
 
 
 def _stress_quad_cross(profile: str, configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS[:2]) -> Iterable[Combination]:
-    vectors = ["unit_load", "unit_store", "indexed_ordered_load", "indexed_unordered_store", "segment_load"]
+    vectors = ["unit_load", "unit_store", "indexed_ordered_load", "indexed_unordered_store"]
     cmos = ["clean", "flush", "zero"]
     tlbs = ["remote_sfence", "pte_remap", "permission_fault", "ad_update", "satp_switch"]
-    attributes = ["cacheable", "pbmt_nc", "pbmt_io", "cacheable_nc_alias"]
+    # The vector operation itself is only generated on a cacheable mapping in
+    # the Nanhu profile.  PBMT/IO coverage remains in _stress_cmo_tlb, where
+    # the accesses are scalar/CMO/VM operations rather than vector memory.
+    attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, cmo, tlb, attribute, config, footprint, sync, vm, shootdown, pte_state, alias in product(
         ["MP", "LB", "SB", "WRC", "IRIW"],
         vectors,

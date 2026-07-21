@@ -66,8 +66,13 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     expected_header = f"RISCV {meta.get('name', combination.name)}"
     if header != expected_header:
         errors.append(f"{litmus_path}: expected header {expected_header!r}, got {header!r}")
-    if not str(meta.get("name", "")).startswith(combination.name):
-        errors.append(f"{meta_path}: metadata name does not derive from combination")
+    case_ir = meta.get("case_ir") if isinstance(meta.get("case_ir"), dict) else {}
+    if case_ir and case_ir.get("combination_name") != combination.name:
+        errors.append(
+            f"{meta_path}: case IR combination_name does not match combination identity"
+        )
+    if litmus_path.stem != str(meta.get("name", "")):
+        errors.append(f"{litmus_path}: filename does not match metadata name")
     if meta.get("legality_status") != GENERATED:
         errors.append(f"{meta_path}: generated corpus contains non-generated status")
     if decision.status != GENERATED:

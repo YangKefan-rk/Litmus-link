@@ -9,6 +9,7 @@ from pathlib import Path
 from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation
 from .rvwmo_solver import solve_rvwmo
 from .toolchain import ToolchainError, herd_judge
+from .vector_solver import is_vector_case, solve_vector_case
 
 
 class VerificationError(ValueError):
@@ -64,8 +65,9 @@ def verify_litmus_file(
         raise VerificationError(f"not a .litmus file: {litmus_path}")
     embedded = None
     external = None
+    case_ir = _load_case_ir(litmus_path)
+    vector_case = case_ir is not None and is_vector_case(case_ir)
     if selected in {"embedded", "crosscheck"}:
-        case_ir = _load_case_ir(litmus_path)
         if case_ir is None:
             embedded = {
                 "schema": "litmus-link.embedded-rvwmo.v1",
@@ -76,18 +78,50 @@ def verify_litmus_file(
                 "reason": "Embedded verification requires Litmus-link case_ir metadata.",
             }
         else:
-            embedded = solve_rvwmo(
-                case_ir,
-                max_candidates=max_candidates,
-                timeout_seconds=float(timeout),
-            ).to_json()
+            embedded = (
+                solve_vector_case(
+                    case_ir,
+                    max_candidates=max_candidates,
+                    timeout_seconds=float(timeout),
+                ).to_json()
+                if vector_case
+                else solve_rvwmo(
+                    case_ir,
+                    max_candidates=max_candidates,
+                    timeout_seconds=float(timeout),
+                ).to_json()
+            )
     if selected in {"herd7", "crosscheck"}:
-        external = _herd_result(litmus_path, timeout=timeout)
+        external = (
+            {
+                "schema": "litmus-link.herd7-verification.v1",
+                "status": "not_applicable",
+                "verdict": "unmodeled",
+                "allowed": None,
+                "backend": "herd7",
+                "model": "riscv.cat",
+                "reason": "Stock herd7/riscv.cat does not parse or model RVV memory instructions.",
+            }
+            if vector_case
+            else _herd_result(litmus_path, timeout=timeout)
+        )
     if selected == "embedded":
         return embedded or _missing_result("embedded")
     if selected == "herd7":
         return external or _missing_result("herd7")
     assert embedded is not None and external is not None
+    if vector_case:
+        return {
+            "schema": "litmus-link.verification.v1",
+            "status": embedded.get("status", "not_applicable"),
+            "verdict": embedded.get("verdict", "unmodeled"),
+            "allowed": embedded.get("allowed"),
+            "backend": "vector-aware-embedded",
+            "reason": "Vector-aware embedded result returned; no stock herd7 RVV model exists for cross-check.",
+            "cross_check": "no_external_vector_model",
+            "embedded": embedded,
+            "herd7": external,
+        }
     agree = (
         embedded.get("status") == "verified"
         and external.get("status") == "verified"

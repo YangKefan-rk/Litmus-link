@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .models import Combination
-from .profiles import ATTRIBUTES, CMO_OPS, HAND_CATEGORIES, SKELETONS, TLB_OPS, VECTOR_OPS
+from .profiles import (
+    ATTRIBUTES,
+    CMO_OPS,
+    DEFERRED_VECTOR_OPS,
+    HAND_CATEGORIES,
+    SKELETONS,
+    TLB_OPS,
+    VECTOR_OPS,
+)
 
 
 COMBINATION_FIELDS = {
@@ -50,7 +58,7 @@ KNOWN_VALUES = {
     "attribute": set(ATTRIBUTES),
     "tlb": {"no_tlb", *TLB_OPS},
     "cmo": {"no_cmo", *CMO_OPS},
-    "vector": {"none", *VECTOR_OPS},
+    "vector": {"none", *VECTOR_OPS, *DEFERRED_VECTOR_OPS},
 }
 
 DEFAULTS = {
@@ -279,9 +287,24 @@ def _reject_duplicates(combinations: Sequence[Combination]) -> None:
     seen = set()
     duplicates = []
     for combination in combinations:
-        if combination.name in seen:
+        identity = json.dumps(
+            {
+                "profile": combination.profile,
+                "category": combination.category,
+                "skeleton": combination.skeleton,
+                "memory_event": combination.memory_event,
+                "attribute": combination.attribute,
+                "tlb": combination.tlb,
+                "cmo": combination.cmo,
+                "vector": combination.vector,
+                "params": dict(combination.params),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if identity in seen:
             duplicates.append(combination.name)
-        seen.add(combination.name)
+        seen.add(identity)
     if duplicates:
         sample = ", ".join(sorted(set(duplicates))[:5])
         raise RuleFileError(f"rule file expands to duplicate generated names: {sample}")

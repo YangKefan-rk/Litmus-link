@@ -64,12 +64,13 @@ allocation, dependency lowering, `exists` construction, and file rendering.
 The current finite grammar covers external/internal `rf/fr/co`, different- and
 same-location `po`, all nonempty R/W fence predecessor/successor subsets,
 address/data/control/control+`fence.i` dependencies, and event annotations
-`P/Aq/Rl/AR`. Non-plain annotations lower to ISA-valid `amoor.w`/`amoswap.w`
-forms and declare the A extension; the generator does not emit pseudo
-`lw.aq`/`sw.rl` instructions.
+`P/AMO/Aq/Rl/AR`. `P` lowers to a plain load/store; `AMO` is a relaxed AMO
+without an aq/rl suffix; the remaining forms lower to ISA-valid
+`amoor.{h,w,d}`/`amoswap.{h,w,d}` variants with the selected ordering bits.
+The generator does not emit pseudo `lw.aq`/`sw.rl` instructions.
 
-The exact named-template domain currently contains 74,873,888 cases. MP alone
-contains 106,496 cases. These are finite-grammar counts, not a claim that the
+The exact named-template domain currently contains 284,286,625 cases. MP alone
+contains 260,000 cases with the full annotation set. These are finite-grammar counts, not a claim that the
 set of all possible programs is finite. Audit metadata records the selected
 grammar, base cycles, accepted cases, canonical duplicates, and every rejected
 constraint class.
@@ -124,12 +125,20 @@ silently approximated.
 ## Scalar Mixed-Size And Misaligned Accesses
 
 The native generator can expand every selected logical cycle over real scalar
-mixed-size and misaligned layouts. The current target model intentionally has
-one mode only: `byte_level_no_mag`. There is no MAG16/MAG32 option. Each
-misaligned load/store is expanded into byte sub-events for `rf/co/fr/po-loc`,
+mixed-size and misaligned layouts. The target model has no MAG16/MAG32 option.
+Ordinary misaligned load/store uses `byte_level_no_mag` and is expanded into
+byte sub-events for `rf/co/fr/po-loc`,
 while program order, dependencies, and fences are lifted from the parent
 instruction to all of its bytes. Torn observations are therefore permitted,
 but the split bytes cannot escape RVWMO ordering constraints.
+
+Both `mixed` and `atomic_mixed` are event-level products: every memory event
+gets an independent 16/32/64-bit choice, including repeated widths and every
+ordering of those choices. Uniform ordinary layouts are already covered by
+`misaligned`; uniform aligned atomic layouts are covered by `atomic-w16`,
+`atomic-w32`, and `atomic-w64`, so mixed modes keep only patterns containing at
+least two widths. `atomic_mixed` additionally expands `same_start` and
+`partial_overlap` while preserving natural alignment for every AMO.
 
 Generate MP with all homogeneous 16/32/64-bit misaligned widths, mixed-width
 partial overlaps, and within-16-B/cross-16-B/cross-64-B layouts:
@@ -156,10 +165,18 @@ litmus-link native templates --skeleton MP --annotation P \
 
 This domain contains only legal cacheable ordinary scalar loads/stores. It does
 not generate misaligned LR/SC/AMO, NC/IO fault cases, Vector misalignment, or
-exception/CSR checks. Non-plain `Aq/Rl/AR` AMO annotations are machine-counted
-as excluded when combined with a misaligned layout. The generated metadata
+exception/CSR checks. Non-plain `AMO/Aq/Rl/AR` AMO annotations are machine-counted
+as excluded when combined with a misaligned layout. Fixed-width aligned atomic
+layouts and `atomic_mixed` layouts additionally cover naturally aligned
+16/32/64-bit AMOs, same-start overlap, and partial overlap. A 16-bit AMO
+records `Zabha` in `requires`; mixed-size atomic cases are generated but marked
+manual-oracle-required because the embedded solver does not yet model their
+overlapping atomic footprint. The generated metadata
 records the exact byte range, boundary, `mag_bytes: null`, and
-`whole_access_atomic: false`.
+Ordinary no-MAG records `whole_access_atomic: false`; aligned atomic records
+`true`. Mixed-size atomic records `true` for each individual footprint, but
+their cross-width execution is marked `manual_oracle_required` until a solver
+with a mixed-size atomic model is available.
 
 External comparison requests `herd7 -variant mixed,unaligned`. Some herdtools7
 revisions, including the locally pinned RISC-V build, parse those variants but
@@ -184,16 +201,38 @@ litmus-link qt-gui --check
 
 The Qt window opens on the machine where the command runs. On a server, use X forwarding or a remote desktop session. The GUI does not open a network socket.
 
-The Qt GUI opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. `Generate the complete accepted domain` has no hidden file cap, while `Maximum preview rows` limits only the scrollable preview. Embedded RVWMO verification is enabled by default and works on a closed server; the GUI can instead use herd7 or require a cross-check. Actions run in the background and update the status bar, progress indicator, log, summary, and case-inspector tabs.
+The Qt window opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. The `Vector Litmus` page uses the same relation-cycle engine: every cycle endpoint independently selects scalar `P`, scalar `AMO/Aq/Rl/AR`, or a compatible RVV load/store. `Random preview cases` is a reproducible, coverage-stratified sample from the full finite domain, keyed by `Random seed`; it is not the first N Cartesian-product rows. The complete domain is counted and audited, but its potentially astronomical corpus is never generated accidentally: `Generate Files` writes the configured random sample. The browser uses a virtual table model, supports text/family/status/verdict filters, and does not allocate widgets or PNG images per case. `Preview Cases` is the fast unchecked path; `Verify Preview` runs the embedded model where it is applicable. Actions run in the background and update determinate progress whenever the generator has a finite work count.
+
+## Naming
+
+Generated names follow the upstream litmus convention of putting the relation
+family first and appending semantic modifiers with `+`. Scalar examples are
+`MP`, `MP+addr`, and `MP+fence.rw.rw`. Native relation names retain edge
+direction where it is needed to distinguish thread roles, for example
+`MP+po.RR+po.WW`. Relation-cycle Vector names decorate every cycle edge with
+the ISA form of its source and target endpoint, so instruction placement and
+dependency/fence topology remain visible. For example,
+`LB+DpAddrdWVle32M1VL1Vse32M1VL1+RfeVse32M1VL1AR+PodRWARVle32M1VL1+RfeVle32M1VL1Vle32M1VL1`
+contains an address-dependency edge, an `AR` scalar AMO, and three Vector
+endpoints in one relation ring. Vector misalignment is encoded directly on the
+endpoint: `U16`, `X16`, and `X64` mean unaligned within 16 B, crossing 16 B,
+and crossing 64 B respectively. Existing one-endpoint `vector_mem` profile
+names are retained only for compatibility with older rule files.
+
+Default generation axes such as `cacheable`, `no_tlb`, and `no_cmo` are not
+part of a case name. Non-default architectural features such as `PBMT.NC`,
+`cbo.flush`, and `sfence.vma.remote` remain visible. Large stress-only axis
+sets use a short stable `Cfg.<id>` suffix; their complete values remain in the
+adjacent `.meta.json` and are never discarded.
 
 ## Large Profiles
 
-The small profiles are for smoke tests and targeted debugging. The large profiles are intended to cover the multicore stress space across RVWMO skeletons, Vector memory, CMO, PBMT/NC aliases, TLB/VM transitions, and microarchitecture pressure axes.
+The small profiles are for smoke tests and targeted debugging. The large profiles are intended to cover the multicore stress space across RVWMO skeletons, Vector memory, CMO, PBMT/NC aliases, TLB/VM transitions, and microarchitecture pressure axes. In the Nanhu target profile, Vector memory is restricted to cacheable mappings; PBMT/IO/NC-alias coverage remains in scalar, CMO, and VM paths.
 
-| Profile | Total combinations | Generated `.litmus` | HAND-required | Excluded illegal |
-| --- | ---: | ---: | ---: | ---: |
-| `stress-large` | 250,360 | 38,400 | 205,640 | 4,880 |
-| `stress-all` | 3,890,180 | 1,489,728 | 2,309,140 | 88,480 |
+| Profile | Total combinations | Generated `.litmus` | HAND-required | Excluded illegal | Excluded unsupported |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `stress-large` | 108,600 | 13,184 | 78,680 | 0 | 16,800 |
+| `stress-all` | 1,892,100 | 231,504 | 1,619,060 | 0 | 42,560 |
 
 Use `stress-large` as the practical large profile. Use `stress-all` only when you intentionally want the multi-million combination domain. Start with summary audit before generating files:
 
@@ -246,12 +285,29 @@ Verification is split by semantic scope:
   The embedded backend currently consumes Litmus-link `case_ir` metadata;
   arbitrary upstream `.litmus` files without that metadata must use the
   `herd7` backend.
-- **The simple MP vector-memory subset** can be judged by scalar element
-  lowering when the selected axes are exactly renderable by the current IR.
-  More complex Vector parameters such as cross-page footprints, masks, non-base
-  SEW/LMUL/VL, CMO, PBMT aliases, `FENCE.I`, and `SFENCE.VMA` interactions are
-  emitted as hardware-observation or prose-spec cases, not formal forbidden
-  claims.
+- **The Vector-aware embedded frontend** expands active RVV elements into an
+  explicit execution graph and reuses the RVWMO axiom engine. The supported
+  scope is unit-stride, strided, indexed-unordered, and indexed-ordered
+  loads/stores on cacheable memory, with `SEW`, `LMUL`, deterministic
+  `vl1/vl2/vl4/vl8/vl16/vl32/vl64/vlmax`, indexed `EEW=ei8/ei16/ei32/ei64`,
+  and an explicit even-element mask. Nanhu `VLEN=128` is
+  part of the model. Unordered siblings share one instruction-order position;
+  ordered-indexed siblings add preserved element-order PPO.
+  The legacy built-in `vector_mem` profile covers all ten named scalar skeletons,
+  every load/store endpoint, all 8 supported load/store forms, legal
+  `SEW`/`LMUL` pairs, all four indexed EEWs, `unmasked/masked`, and the finite
+  `vl` boundary domain above. Combinations
+  whose active footprint crosses 64B are excluded from this same-line formal
+  profile. The current domain also covers all four legal tail policies and
+  contains 677,520 combinations and 2,032,560 files after the three ordering
+  variants are expanded. The Qt `Vector Litmus` workflow supersedes that
+  one-endpoint profile with multi-endpoint relation-cycle generation.
+- **Vector is not cross-checked through a scalar twin.** Stock
+  `herd7/riscv.cat` does not parse/model RVV memory instructions, so a Vector
+  `herd7` request reports `not_applicable`. FOF/fault trimming, segment partial
+  completion, nonzero `vstart`/restart, whole-register transfer, complex
+  indexed aliases, PBMT/PMA, and Vector+CMO/TLB interactions remain outside the
+  formal solver and cannot produce a verified forbidden claim.
 - **Unrendered stress axes** are not counted as formal coverage. For example,
   `dep=data/aq/rl/aqrl` is reported as unsupported until a real instruction body
   exists for that relation shape.

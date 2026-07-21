@@ -7,7 +7,6 @@ existing litmus corpus.  The optional herd7 call is an independent model check
 performed only after Litmus-link has constructed the complete test source.
 """
 
-import hashlib
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -18,7 +17,8 @@ from typing import Callable, Iterable, Sequence
 
 from .diagram import render_diagram
 from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation, MemoryAccess
-from .memory_layout import ALIGNED_LAYOUT, MemoryLayoutConfig
+from .memory_layout import ALIGNED_LAYOUT, MemoryLayoutConfig, expand_memory_layouts
+from .naming import native_cycle_name
 from .native_cycles import (
     EnumerationReport,
     NativeCycle,
@@ -72,7 +72,7 @@ NATIVE_PRESETS: dict[str, NativePreset] = {
 }
 
 DEFAULT_NATIVE_MECHANISMS = ("po", "fence", "dependency")
-NATIVE_ANNOTATIONS = ("P", "Aq", "Rl", "AR")
+NATIVE_ANNOTATIONS = ("P", "AMO", "Aq", "Rl", "AR")
 
 
 @dataclass(frozen=True)
@@ -167,13 +167,25 @@ def native_template_audit(
     *,
     include_same: bool = True,
     annotations: Sequence[str] = ("P",),
+    memory_layouts: Sequence[MemoryLayoutConfig] = (ALIGNED_LAYOUT,),
 ) -> dict:
     cycles, base_audit = native_template_cycles(presets, mechanisms, include_same=include_same)
     selected_annotations = _validate_annotations(annotations)
+    selected_layouts = _validate_memory_layouts(memory_layouts)
+    annotated_count = _annotated_count(cycles, selected_annotations)
+    accepted, excluded_atomic = _memory_layout_count_for_cycles(
+        cycles, selected_annotations, selected_layouts
+    )
     audit = dict(base_audit)
     audit["annotations"] = list(selected_annotations)
     audit["base_cycles"] = len(cycles)
-    audit["accepted"] = _annotated_count(cycles, selected_annotations)
+    audit["annotated_cycles"] = annotated_count
+    audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["memory_layout_counts_by_cycle_size"] = _memory_layout_counts_by_cycle_size(
+        cycles, selected_layouts
+    )
+    audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
+    audit["accepted"] = accepted
     return audit
 
 
@@ -234,18 +246,28 @@ def lower_native_cycle(
     write_values, read_values, final_values, rf_source = _memory_values(cycle.edges, directions, locations)
     location_names = {index: _location_name(index) for index in sorted(set(locations))}
     event_ordinals: dict[int, int] = {}
-    for location in sorted(set(locations)):
-        for ordinal, vertex in enumerate(
-            vertex for vertex in range(nvertices) if locations[vertex] == location
-        ):
-            event_ordinals[vertex] = ordinal
+    if memory_layout.mode in {"mixed", "atomic_mixed"} and (
+        memory_layout.mode == "atomic_mixed"
+        or len(memory_layout.width_pattern) == nvertices
+    ):
+        # Mixed-size layouts are event-level combinations.  Indexing by
+        # location would silently reuse the first widths on every location and
+        # would make width patterns on larger cycles partially dead.  A
+        # concrete mixed layout has one width entry per cycle event.
+        event_ordinals = {vertex: vertex for vertex in range(nvertices)}
+    else:
+        for location in sorted(set(locations)):
+            for ordinal, vertex in enumerate(
+                vertex for vertex in range(nvertices) if locations[vertex] == location
+            ):
+                event_ordinals[vertex] = ordinal
     memory_accesses = {
         vertex: memory_layout.access_for(
             location_names[locations[vertex]], event_ordinals[vertex]
         )
         for vertex in range(nvertices)
     }
-    if memory_layout.is_aligned:
+    if memory_layout.is_aligned and not memory_layout.is_atomic_mixed:
         actual_write_values = write_values
         actual_read_values = read_values
         final_byte_values: dict[str, int] = {}
@@ -264,7 +286,7 @@ def lower_native_cycle(
     init_lines: list[str] = [
         (
             f"{location_names[index]}=0;"
-            if memory_layout.is_aligned
+            if memory_layout.is_aligned and not memory_layout.is_atomic_mixed
             else f"uint8_t {location_names[index]}[128];"
         )
         for index in sorted(location_names)
@@ -361,7 +383,7 @@ def lower_native_cycle(
         for vertex in range(nvertices)
         if directions[vertex] == READ
     ]
-    if memory_layout.is_aligned:
+    if memory_layout.is_aligned and not memory_layout.is_atomic_mixed:
         exists_terms.extend(
             f"{location_names[location]}={value}" for location, value in sorted(final_values.items())
         )
@@ -373,7 +395,11 @@ def lower_native_cycle(
         raise NativeGenerationError("native cycle has no observable read or final-memory outcome")
     exists = "(" + " /\\ ".join(exists_terms) + ")"
     base_name = _native_name(cycle)
-    name = base_name if memory_layout.is_aligned else f"{base_name}_{_safe_name(memory_layout.id)}"
+    name = (
+        base_name
+        if memory_layout.mode == "aligned"
+        else f"{base_name}_{_safe_name(memory_layout.id)}"
+    )
     cycle_text = " ".join(cycle.labels)
     case_ir = LitmusCaseIR(
         name=name,
@@ -386,8 +412,16 @@ def lower_native_cycle(
         harts=hart_events,
         relations=relations,
         exists=exists,
-        expected_outcome="solver_required",
-        model="rvwmo-herd7",
+        expected_outcome=(
+            "manual_oracle_required"
+            if memory_layout.is_atomic_mixed
+            else "solver_required"
+        ),
+        model=(
+            "rvwmo-mixed-size-atomic-observation"
+            if memory_layout.is_atomic_mixed
+            else "rvwmo-herd7"
+        ),
         description=(
             f"Native exhaustive scalar cycle ({cycle.family or 'unclassified'}), "
             f"memory layout {memory_layout.id}: {cycle_text}"
@@ -400,6 +434,7 @@ def lower_native_cycle(
             memory_layout.mode,
             memory_layout.boundary,
             "no-mag" if not memory_layout.is_aligned else "aligned",
+            *(["mixed-size-atomic"] if memory_layout.is_atomic_mixed else []),
         ],
     )
     litmus = _render_native_litmus(name, cycle_text, init_lines, instruction_rows, exists)
@@ -443,14 +478,17 @@ def generate_native_templates(
     selected_annotations = _validate_annotations(annotations)
     selected_layouts = _validate_memory_layouts(memory_layouts)
     annotated_count = _annotated_count(base_cycles, selected_annotations)
-    available, excluded_atomic = _memory_layout_count(
-        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    available, excluded_atomic = _memory_layout_count_for_cycles(
+        base_cycles, selected_annotations, selected_layouts
     )
     audit = dict(audit)
     audit["annotations"] = list(selected_annotations)
     audit["base_cycles"] = len(base_cycles)
     audit["annotated_cycles"] = annotated_count
     audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["memory_layout_counts_by_cycle_size"] = _memory_layout_counts_by_cycle_size(
+        base_cycles, selected_layouts
+    )
     audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
     audit["accepted"] = available
     return _write_native_cases(
@@ -514,11 +552,14 @@ def generate_native_relations(
     selected_annotations = _validate_annotations(annotations)
     selected_layouts = _validate_memory_layouts(memory_layouts)
     annotated_count = _annotated_count(base_cycles, selected_annotations)
-    available, excluded_atomic = _memory_layout_count(
-        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    available, excluded_atomic = _memory_layout_count_for_cycles(
+        base_cycles, selected_annotations, selected_layouts
     )
     audit["annotated_cycles"] = annotated_count
     audit["memory_layouts"] = [layout.to_json() for layout in selected_layouts]
+    audit["memory_layout_counts_by_cycle_size"] = _memory_layout_counts_by_cycle_size(
+        base_cycles, selected_layouts
+    )
     audit["excluded_misaligned_atomic_annotations"] = excluded_atomic
     audit["accepted"] = available
     return _write_native_cases(
@@ -553,8 +594,8 @@ def generate_native_diy(
     selected_annotations = _validate_annotations(annotations)
     selected_layouts = _validate_memory_layouts(memory_layouts)
     annotated_count = _annotated_count(base_cycles, selected_annotations)
-    available, excluded_atomic = _memory_layout_count(
-        len(base_cycles), annotated_count, selected_annotations, selected_layouts
+    available, excluded_atomic = _memory_layout_count_for_cycles(
+        base_cycles, selected_annotations, selected_layouts
     )
     audit = dict(audit)
     audit["annotations"] = list(selected_annotations)
@@ -618,7 +659,7 @@ def _write_native_cases(
             "schema": "litmus-link.native-scalar-meta.v1",
             "name": case.name,
             "architecture": "RISCV",
-            "requires": ["RV64I", *(["A"] if any(mode != "P" for mode in _cycle_annotations(case.cycle)) else [])],
+            "requires": _native_requires(case),
             "cycle": " ".join(case.cycle.labels),
             "exists": case.case_ir.exists,
             "nprocs": len(case.case_ir.harts),
@@ -675,7 +716,7 @@ def _cycles_with_layouts(
 ) -> Iterable[tuple[NativeCycle, MemoryLayoutConfig]]:
     for cycle in cycles:
         plain = all(annotation == "P" for annotation in _cycle_annotations(cycle))
-        for layout in memory_layouts:
+        for layout in _materialize_memory_layouts(cycle, memory_layouts):
             if layout.is_aligned or plain:
                 yield cycle, layout
 
@@ -689,22 +730,98 @@ def _validate_memory_layouts(
     return selected
 
 
-def _memory_layout_count(
-    base_cycle_count: int,
-    annotated_cycle_count: int,
+def _materialize_memory_layouts(
+    cycle: NativeCycle,
+    memory_layouts: Sequence[MemoryLayoutConfig],
+) -> tuple[MemoryLayoutConfig, ...]:
+    """Expand mixed-size widths for the actual number of cycle events.
+
+    The GUI/CLI layout list is a compact width-domain specification.  A
+    concrete test must still choose one width for every memory event.  The
+    previous implementation used a short repeating pattern, which produced
+    duplicate files for width positions that the cycle never reached.
+    """
+    concrete: list[MemoryLayoutConfig] = []
+    seen: set[str] = set()
+    mixed_domains: list[tuple[str, str, tuple[int, ...]]] = []
+    for layout in memory_layouts:
+        if layout.mode not in {"mixed", "atomic_mixed"}:
+            if layout.id not in seen:
+                seen.add(layout.id)
+                concrete.append(layout)
+            continue
+        domain = tuple(sorted(set(layout.width_pattern or (2, 4, 8))))
+        key = (layout.mode, layout.boundary, domain)
+        if layout.mode == "atomic_mixed":
+            key = (layout.mode, layout.overlap, domain)
+        if key not in mixed_domains:
+            mixed_domains.append(key)
+    for mode, boundary_or_overlap, domain in mixed_domains:
+        if mode == "atomic_mixed":
+            variants = expand_memory_layouts(
+                ("atomic_mixed",),
+                widths=domain,
+                atomic_overlaps=(boundary_or_overlap,),
+                event_count=cycle.size,
+            )
+        else:
+            variants = expand_memory_layouts(
+                ("mixed",),
+                widths=domain,
+                boundaries=(boundary_or_overlap,),
+                event_count=cycle.size,
+            )
+        for layout in variants:
+            if layout.id not in seen:
+                seen.add(layout.id)
+                concrete.append(layout)
+    return tuple(concrete)
+
+
+def _memory_layout_count_for_cycles(
+    cycles: Sequence[NativeCycle],
     annotations: Sequence[str],
     memory_layouts: Sequence[MemoryLayoutConfig],
 ) -> tuple[int, int]:
-    aligned = sum(layout.is_aligned for layout in memory_layouts)
-    misaligned = len(memory_layouts) - aligned
-    plain_cycles = base_cycle_count if "P" in annotations else 0
-    accepted = annotated_cycle_count * aligned + plain_cycles * misaligned
-    excluded_atomic = (annotated_cycle_count - plain_cycles) * misaligned
+    selected = _validate_annotations(annotations)
+    accepted = 0
+    excluded_atomic = 0
+    for cycle in cycles:
+        variants = _materialize_memory_layouts(cycle, memory_layouts)
+        aligned = sum(layout.is_aligned for layout in variants)
+        misaligned = len(variants) - aligned
+        annotated_for_cycle = sum(
+            1 for _ in annotated_native_cycles((cycle,), selected)
+        )
+        plain_for_cycle = 1 if "P" in selected else 0
+        accepted += annotated_for_cycle * aligned + plain_for_cycle * misaligned
+        excluded_atomic += (annotated_for_cycle - plain_for_cycle) * misaligned
     if accepted == 0:
         raise NativeGenerationError(
             "selected misaligned layouts require the ordinary P annotation"
         )
     return accepted, excluded_atomic
+
+
+def _memory_layout_counts_by_cycle_size(
+    cycles: Sequence[NativeCycle],
+    memory_layouts: Sequence[MemoryLayoutConfig],
+) -> dict[str, dict[str, int]]:
+    sizes: dict[int, dict[str, int]] = {}
+    for cycle in cycles:
+        if cycle.size in sizes:
+            continue
+        variants = _materialize_memory_layouts(cycle, memory_layouts)
+        counts = Counter(layout.mode for layout in variants)
+        sizes[cycle.size] = {
+            "cycle_events": cycle.size,
+            "concrete_layouts": len(variants),
+            **{f"mode_{mode}": count for mode, count in sorted(counts.items())},
+        }
+    return {
+        str(size): sizes[size]
+        for size in sorted(sizes)
+    }
 
 
 def _program_orders(edges: Sequence[NativeEdge], procs: Sequence[int]) -> list[list[int]]:
@@ -753,7 +870,9 @@ def _memory_values(
     indegree: dict[int, int] = defaultdict(int)
 
     def add_co(before: int, after: int) -> None:
-        if before == after or after in co_edges[before]:
+        if before == after:
+            raise NativeGenerationError("coherence constraint orders a write before itself")
+        if after in co_edges[before]:
             return
         if directions[before] != WRITE or directions[after] != WRITE:
             raise NativeGenerationError("coherence constraint does not connect two writes")
@@ -1008,6 +1127,21 @@ def _judge_native(
             "verdict": "unchecked",
             "reason": "RVWMO outcome checking disabled by the user",
         }
+    if any(
+        event.memory_access is not None
+        and event.memory_access.atomicity_model == "mixed_size_atomic"
+        for event in case.case_ir.events()
+    ):
+        return {
+            "schema": "litmus-link.native-solver.v1",
+            "status": "not_applicable",
+            "tool": "litmus-link-rvwmo",
+            "model": "riscv.cat+mixed-size-atomic-unmodeled",
+            "backend": backend,
+            "allowed": None,
+            "verdict": "unmodeled",
+            "reason": "Mixed-size overlapping AMO execution is generated, but no solver backend currently models its atomic footprint.",
+        }
     if backend == "embedded":
         return solve_rvwmo(
             case.case_ir,
@@ -1092,16 +1226,29 @@ def _validate_solver_backend(value: str) -> str:
     return backend
 
 
+def _native_requires(case: NativeLoweredCase) -> list[str]:
+    requires = ["RV64I"]
+    annotations = _cycle_annotations(case.cycle)
+    if any(annotation != "P" for annotation in annotations):
+        requires.append("A")
+    cycle_events = [event for event in case.case_ir.events() if event.role == "cycle-event"]
+    if any(
+        annotations[int(event.event_id[1:])] != "P"
+        and event.memory_access is not None
+        and event.memory_access.size_bytes == 2
+        for event in cycle_events
+    ):
+        requires.append("Zabha")
+    return requires
+
+
 def _native_name(cycle: NativeCycle) -> str:
-    family = cycle.family or "Cycle"
-    readable = "+".join(_short_edge(edge) for edge in cycle.edges if edge.scope == LOCAL)
-    digest = hashlib.sha256("\0".join(cycle.labels).encode("utf-8")).hexdigest()[:12]
-    readable = readable[:96].strip("+") or "comm"
-    return f"NATIVE_{family}_{readable}_{digest}"
-
-
-def _short_edge(edge: NativeEdge) -> str:
-    return edge.label.replace("Fence.", "F.").replace("Dp", "")
+    return native_cycle_name(
+        cycle.family,
+        cycle.edges,
+        cycle.labels,
+        _cycle_annotations(cycle),
+    )
 
 
 def _location_name(index: int) -> str:
@@ -1125,7 +1272,8 @@ def _load_instruction(
         opcode = {1: "lbu", 2: "lhu", 4: "lwu", 8: "ld"}[access.size_bytes]
         return f"{opcode} {destination},{access.offset_bytes}({address})"
     suffix = _amo_suffix(annotation)
-    return f"amoor.w{suffix} {destination},x0,({address})"
+    width = _amo_width(access.size_bytes)
+    return f"amoor.{width}{suffix} {destination},x0,({address})"
 
 
 def _store_instruction(
@@ -1138,14 +1286,22 @@ def _store_instruction(
         opcode = {1: "sb", 2: "sh", 4: "sw", 8: "sd"}[access.size_bytes]
         return f"{opcode} {data},{access.offset_bytes}({address})"
     suffix = _amo_suffix(annotation)
-    return f"amoswap.w{suffix} x0,{data},({address})"
+    width = _amo_width(access.size_bytes)
+    return f"amoswap.{width}{suffix} x0,{data},({address})"
 
 
 def _amo_suffix(annotation: str) -> str:
     try:
-        return {"Aq": ".aq", "Rl": ".rl", "AR": ".aq.rl"}[annotation]
+        return {"AMO": "", "Aq": ".aq", "Rl": ".rl", "AR": ".aq.rl"}[annotation]
     except KeyError as exc:
         raise NativeGenerationError(f"invalid AMO annotation: {annotation}") from exc
+
+
+def _amo_width(size_bytes: int) -> str:
+    try:
+        return {2: "h", 4: "w", 8: "d"}[size_bytes]
+    except KeyError as exc:
+        raise NativeGenerationError(f"unsupported AMO width: {size_bytes} bytes") from exc
 
 
 def _validate_annotations(annotations: Sequence[str]) -> tuple[str, ...]:

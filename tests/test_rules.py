@@ -46,8 +46,42 @@ def test_vector_params_require_vector_axis() -> None:
     assert "require a non-none vector" in decision.reason
 
 
+def test_vector_reserved_vtype_and_cross_line_footprints_are_not_generated() -> None:
+    reserved = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="unit_load",
+            params={"sew": "e32", "lmul": "mf8", "mask": "unmasked", "vl": "vl1"},
+        )
+    )
+    assert reserved.status == "excluded_illegal"
+    crossing = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="strided_load",
+            params={
+                "sew": "e8",
+                "lmul": "m4",
+                "mask": "unmasked",
+                "vl": "vlmax",
+                "footprint": "same_line",
+            },
+        )
+    )
+    assert crossing.status == "excluded_unsupported"
+    assert "cross-line" in crossing.reason
+
+
 def test_vector_load_store_shape_must_match_memory_event() -> None:
-    load_as_store = evaluate(Combination("test", "vector_mem", "MP", "vector_store", "cacheable", vector="fof_load"))
+    load_as_store = evaluate(Combination("test", "vector_mem", "MP", "vector_store", "cacheable", vector="unit_load"))
     store_as_load = evaluate(Combination("test", "vector_mem", "MP", "vector_load", "cacheable", vector="unit_store"))
     assert load_as_store.status == EXCLUDED_UNSUPPORTED
     assert store_as_load.status == EXCLUDED_UNSUPPORTED
@@ -89,6 +123,58 @@ def test_complex_vector_params_are_observation_not_formal_rvwmo() -> None:
     assert decision.status == GENERATED
     assert decision.rvwmo_class == "rvwmo-instruction-level"
     assert decision.metadata["formal_forbidden_claim"] == "false"
+
+
+def test_nanhu_vector_non_cacheable_memory_is_excluded() -> None:
+    for attribute in ("pbmt_nc", "pbmt_io", "nc_alias", "cacheable_nc_alias"):
+        decision = evaluate(
+            Combination("test", "vector_mem", "MP", "vector_load", attribute, vector="unit_load")
+        )
+        assert decision.status == EXCLUDED_UNSUPPORTED
+        assert decision.hand_category == "vector"
+        assert "cacheable" in decision.reason
+        assert "rule:vector_memory_type" in decision.notes
+
+
+def test_nanhu_vector_pbmt_flip_is_excluded() -> None:
+    decision = evaluate(
+        Combination(
+            "test",
+            "cross",
+            "MP",
+            "vector_load",
+            "cacheable",
+            tlb="pte_remap",
+            vector="unit_load",
+            params={"pte": "pbmt_flip"},
+        )
+    )
+    assert decision.status == EXCLUDED_UNSUPPORTED
+    assert "PBMT-tagged" in decision.reason
+    assert "rule:vector_memory_type" in decision.notes
+
+
+def test_deferred_vector_parameters_are_not_silently_rendered() -> None:
+    for params in (
+        {"vl": "vl_random"},
+        {"elem_order": "ordered_elements"},
+        {"vstart": "1"},
+        {"sew": "e128"},
+    ):
+        decision = evaluate(
+            Combination(
+                "test",
+                "vector_mem",
+                "MP",
+                "vector_load",
+                "cacheable",
+                vector="unit_load",
+                params=params,
+            )
+        )
+        assert decision.status == EXCLUDED_UNSUPPORTED
+        assert decision.metadata["formal_forbidden_claim"] == "false"
+        assert "rule:vector_solver_scope" in decision.notes
 
 
 def test_alias_flush_sync_is_generated_with_sync_metadata() -> None:

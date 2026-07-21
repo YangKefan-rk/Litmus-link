@@ -81,23 +81,35 @@ def test_stress_large_names_are_unique_and_short() -> None:
         assert name not in names
         names.add(name)
         max_len = max(max_len, len(name))
-    assert len(names) == 250360
-    assert max_len == 180
+    assert len(names) == 108600
+    assert max_len <= 112
 
 
 def test_summary_only_audit_skips_detail_json(tmp_path: Path) -> None:
     report = write_audit("stress-large", tmp_path, summary_only=True)
-    assert report["total_combinations"] == 250360
+    assert report["total_combinations"] == 108600
     assert (tmp_path / "audit-report.json").exists()
     assert (tmp_path / "cross-coverage.md").exists()
     assert not (tmp_path / "covered.json").exists()
 
 
-def test_vector_profile_has_illegal_and_hand_buckets() -> None:
-    _rows, report = audit_profile("vector_mem")
-    assert report["excluded_illegal"] > 0
-    assert report["hand_required"] > 0
+def test_vector_profile_contains_only_nanhu_supported_memory_types() -> None:
+    rows, report = audit_profile("vector_mem")
+    assert report["total_combinations"] == 677520
+    assert report["generated"] == 677520
+    assert report["generated_litmus"] == 2032560
+    assert report["excluded_illegal"] == 0
+    assert report["excluded_unsupported"] == 0
+    assert report["hand_required"] == 0
     assert report["missing"] == 0
+    combinations = [combination for combination, _decision in rows]
+    indexed = [combination for combination in combinations if "indexed" in combination.vector]
+    non_indexed = [combination for combination in combinations if "indexed" not in combination.vector]
+    assert {combination.params["index_eew"] for combination in indexed} == {"ei8", "ei16", "ei32", "ei64"}
+    assert all("index_eew" not in combination.params for combination in non_indexed)
+    assert {combination.params["vl"] for combination in combinations} == {
+        "vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"
+    }
 
 
 def test_rule_file_generation(tmp_path: Path) -> None:
@@ -137,6 +149,20 @@ def test_rule_file_rejects_nonexistent_vector_forms(tmp_path: Path) -> None:
         assert "invalid vector value 'fof_strided'" in str(exc)
     else:
         raise AssertionError("fof_strided must be rejected before generation")
+
+
+def test_rule_file_reports_deferred_vector_form_as_unsupported(tmp_path: Path) -> None:
+    rule_file = tmp_path / "deferred-vector.json"
+    rule_file.write_text(
+        json.dumps({"name": "deferred-vector", "axes": {"vector": ["fof_load"]}, "limit": 10}),
+        encoding="utf-8",
+    )
+    rule_set = load_rule_file(rule_file)
+    assert len(rule_set.combinations) == 1
+    report = generate_combinations(rule_set.name, rule_set.combinations, tmp_path / "out")
+    assert report["generated"] == 0
+    assert report["excluded_unsupported"] == 1
+    assert not list((tmp_path / "out").glob("*.litmus"))
 
 
 def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> None:
@@ -272,7 +298,6 @@ def test_long_parameterized_names_are_hashed() -> None:
         vector="indexed_unordered_load",
         params={
             "alias": "cacheable_nc",
-            "elem_order": "ordered_elements",
             "footprint": "cross_page",
             "lmul": "m1",
             "mask": "masked",
@@ -284,4 +309,7 @@ def test_long_parameterized_names_are_hashed() -> None:
         },
     )
     assert len(combination.name) <= 180
-    assert "params_" in combination.name
+    assert "+Cfg." in combination.name
+    assert "cacheable" not in combination.name
+    assert "no_tlb" not in combination.name
+    assert "no_cmo" not in combination.name

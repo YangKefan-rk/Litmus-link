@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     native_templates.add_argument("--skeleton", action="append", choices=sorted(NATIVE_PRESETS), help="repeat to select families; default: MP")
     native_templates.add_argument("--mechanism", action="append", choices=sorted(DEFAULT_NATIVE_MECHANISMS), help="repeat to select po/fence/dependency; default: all")
     native_templates.add_argument("--different-location-only", action="store_true", help="exclude same-location local edges")
-    native_templates.add_argument("--annotation", action="append", choices=NATIVE_ANNOTATIONS, help="repeat to select P/Aq/Rl/AR; default: all")
+    native_templates.add_argument("--annotation", action="append", choices=NATIVE_ANNOTATIONS, help="repeat to select P/AMO/Aq/Rl/AR; default: all")
     native_templates.add_argument("--out", required=True, type=Path)
     native_templates.add_argument("--limit", type=int, help="maximum files to write; audit still reports the complete finite domain")
     native_templates.add_argument("--no-judge", action="store_true", help="skip outcome verification")
@@ -408,8 +408,8 @@ def _add_native_memory_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--memory-layout",
         action="append",
-        choices=["aligned", "misaligned", "mixed"],
-        help="repeat to select aligned, homogeneous misaligned, or mixed-size misaligned layouts",
+        choices=["aligned", "misaligned", "mixed", "atomic", "atomic_mixed"],
+        help="repeat to select aligned, misaligned, exhaustive mixed-size misaligned, fixed-width atomic, or exhaustive mixed-size aligned atomic layouts",
     )
     parser.add_argument(
         "--misalign-width",
@@ -424,6 +424,12 @@ def _add_native_memory_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["same16", "cross16", "cross64"],
         help="repeat to select real address-boundary layouts; default: all",
     )
+    parser.add_argument(
+        "--atomic-overlap",
+        action="append",
+        choices=["same_start", "partial_overlap"],
+        help="repeat to select naturally aligned atomic overlap shapes; default: both",
+    )
 
 
 def _native_memory_layouts(args: argparse.Namespace):
@@ -431,6 +437,7 @@ def _native_memory_layouts(args: argparse.Namespace):
         args.memory_layout or ("aligned",),
         widths=tuple(value // 8 for value in (args.misalign_width or (16, 32, 64))),
         boundaries=args.misalign_boundary or ("same16", "cross16", "cross64"),
+        atomic_overlaps=args.atomic_overlap or ("same_start", "partial_overlap"),
     )
 
 

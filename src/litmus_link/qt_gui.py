@@ -112,12 +112,22 @@ def _make_worker_class(QtCore: Any) -> Any:
                 self._stage("Preparing request payload")
                 if action == "preview":
                     self._stage("Expanding sample combinations")
-                    result = preview_payload(payload)
+                    preview_request = dict(payload)
+                    preview_request["judge"] = False
+                    preview_request["compute_verdicts"] = False
+                    result = preview_payload(
+                        preview_request,
+                        progress_callback=self._report_progress,
+                    )
                 elif action == "verify":
                     self._stage("Generating preview cases and checking RVWMO outcomes")
                     verify_payload = dict(payload)
                     verify_payload["judge"] = True
-                    result = preview_payload(verify_payload)
+                    verify_payload["compute_verdicts"] = True
+                    result = preview_payload(
+                        verify_payload,
+                        progress_callback=self._report_progress,
+                    )
                 elif action == "audit":
                     self._stage("Classifying combinations with legality rules")
                     result = audit_payload(payload)
@@ -142,6 +152,110 @@ def _make_action_bus_class(QtCore: Any) -> Any:
         request = _signal(QtCore, str, str, object)
 
     return ActionBus
+
+
+def _make_preview_model_class(QtCore: Any, QtGui: Any) -> Any:
+    """Create a virtualized table model for the preview browser.
+
+    QTableWidget allocates several QObject-backed cell objects per row.  That
+    is convenient for a handful of tests but becomes the dominant cost when a
+    user previews tens of thousands of cases.  This model keeps the result
+    dictionaries as the source of truth and formats only rows Qt asks to draw.
+    """
+    class PreviewCaseModel(QtCore.QAbstractTableModel):
+        HEADERS = ["#", "Status", "Family", "Verdict", "Case"]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.items: list[Dict[str, Any]] = []
+            self.visible: Any = range(0)
+            self.search = ""
+            self.status_filter = ""
+            self.skeleton_filter = ""
+            self.verdict_filter = ""
+
+        def rowCount(self, parent: Any = None) -> int:
+            return 0 if parent is not None and parent.isValid() else len(self.visible)
+
+        def columnCount(self, parent: Any = None) -> int:
+            return 0 if parent is not None and parent.isValid() else len(self.HEADERS)
+
+        def headerData(self, section: int, orientation: Any, role: Any = None) -> Any:
+            if role != _display_role(QtCore):
+                return None
+            if orientation == _horizontal_orientation(QtCore):
+                return self.HEADERS[section]
+            return None
+
+        def data(self, index: Any, role: Any = None) -> Any:
+            if not index.isValid() or index.row() >= len(self.visible):
+                return None
+            source_index = self.visible[index.row()]
+            item = self.items[source_index]
+            values = _preview_table_values(item, source_index)
+            if role == _display_role(QtCore):
+                return values[index.column()]
+            if role == _tooltip_role(QtCore):
+                return values[5] or values[4]
+            if role == _foreground_role(QtCore) and index.column() == 1:
+                status = str((item.get("decision") or {}).get("status", ""))
+                return QtGui.QColor(_status_color(status))
+            if role == _user_role(QtCore):
+                return source_index
+            return None
+
+        def set_items(self, items: Iterable[Dict[str, Any]]) -> None:
+            self.beginResetModel()
+            self.items = list(items)
+            self.visible = range(len(self.items))
+            self.endResetModel()
+            if any((self.search, self.status_filter, self.skeleton_filter, self.verdict_filter)):
+                self.apply_filters()
+
+        def set_filters(
+            self,
+            search: str = "",
+            status: str = "",
+            skeleton: str = "",
+            verdict: str = "",
+        ) -> None:
+            self.search = search.strip().lower()
+            self.status_filter = status
+            self.skeleton_filter = skeleton
+            self.verdict_filter = verdict
+            self.apply_filters()
+
+        def apply_filters(self) -> None:
+            self.beginResetModel()
+            if not any((self.search, self.status_filter, self.skeleton_filter, self.verdict_filter)):
+                self.visible = range(len(self.items))
+                self.endResetModel()
+                return
+            visible: list[int] = []
+            for source_index, item in enumerate(self.items):
+                values = _preview_table_values(item, source_index)
+                status = str((item.get("decision") or {}).get("status", ""))
+                skeleton = str((item.get("combination") or {}).get("skeleton", ""))
+                verdict = _preview_filter_verdict(item)
+                haystack = " ".join(str(value) for value in values).lower()
+                if self.search and self.search not in haystack:
+                    continue
+                if self.status_filter and status != self.status_filter:
+                    continue
+                if self.skeleton_filter and skeleton != self.skeleton_filter:
+                    continue
+                if self.verdict_filter and verdict != self.verdict_filter:
+                    continue
+                visible.append(source_index)
+            self.visible = visible
+            self.endResetModel()
+
+        def source_index(self, row: int) -> int | None:
+            if row < 0 or row >= len(self.visible):
+                return None
+            return self.visible[row]
+
+    return PreviewCaseModel
 
 
 def _make_ui_receiver_class(QtCore: Any) -> Any:
@@ -174,9 +288,9 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
 class _LitmusLinkQtWindow:
     PRIMARY_AXES = ["skeleton", "attribute", "vector", "cmo", "tlb"]
     NONE_VALUES = {"vector": "none", "cmo": "no_cmo", "tlb": "no_tlb"}
-    PARAM_AXES = ["sew", "lmul", "mask", "tail", "footprint", "vl", "elem_order", "sync", "vm", "shootdown", "pte", "alias", "dep", "width", "outcome", "stress"]
+    PARAM_AXES = ["sew", "lmul", "index_eew", "mask", "tail", "footprint", "vl", "sync", "vm", "shootdown", "pte", "alias", "dep", "width", "outcome", "stress"]
     PARAM_GROUPS = {
-        "Vector": ["sew", "lmul", "mask", "tail", "vl", "elem_order"],
+        "Vector": ["sew", "lmul", "index_eew", "mask", "tail", "vl"],
         "Memory Footprint": ["footprint", "alias"],
         "CMO Sync": ["sync"],
         "Virtual Memory": ["vm", "shootdown", "pte"],
@@ -200,6 +314,9 @@ class _LitmusLinkQtWindow:
         self.scalar_memory_mode_checks: list[Any] = []
         self.scalar_memory_width_checks: list[Any] = []
         self.scalar_memory_boundary_checks: list[Any] = []
+        self.scalar_memory_atomic_overlap_checks: list[Any] = []
+        self.vector_checks: Dict[str, list[Any]] = {}
+        self.vector_filter_groups: list[Any] = []
         self.action_buttons: list[Any] = []
         self.axis_group_widgets: Dict[str, Any] = {}
         self.param_group_widgets: Dict[str, Any] = {}
@@ -214,6 +331,7 @@ class _LitmusLinkQtWindow:
         self.suspend_rule_sync = False
         self.worker_class = _make_worker_class(QtCore)
         self.action_bus_class = _make_action_bus_class(QtCore)
+        self.preview_model_class = _make_preview_model_class(QtCore, QtGui)
         self.ui_receiver = _make_ui_receiver_class(QtCore)(self)
         self.action_thread = QtCore.QThread(self.window)
         self.action_worker = self.worker_class()
@@ -334,9 +452,11 @@ class _LitmusLinkQtWindow:
 
         self.mode_tabs = QtWidgets.QTabWidget()
         self.scalar_tab = self._build_scalar_tab()
+        self.vector_tab = self._build_vector_tab()
         self.profile_tab = self._build_profile_tab()
         self.custom_tab = self._build_custom_tab()
         self.mode_tabs.addTab(self.scalar_tab, "Scalar Litmus")
+        self.mode_tabs.addTab(self.vector_tab, "Vector Litmus")
         self.mode_tabs.addTab(self.profile_tab, "Profile Mode")
         self.mode_tabs.addTab(self.custom_tab, "Custom Rule Mode")
         self.mode_tabs.currentChanged.connect(lambda _index: self._update_output_hint())
@@ -370,8 +490,8 @@ class _LitmusLinkQtWindow:
         generation_scope.addWidget(QtWidgets.QLabel("Otherwise cap files at"))
         generation_scope.addWidget(self.scalar_limit)
         self.scalar_preview_limit = QtWidgets.QSpinBox()
-        self.scalar_preview_limit.setRange(1, 100000)
-        self.scalar_preview_limit.setValue(1000)
+        self.scalar_preview_limit.setRange(1, 250000)
+        self.scalar_preview_limit.setValue(2000)
         verification_row = QtWidgets.QHBoxLayout()
         self.scalar_judge = QtWidgets.QCheckBox("Verify generated outcomes")
         self.scalar_judge.setChecked(True)
@@ -419,9 +539,17 @@ class _LitmusLinkQtWindow:
         cross_layout.addWidget(self.scalar_mechanism_widget)
         cross_layout.addWidget(QtWidgets.QLabel("Event annotations (non-P modes lower to legal AMOs)"))
         annotation_row = QtWidgets.QHBoxLayout()
+        annotation_tips = {
+            "P": "Plain scalar load/store.",
+            "AMO": "Relaxed AMO without aq/rl; still atomic.",
+            "Aq": "AMO with acquire ordering.",
+            "Rl": "AMO with release ordering.",
+            "AR": "AMO with acquire and release ordering.",
+        }
         for name in self.options["native_scalar"]["annotations"]:
             check = QtWidgets.QCheckBox(name)
             check.setProperty("axis_value", name)
+            check.setToolTip(annotation_tips.get(name, name))
             check.setChecked(True)
             annotation_row.addWidget(check)
             self.scalar_annotation_checks.append(check)
@@ -436,16 +564,21 @@ class _LitmusLinkQtWindow:
         self.scalar_memory_group.setObjectName("AxisGroup")
         self.scalar_memory_group.setProperty("axis_role", "parameter")
         memory_layout = QtWidgets.QFormLayout(self.scalar_memory_group)
-        self.scalar_memory_enable = QtWidgets.QCheckBox("Enable mixed / misaligned accesses")
+        self.scalar_memory_enable = QtWidgets.QCheckBox("Enable extended scalar layouts")
         self.scalar_memory_enable.toggled.connect(self._update_scalar_memory_layout)
         self.scalar_memory_include_aligned = QtWidgets.QCheckBox("Include aligned baseline")
         self.scalar_memory_include_aligned.setChecked(True)
 
         mode_row = QtWidgets.QHBoxLayout()
-        for label, value in (("Misaligned", "misaligned"), ("Mixed-size misaligned", "mixed")):
+        for label, value in (
+            ("Misaligned", "misaligned"),
+            ("Mixed-size misaligned", "mixed"),
+            ("Fixed-width atomic", "atomic"),
+            ("Mixed-size aligned atomic", "atomic_mixed"),
+        ):
             check = QtWidgets.QCheckBox(label)
             check.setProperty("axis_value", value)
-            check.setChecked(True)
+            check.setChecked(value in {"misaligned", "mixed"})
             self.scalar_memory_mode_checks.append(check)
             mode_row.addWidget(check)
         mode_row.addStretch(1)
@@ -473,13 +606,23 @@ class _LitmusLinkQtWindow:
             boundary_row.addWidget(check)
         boundary_row.addStretch(1)
 
-        atomicity = QtWidgets.QLabel("byte_level_no_mag")
+        atomic_overlap_row = QtWidgets.QHBoxLayout()
+        for label, value in (("Same start", "same_start"), ("Partial overlap", "partial_overlap")):
+            check = QtWidgets.QCheckBox(label)
+            check.setProperty("axis_value", value)
+            check.setChecked(True)
+            self.scalar_memory_atomic_overlap_checks.append(check)
+            atomic_overlap_row.addWidget(check)
+        atomic_overlap_row.addStretch(1)
+
+        atomicity = QtWidgets.QLabel("misaligned: byte_level_no_mag; atomic: aligned / mixed-size atomic")
         atomicity.setObjectName("OutputHint")
         for control in (
             self.scalar_memory_include_aligned,
             *self.scalar_memory_mode_checks,
             *self.scalar_memory_width_checks,
             *self.scalar_memory_boundary_checks,
+            *self.scalar_memory_atomic_overlap_checks,
         ):
             control.toggled.connect(
                 lambda _checked: self._update_scalar_memory_layout(
@@ -491,6 +634,7 @@ class _LitmusLinkQtWindow:
         memory_layout.addRow("Layouts", mode_row)
         memory_layout.addRow("Widths", width_row)
         memory_layout.addRow("Boundaries", boundary_row)
+        memory_layout.addRow("Atomic overlap", atomic_overlap_row)
         memory_layout.addRow("Atomicity", atomicity)
         layout.addWidget(self.scalar_memory_group)
 
@@ -595,20 +739,29 @@ class _LitmusLinkQtWindow:
             *self.scalar_memory_mode_checks,
             *self.scalar_memory_width_checks,
             *self.scalar_memory_boundary_checks,
+            *self.scalar_memory_atomic_overlap_checks,
         ]
         for control in controls:
             control.setEnabled(enabled)
             control.setProperty("choice_state", "on" if enabled and control.isChecked() else "base")
             self._refresh_widget_style(control)
         self._set_group_state(self.scalar_memory_group, "active" if enabled else "inactive")
+        selected_modes = {
+            str(check.property("axis_value"))
+            for check in self.scalar_memory_mode_checks
+            if check.isChecked()
+        }
+        atomic_layout_enabled = bool(selected_modes & {"atomic", "atomic_mixed"})
         for check in self.scalar_annotation_checks:
             annotation = str(check.property("axis_value"))
-            if enabled and annotation != "P":
+            if enabled and not atomic_layout_enabled and annotation != "P":
                 check.setChecked(False)
                 check.setEnabled(False)
             else:
                 check.setEnabled(True)
-        if enabled:
+                if enabled and atomic_layout_enabled and annotation != "P":
+                    check.setChecked(True)
+        if enabled and not atomic_layout_enabled:
             for check in self.scalar_annotation_checks:
                 if str(check.property("axis_value")) == "P":
                     check.setChecked(True)
@@ -628,6 +781,100 @@ class _LitmusLinkQtWindow:
         self.scalar_enumerate_group.setVisible(not templates)
         self.scalar_diy_group.setVisible(diy)
 
+    def _build_vector_tab(self) -> Any:
+        QtWidgets = self.QtWidgets
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        self.vector_complete = QtWidgets.QCheckBox(
+            "Complete relation-cycle and endpoint domain"
+        )
+        self.vector_complete.setObjectName("VectorComplete")
+        self.vector_complete.setChecked(True)
+        self.vector_out = QtWidgets.QLineEdit("out/qt-vector")
+        self.vector_out.textChanged.connect(lambda _text: self._update_output_hint())
+        self.vector_preview_limit = QtWidgets.QSpinBox()
+        self.vector_preview_limit.setRange(1, 100000)
+        self.vector_preview_limit.setValue(1000)
+        self.vector_random_seed = QtWidgets.QSpinBox()
+        self.vector_random_seed.setRange(0, 2_147_483_647)
+        self.vector_random_seed.setValue(1)
+        self.vector_generate_limit = QtWidgets.QSpinBox()
+        self.vector_generate_limit.setRange(1, 1_000_000)
+        self.vector_generate_limit.setValue(10_000)
+        form.addRow("Generation scope", self.vector_complete)
+        form.addRow("Output directory", self.vector_out)
+        form.addRow("Random preview cases", self.vector_preview_limit)
+        form.addRow("Random seed", self.vector_random_seed)
+        form.addRow("Maximum generated cases", self.vector_generate_limit)
+        layout.addLayout(form)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.vector_filter_widget = QtWidgets.QWidget()
+        filter_layout = QtWidgets.QVBoxLayout(self.vector_filter_widget)
+        filter_layout.setContentsMargins(0, 0, 8, 0)
+        filter_layout.setSpacing(8)
+        vector_forms = [
+            value for value in self.options["axes"]["vector"] if value != "none"
+        ]
+        groups = [
+            ("Skeletons", "skeletons", self.options["axes"]["skeleton"], 5),
+            ("Relation mechanisms", "mechanisms", self.options["vector_native"]["mechanisms"], 3),
+            ("Scalar and atomic endpoints", "endpoint_modes", self.options["vector_native"]["endpoint_modes"], 5),
+            ("Vector memory forms", "forms", vector_forms, 2),
+            ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4),
+            ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4),
+            ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4),
+            ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2),
+            ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4),
+            ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4),
+            ("Element alignment", "alignments", self.options["vector_native"]["alignments"], 2),
+        ]
+        for title, key, values, columns in groups:
+            filter_layout.addWidget(
+                self._build_vector_choice_group(title, key, values, columns)
+            )
+        filter_layout.addStretch(1)
+        scroll.setWidget(self.vector_filter_widget)
+        layout.addWidget(scroll, 1)
+
+        self.vector_complete.toggled.connect(self._update_vector_scope)
+        self._update_vector_scope(True)
+        return tab
+
+    def _build_vector_choice_group(
+        self, title: str, key: str, values: Iterable[str], columns: int
+    ) -> Any:
+        QtWidgets = self.QtWidgets
+        group = QtWidgets.QGroupBox(title)
+        group.setObjectName("VectorFilterGroup")
+        grid = QtWidgets.QGridLayout(group)
+        grid.setContentsMargins(10, 8, 10, 10)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        checks: list[Any] = []
+        for index, value in enumerate(values):
+            check = QtWidgets.QCheckBox(str(value))
+            check.setProperty("axis_value", str(value))
+            check.setChecked(True)
+            grid.addWidget(check, index // columns, index % columns)
+            checks.append(check)
+        self.vector_checks[key] = checks
+        self.vector_filter_groups.append(group)
+        return group
+
+    def _update_vector_scope(self, complete: bool) -> None:
+        if not hasattr(self, "vector_filter_widget"):
+            return
+        self.vector_filter_widget.setEnabled(not complete)
+        for group in self.vector_filter_groups:
+            group.setProperty("group_state", "inactive" if complete else "active")
+            self._refresh_widget_style(group)
+
     def _build_profile_tab(self) -> Any:
         QtWidgets = self.QtWidgets
         tab = QtWidgets.QWidget()
@@ -642,8 +889,12 @@ class _LitmusLinkQtWindow:
         self.profile_combo.currentIndexChanged.connect(lambda _index: self._update_output_hint())
         self.profile_out = QtWidgets.QLineEdit("out/qt-profile")
         self.profile_out.textChanged.connect(lambda _text: self._update_output_hint())
+        self.profile_preview_limit = QtWidgets.QSpinBox()
+        self.profile_preview_limit.setRange(1, 250000)
+        self.profile_preview_limit.setValue(2000)
         form.addRow("Profile", self.profile_combo)
         form.addRow("Output directory", self.profile_out)
+        form.addRow("Maximum preview rows", self.profile_preview_limit)
         layout.addLayout(form)
         layout.addStretch(1)
         return tab
@@ -659,12 +910,16 @@ class _LitmusLinkQtWindow:
         self.rule_name = QtWidgets.QLineEdit("qt-custom")
         self.rule_limit = QtWidgets.QLineEdit("10000")
         self.rule_out = QtWidgets.QLineEdit("out/qt-custom")
+        self.custom_preview_limit = QtWidgets.QSpinBox()
+        self.custom_preview_limit.setRange(1, 250000)
+        self.custom_preview_limit.setValue(2000)
         for line in [self.rule_name, self.rule_limit, self.rule_out]:
             line.textChanged.connect(lambda _text: self._sync_rule_preview())
         self.rule_out.textChanged.connect(lambda _text: self._update_output_hint())
         form.addRow("Rule name", self.rule_name)
         form.addRow("Combination limit", self.rule_limit)
         form.addRow("Output directory", self.rule_out)
+        form.addRow("Maximum preview rows", self.custom_preview_limit)
         layout.addLayout(form)
 
         self.axis_tabs = QtWidgets.QTabWidget()
@@ -697,6 +952,15 @@ class _LitmusLinkQtWindow:
         scroll_layout.setContentsMargins(0, 0, 8, 0)
         scroll_layout.setSpacing(8)
 
+        if group_name == "Vector":
+            self.vector_matrix_button = QtWidgets.QPushButton("Use Complete Vector Profile")
+            self.vector_matrix_button.setObjectName("VectorMatrixButton")
+            self.vector_matrix_button.setToolTip(
+                "Switch to the relation-cycle Vector generator covering multi-endpoint scalar, AMO, and RVV configurations."
+            )
+            self.vector_matrix_button.clicked.connect(self._select_supported_vector_matrix)
+            scroll_layout.addWidget(self.vector_matrix_button)
+
         group = QtWidgets.QGroupBox(group_name)
         group.setObjectName("AxisGroup")
         group.setProperty("axis_role", "parameter")
@@ -713,6 +977,14 @@ class _LitmusLinkQtWindow:
         scroll.setWidget(scroll_content)
         page_layout.addWidget(scroll)
         return page
+
+    def _select_supported_vector_matrix(self) -> None:
+        """Open the dedicated Vector page with its complete legal domain."""
+        self.vector_complete.setChecked(True)
+        self.mode_tabs.setCurrentWidget(self.vector_tab)
+        self.status_label.setText(
+            "Complete relation-cycle Vector domain selected; Preview uses a reproducible random sample"
+        )
 
     def _build_axis_page(self, axes: Iterable[str], values_by_axis: Dict[str, Iterable[str]], checked_first: bool) -> Any:
         QtWidgets = self.QtWidgets
@@ -811,28 +1083,80 @@ class _LitmusLinkQtWindow:
         preview_layout.setSpacing(8)
         self.preview_stats_label = QtWidgets.QLabel("Preview classification: no sample loaded")
         self.preview_stats_label.setObjectName("PreviewStatsLabel")
+
+        filter_bar = QtWidgets.QHBoxLayout()
+        filter_bar.setSpacing(8)
+        self.preview_search = QtWidgets.QLineEdit()
+        self.preview_search.setObjectName("PreviewSearch")
+        self.preview_search.setPlaceholderText("Search case, cycle, family, or verdict")
+        self.preview_search.setClearButtonEnabled(True)
+        self.preview_status_filter = QtWidgets.QComboBox()
+        self.preview_status_filter.addItem("All statuses", "")
+        self.preview_skeleton_filter = QtWidgets.QComboBox()
+        self.preview_skeleton_filter.addItem("All families", "")
+        self.preview_verdict_filter = QtWidgets.QComboBox()
+        self.preview_verdict_filter.addItem("All verdicts", "")
+        self.preview_filter_count = QtWidgets.QLabel("0 cases")
+        self.preview_filter_count.setObjectName("PreviewFilterCount")
+        self.preview_stats_toggle = QtWidgets.QPushButton("Statistics")
+        self.preview_stats_toggle.setCheckable(True)
+        self.preview_stats_toggle.setChecked(True)
+        filter_bar.addWidget(self.preview_search, 1)
+        filter_bar.addWidget(self.preview_skeleton_filter)
+        filter_bar.addWidget(self.preview_status_filter)
+        filter_bar.addWidget(self.preview_verdict_filter)
+        filter_bar.addWidget(self.preview_filter_count)
+        filter_bar.addWidget(self.preview_stats_toggle)
+
+        browser = QtWidgets.QSplitter(_horizontal(self.QtCore))
+        self.preview_stats_panel = QtWidgets.QWidget()
+        stats_layout = QtWidgets.QVBoxLayout(self.preview_stats_panel)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_stats = QtWidgets.QTreeWidget()
         self.preview_stats.setObjectName("PreviewStats")
         self.preview_stats.setHeaderLabels(["Classification", "Value", "Count"])
         self.preview_stats.setRootIsDecorated(True)
         self.preview_stats.setAlternatingRowColors(True)
-        self.preview_stats.setMaximumHeight(220)
         self.preview_stats.setUniformRowHeights(True)
-        self.preview_table = QtWidgets.QTableWidget()
+        stats_layout.addWidget(self.preview_stats)
+
+        table_panel = QtWidgets.QWidget()
+        table_layout = QtWidgets.QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        self.preview_model = self.preview_model_class()
+        self.preview_table = QtWidgets.QTableView()
         self.preview_table.setObjectName("PreviewTable")
-        self.preview_table.setColumnCount(5)
-        self.preview_table.setHorizontalHeaderLabels(["#", "Status", "Shape", "Verdict", "Case"])
+        self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.setWordWrap(False)
         self.preview_table.verticalHeader().setVisible(False)
         self.preview_table.setEditTriggers(_no_edit_triggers(QtWidgets))
         self.preview_table.setSelectionBehavior(_select_rows(QtWidgets))
         self.preview_table.setSelectionMode(_single_selection(QtWidgets))
-        self.preview_table.itemDoubleClicked.connect(self._open_preview_detail)
+        self.preview_table.doubleClicked.connect(self._open_preview_detail)
         _configure_preview_header(self.preview_table, QtWidgets)
+        table_layout.addWidget(self.preview_table)
+
+        browser.addWidget(self.preview_stats_panel)
+        browser.addWidget(table_panel)
+        browser.setCollapsible(0, True)
+        browser.setStretchFactor(0, 1)
+        browser.setStretchFactor(1, 4)
+        browser.setSizes([260, 760])
+
+        self.preview_filter_timer = self.QtCore.QTimer(self.window)
+        self.preview_filter_timer.setSingleShot(True)
+        self.preview_filter_timer.setInterval(180)
+        self.preview_filter_timer.timeout.connect(self._apply_preview_filters)
+        self.preview_search.textChanged.connect(lambda _text: self.preview_filter_timer.start())
+        self.preview_status_filter.currentIndexChanged.connect(lambda _index: self._apply_preview_filters())
+        self.preview_skeleton_filter.currentIndexChanged.connect(lambda _index: self._apply_preview_filters())
+        self.preview_verdict_filter.currentIndexChanged.connect(lambda _index: self._apply_preview_filters())
+        self.preview_stats_toggle.toggled.connect(self.preview_stats_panel.setVisible)
+
         preview_layout.addWidget(self.preview_stats_label)
-        preview_layout.addWidget(self.preview_stats)
-        preview_layout.addWidget(self.preview_table, 1)
+        preview_layout.addLayout(filter_bar)
+        preview_layout.addWidget(browser, 1)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.rule_json = QtWidgets.QPlainTextEdit()
@@ -840,8 +1164,8 @@ class _LitmusLinkQtWindow:
         self.rule_json.textChanged.connect(self._mark_rule_manual_edit)
         self.raw_json = QtWidgets.QPlainTextEdit()
         self.raw_json.setReadOnly(True)
-        self.result_tabs.addTab(self.summary_view, "Summary")
-        self.result_tabs.addTab(self.preview_page, "Preview Litmus")
+        self.result_tabs.addTab(self.summary_view, "Overview")
+        self.result_tabs.addTab(self.preview_page, "Cases")
         self.result_tabs.addTab(self.log_view, "Log")
         self.result_tabs.addTab(self.rule_json, "Rule JSON")
         self.result_tabs.addTab(self.raw_json, "Raw JSON")
@@ -1004,6 +1328,7 @@ class _LitmusLinkQtWindow:
                     int(value) for value in self._selected(self.scalar_memory_width_checks)
                 ],
                 "boundaries": self._selected(self.scalar_memory_boundary_checks),
+                "atomic_overlaps": self._selected(self.scalar_memory_atomic_overlap_checks),
                 "atomicity_model": "byte_level_no_mag",
                 "mag_bytes": None,
             }
@@ -1038,6 +1363,22 @@ class _LitmusLinkQtWindow:
                         "moreedges": False,
                     }
             return payload
+        if current is self.vector_tab:
+            return {
+                "mode": "vector",
+                "name": "vector-native-complete" if self.vector_complete.isChecked() else "vector-native-custom",
+                "complete": self.vector_complete.isChecked(),
+                "out": self.vector_out.text() or "out/qt-vector",
+                "sample_limit": sample_limit,
+                "generate_limit": self.vector_generate_limit.value(),
+                "random_seed": self.vector_random_seed.value(),
+                "compute_verdicts": True,
+                "summary_only": self.summary_only.isChecked(),
+                **{
+                    key: self._selected(checks)
+                    for key, checks in self.vector_checks.items()
+                },
+            }
         if current is self.profile_tab:
             return {
                 "mode": "profile",
@@ -1060,12 +1401,11 @@ class _LitmusLinkQtWindow:
         current = self.mode_tabs.currentWidget()
         if current is self.scalar_tab:
             return self.scalar_preview_limit.value()
+        if current is self.vector_tab:
+            return self.vector_preview_limit.value()
         if current is self.profile_tab:
-            return 200
-        try:
-            return min(max(int(self.rule_limit.text() or "10000"), 1), 1000)
-        except ValueError:
-            return 200
+            return self.profile_preview_limit.value()
+        return self.custom_preview_limit.value()
 
     def _run_action(self, action: str, label: str) -> None:
         if self.active_thread is not None:
@@ -1129,13 +1469,17 @@ class _LitmusLinkQtWindow:
         self._append_log(f"Finished: {label} in {elapsed:.1f}s")
         if isinstance(result, dict):
             self.summary_view.setPlainText(_summary_text(label, result, self._current_out_dir()))
-            self.raw_json.setPlainText(json.dumps(result, indent=2, sort_keys=True))
             if label in {"Preview Cases", "Verify Preview"}:
                 self._populate_preview_list(result)
+            self.raw_json.setPlainText(_raw_result_json(result))
         else:
             self.summary_view.setPlainText(str(result))
             self.raw_json.setPlainText(json.dumps({"result": str(result)}, indent=2, sort_keys=True))
-        self.result_tabs.setCurrentWidget(self.summary_view)
+        self.result_tabs.setCurrentWidget(
+            self.preview_page
+            if label in {"Preview Cases", "Verify Preview"} and isinstance(result, dict)
+            else self.summary_view
+        )
 
     def _handle_failed(self, label: str, message: str) -> None:
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
@@ -1169,47 +1513,80 @@ class _LitmusLinkQtWindow:
         self.result_tabs.setCurrentWidget(self.summary_view)
 
     def _populate_preview_list(self, result: Dict[str, Any]) -> None:
-        QtWidgets = self.QtWidgets
-        table = self.preview_table
-        table.clearContents()
         # Show every sampled case -- generated, hand-required, and illegal --
         # so the count matches the audit summary instead of silently dropping
         # everything without a rendered litmus body.
         self.preview_items = list(result.get("sample", []))
-        self._populate_preview_statistics(result.get("classification_counts", {}) or {})
-        table.setRowCount(len(self.preview_items))
-        for row, item in enumerate(self.preview_items):
-            decision = item.get("decision", {}) or {}
-            analysis = item.get("analysis", {}) or {}
-            status = decision.get("status", "unknown")
-            cells = [
-                str(row + 1),
-                _status_label(status),
-                _shape_label(item.get("combination", {}) or {}),
-                _verdict_label(item.get("solver"), decision),
-                str(item.get("name", f"case-{row + 1}")),
-            ]
-            for column, text in enumerate(cells):
-                cell = QtWidgets.QTableWidgetItem(text)
-                cell.setData(_user_role(self.QtCore), row)
-                if column == 1:
-                    _tint_cell(cell, self.QtGui, _status_color(status))
-                cell.setToolTip(analysis.get("cycle", "") or status)
-                table.setItem(row, column, cell)
-        if not self.preview_items:
-            table.setRowCount(1)
-            empty = QtWidgets.QTableWidgetItem("No cases in this preview sample.")
-            table.setItem(0, 0, empty)
-        table.resizeColumnsToContents()
+        domain_statistics = result.get("domain_classification_counts", {}) or {}
+        sample_statistics = result.get("classification_counts", {}) or {}
+        statistics = dict(domain_statistics or sample_statistics)
+        if sample_statistics.get("groups"):
+            # The complete relation-cycle domain is counted analytically, while
+            # per-form/AMO/alignment breakdowns describe the random sample.
+            statistics["groups"] = sample_statistics["groups"]
+        statistics.setdefault("displayed_cases", len(self.preview_items))
+        statistics.setdefault("preview_displayed_cases", len(self.preview_items))
+        self._populate_preview_statistics(statistics)
+        self.preview_model.set_items(self.preview_items)
+        self._set_preview_filter_options()
+        self._apply_preview_filters()
+
+    def _set_preview_filter_options(self) -> None:
+        skeletons = sorted(
+            {
+                str((item.get("combination") or {}).get("skeleton", ""))
+                for item in self.preview_items
+                if (item.get("combination") or {}).get("skeleton")
+            }
+        )
+        statuses = sorted(
+            {
+                str((item.get("decision") or {}).get("status", ""))
+                for item in self.preview_items
+                if (item.get("decision") or {}).get("status")
+            }
+        )
+        verdicts = sorted({_preview_filter_verdict(item) for item in self.preview_items})
+        _replace_combo_items(self.preview_skeleton_filter, "All families", skeletons)
+        _replace_combo_items(self.preview_status_filter, "All statuses", statuses, _status_label)
+        _replace_combo_items(self.preview_verdict_filter, "All verdicts", verdicts)
+
+    def _apply_preview_filters(self) -> None:
+        if not hasattr(self, "preview_model"):
+            return
+        self.preview_model.set_filters(
+            self.preview_search.text(),
+            str(self.preview_status_filter.currentData() or ""),
+            str(self.preview_skeleton_filter.currentData() or ""),
+            str(self.preview_verdict_filter.currentData() or ""),
+        )
+        visible = self.preview_model.rowCount()
+        total = len(self.preview_items)
+        self.preview_filter_count.setText(
+            f"{visible:,} / {total:,}" if visible != total else f"{total:,} cases"
+        )
 
     def _populate_preview_statistics(self, statistics: Dict[str, Any]) -> None:
         QtWidgets = self.QtWidgets
         tree = self.preview_stats
         tree.clear()
-        displayed = int(statistics.get("displayed_cases", len(self.preview_items)) or 0)
-        self.preview_stats_label.setText(
-            f"Preview classification: {displayed} displayed case{'s' if displayed != 1 else ''}"
+        displayed = int(
+            statistics.get(
+                "preview_displayed_cases",
+                statistics.get("displayed_cases", len(self.preview_items)),
+            )
+            or 0
         )
+        domain = int(statistics.get("domain_cases", 0) or 0)
+        if domain:
+            generated = int(statistics.get("generated_cases", domain) or 0)
+            self.preview_stats_label.setText(
+                f"Full domain: {generated:,} generated cases; preview shows {displayed:,}"
+            )
+        else:
+            self.preview_stats_label.setText(
+                f"Preview classification: {displayed} displayed case{'s' if displayed != 1 else ''}"
+            )
         labels = {
             "status": "Generation status",
             "verdict": "Solver verdict",
@@ -1221,6 +1598,16 @@ class _LitmusLinkQtWindow:
             "vector": "Vector axis",
             "cmo": "CMO axis",
             "tlb": "TLB axis",
+            "sew": "Vector SEW",
+            "lmul": "Vector LMUL",
+            "index_eew": "Indexed EEW",
+            "mask": "Vector mask",
+            "tail": "Vector tail policy",
+            "vl": "Vector VL",
+            "endpoint_mode": "Endpoint ISA mode",
+            "vector_event_form": "Vector instruction form",
+            "alignment": "Vector alignment",
+            "relation_mechanism": "Relation mechanism",
         }
         groups = statistics.get("groups", {}) or {}
         for key, values in groups.items():
@@ -1230,7 +1617,7 @@ class _LitmusLinkQtWindow:
             parent = QtWidgets.QTreeWidgetItem([labels.get(key, key), "", str(total)])
             for value, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0]))):
                 parent.addChild(QtWidgets.QTreeWidgetItem(["", str(value), str(count)]))
-            parent.setExpanded(True)
+            parent.setExpanded(key in {"status", "verdict", "skeleton"})
             tree.addTopLevelItem(parent)
         for column in range(3):
             tree.resizeColumnToContents(column)
@@ -1253,6 +1640,8 @@ class _LitmusLinkQtWindow:
         current = self.mode_tabs.currentWidget()
         if current is self.scalar_tab:
             return self.scalar_out.text() or "out/qt-scalar"
+        if current is self.vector_tab:
+            return self.vector_out.text() or "out/qt-vector"
         if current is self.profile_tab:
             return self.profile_out.text() or "out/qt-profile"
         return self.rule_out.text() or "out/qt-custom"
@@ -1333,6 +1722,19 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
         for item in result.get("sample", [])[:5]:
             lines.append(f"  {item.get('name', '<unnamed>')}")
     return "\n".join(lines)
+
+
+def _raw_result_json(result: Dict[str, Any]) -> str:
+    """Serialize result metadata without duplicating every preview source."""
+    compact = dict(result)
+    sample = compact.pop("sample", None)
+    if isinstance(sample, list):
+        compact["sample"] = {
+            "omitted_from_raw_json": True,
+            "count": len(sample),
+            "reason": "Cases remain available in the virtualized Cases tab and per-case inspector.",
+        }
+    return json.dumps(compact, indent=2, sort_keys=True)
 
 
 class _LitmusPreviewDialog:
@@ -1487,7 +1889,7 @@ class _LitmusPreviewDialog:
         exists = analysis.get("exists", "")
         outcome = analysis.get("outcome_interpretation", analysis.get("forbidden_outcome", ""))
         png = diagram.get("png", "")
-        axes = combination.get("name", self.item.get("name", ""))
+        axes = self.item.get("name", combination.get("name", ""))
         lines = [
             f"Case: {axes}",
             f"Status: {decision.get('status', '-')}",
@@ -1544,6 +1946,31 @@ def _user_role(QtCore: Any) -> Any:
     return qt.UserRole
 
 
+def _display_role(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    if hasattr(qt, "ItemDataRole"):
+        return qt.ItemDataRole.DisplayRole
+    return qt.DisplayRole
+
+
+def _tooltip_role(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    if hasattr(qt, "ItemDataRole"):
+        return qt.ItemDataRole.ToolTipRole
+    return qt.ToolTipRole
+
+
+def _foreground_role(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    if hasattr(qt, "ItemDataRole"):
+        return qt.ItemDataRole.ForegroundRole
+    return qt.ForegroundRole
+
+
+def _horizontal_orientation(QtCore: Any) -> Any:
+    return _horizontal(QtCore)
+
+
 def _standard_arrow_icon(QtWidgets: Any, widget: Any) -> Any:
     style = getattr(QtWidgets, "QStyle")
     standard = style.StandardPixmap if hasattr(style, "StandardPixmap") else style
@@ -1576,10 +2003,15 @@ def _single_selection(QtWidgets: Any) -> Any:
 def _configure_preview_header(table: Any, QtWidgets: Any) -> None:
     header = table.horizontalHeader()
     resize = getattr(QtWidgets.QHeaderView, "ResizeMode", QtWidgets.QHeaderView)
-    # Stretch the final "Case" column; size the rest to their contents.
+    # Fixed/interactive widths avoid ResizeToContents scanning every row in a
+    # 100k-case model.  The final cycle column consumes remaining space.
+    column_count = table.model().columnCount()
     header.setStretchLastSection(True)
-    for column in range(table.columnCount() - 1):
-        header.setSectionResizeMode(column, resize.ResizeToContents)
+    for column in range(column_count):
+        header.setSectionResizeMode(column, resize.Interactive)
+    for column, width in enumerate((58, 84, 90, 105)):
+        table.setColumnWidth(column, width)
+    header.setSectionResizeMode(column_count - 1, resize.Stretch)
 
 
 _STATUS_LABELS = {
@@ -1639,11 +2071,51 @@ def _status_color(status: str) -> str:
     return _STATUS_COLORS.get(status, "#475569")
 
 
-def _tint_cell(cell: Any, QtGui: Any, color_hex: str) -> None:
-    cell.setForeground(QtGui.QColor(color_hex))
-    font = cell.font()
-    font.setBold(True)
-    cell.setFont(font)
+def _preview_table_values(item: Dict[str, Any], source_index: int) -> list[str]:
+    combination = item.get("combination", {}) or {}
+    decision = item.get("decision", {}) or {}
+    case_ir = item.get("case_ir", {}) or {}
+    status = str(decision.get("status", "unknown"))
+    skeleton = str(combination.get("skeleton", case_ir.get("skeleton", "?")))
+    cycle = str(case_ir.get("cycle", (item.get("analysis") or {}).get("cycle", "")))
+    name = str(case_ir.get("display_name", item.get("name", f"case-{source_index + 1}")))
+    return [
+        str(source_index + 1),
+        _status_label(status),
+        skeleton,
+        _verdict_label(item.get("solver"), decision),
+        name,
+        cycle,
+    ]
+
+
+def _preview_filter_verdict(item: Dict[str, Any]) -> str:
+    solver = item.get("solver") or {}
+    status = str(solver.get("status", ""))
+    verdict = str(solver.get("verdict", ""))
+    if status == "verified" and verdict:
+        return verdict
+    if status:
+        return status
+    decision = item.get("decision") or {}
+    return str(decision.get("status", "unknown"))
+
+
+def _replace_combo_items(
+    combo: Any,
+    all_label: str,
+    values: Iterable[str],
+    labeler: Any = None,
+) -> None:
+    selected = str(combo.currentData() or "")
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItem(all_label, "")
+    for value in values:
+        combo.addItem(labeler(value) if labeler else value, value)
+    index = combo.findData(selected)
+    combo.setCurrentIndex(index if index >= 0 else 0)
+    combo.blockSignals(False)
 
 
 def _shape_label(combination: Dict[str, Any]) -> str:
@@ -1666,6 +2138,8 @@ def _verdict_label(solver: Dict[str, Any] | None, decision: Dict[str, Any]) -> s
             return solver.get("verdict", "verified")
         if status == "conflict":
             return f"conflict:{solver.get('verdict', '?')}"
+        if status in {"unchecked", "not_applicable", "unavailable"}:
+            return solver.get("verdict") or status
         fusion = solver.get("fusion") or {}
         if fusion.get("status") == "analyzed":
             return f"{fusion.get('verdict', 'prose-spec')} (ext)"
@@ -1706,11 +2180,13 @@ def _stylesheet() -> str:
     QGroupBox#AxisGroup[axis_role="parameter"] { border: 1px solid #d7dee8; background: #ffffff; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
+    QGroupBox#VectorFilterGroup[group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
+    QGroupBox#VectorFilterGroup[group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
-    QTableWidget#PreviewTable { background: #ffffff; border: 1px solid #cfd9e6; border-radius: 7px; gridline-color: #e7edf5; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
-    QTableWidget#PreviewTable::item { padding: 5px 8px; }
-    QTableWidget#PreviewTable::item:selected { background: #e0f2fe; color: #0c4a6e; }
+    QTableView#PreviewTable { background: #ffffff; alternate-background-color: #f8fafc; border: 1px solid #cfd9e6; border-radius: 7px; gridline-color: #edf2f7; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; selection-background-color: #dbeafe; selection-color: #0c4a6e; }
+    QLineEdit#PreviewSearch { min-width: 260px; }
+    QLabel#PreviewFilterCount { color: #334155; font-weight: 700; min-width: 90px; }
     QLabel#PreviewStatsLabel { color: #0f766e; font-weight: 700; padding: 2px 4px; }
     QTreeWidget#PreviewStats { background: #f8fafc; border: 1px solid #cfd9e6; border-radius: 6px; alternate-background-color: #ffffff; }
     QTreeWidget#PreviewStats::item { padding: 3px 6px; }
@@ -1718,6 +2194,7 @@ def _stylesheet() -> str:
     QCheckBox { spacing: 7px; padding: 3px 6px; border-radius: 5px; }
     QCheckBox[choice_state="on"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
     QCheckBox[choice_state="off"] { background: #fee2e2; color: #7f1d1d; font-weight: 700; }
+    QCheckBox#VectorComplete:checked { background: #d1fae5; color: #064e3b; font-weight: 700; }
     QCheckBox:disabled { color: #94a3b8; background: transparent; }
     QPushButton { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px 12px; font-weight: 700; }
     QPushButton:hover { background: #eef6ff; }

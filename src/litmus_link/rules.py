@@ -3,7 +3,26 @@ from __future__ import annotations
 from typing import Dict, List
 
 from .models import Combination, Decision, EXCLUDED_ILLEGAL, EXCLUDED_UNSUPPORTED, GENERATED, HAND_REQUIRED
-from .profiles import ATTRIBUTES, CMO_OPS, CMO_SYNC_SEQUENCES, SKELETONS, TLB_OPS, VECTOR_OPS
+from .profiles import (
+    ATTRIBUTES,
+    CMO_OPS,
+    CMO_SYNC_SEQUENCES,
+    DEFERRED_VECTOR_OPS,
+    FORMAL_VECTOR_SKELETONS,
+    NANHU_VECTOR_ATTRIBUTES,
+    SKELETONS,
+    TLB_OPS,
+    VECTOR_LENGTHS,
+    VECTOR_INDEX_EEWS,
+    VECTOR_LMULS,
+    VECTOR_MASKS,
+    VECTOR_OPS,
+    VECTOR_TAILS,
+    VECTOR_WIDTHS,
+    VECTOR_ENDPOINTS,
+    vector_same_line_footprint,
+    vector_vlmax,
+)
 
 
 MEMORY_EVENTS = {"scalar_pair", "vector_load", "vector_store", "cmo", "pte_update", "ifetch", "amo"}
@@ -14,7 +33,7 @@ NEGATIVE_TLBS = {"nonleaf_pbmt"}
 ILLEGAL_VECTOR_FORMS = {"fof_strided", "fof_indexed"}
 VECTOR_LOAD_OPS = {operation for operation in VECTOR_OPS if not operation.endswith("store")}
 VECTOR_STORE_OPS = {operation for operation in VECTOR_OPS if operation.endswith("store")}
-VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "elem_order"}
+VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "index_eew", "vector_event"}
 VM_PARAMS = {"vm", "shootdown", "pte"}
 
 
@@ -28,8 +47,10 @@ RULE_DESCRIPTIONS: Dict[str, str] = {
     "cbo_zero_non_atomic": "cbo.zero must not be treated as an atomic whole-block store; the model writes it byte-by-byte (spike mmu.h:306-315).",
     "vector_fof_unit_only": "Fault-only-first is unit-stride LOAD only (incl. unit-stride segment); strided-FOF, indexed-FOF and FOF stores have no encoding (spike has only vle*ff.h; XiangShan VSplit.scala:156,518; DecodeUnit.scala:1061,1072).",
     "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
-    "vector_non_idempotent_fof": "FOF into non-idempotent memory is unsafe unless restart/trimming cannot occur.",
-    "vector_ordering": "Vector memory follows RVWMO per element; ordered-indexed keeps inter-element program order, unordered-indexed does not (spec contract; not modeled locally).",
+    "vector_memory_type": "The Nanhu target profile does not support vector accesses to MMIO/uncacheable or PBMT-tagged mappings; normal vector cases are restricted to cacheable memory.",
+    "vector_solver_scope": "The first vector-aware solver supports unit-stride, strided, and ordered/unordered indexed loads/stores with deterministic vl and mask semantics; fault, FOF, segment, restart, whole-register, and complex indexed-alias forms are deferred.",
+    "vector_ordering": "Vector memory follows RVWMO per active element; the vector-aware solver keeps unordered siblings at one instruction-order position and adds preserved element-order PPO only for ordered-indexed forms.",
+    "vector_native_relation_cycle": "Multi-endpoint Vector cases are built from validated native relation cycles; endpoint ISA legality and formal solver scope are checked per generated case.",
     "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",
     "remote_sfence": "sfence.vma flushes the local hart only; remote shootdown is a software IPI and must be explicitly modeled (spike mmu.cc:61-64; XiangShan Fence.scala:67-74).",
     "fence_i_local": "fence.i synchronizes only the executing hart's instruction fetch stream; cross-hart needs a software IPI (spike mmu.cc:46-49; XiangShan Fence.scala:66,77).",
@@ -50,6 +71,25 @@ def list_rules() -> Dict[str, str]:
 def evaluate(combination: Combination) -> Decision:
     requires = _requires(combination)
     notes: List[str] = []
+
+    if (
+        combination.category == "vector_mem"
+        and combination.memory_event == "multi_endpoint"
+        and combination.vector == "relation_cycle"
+        and combination.attribute == "cacheable"
+        and combination.tlb == "no_tlb"
+        and combination.cmo == "no_cmo"
+    ):
+        return Decision(
+            GENERATED,
+            "Multi-endpoint scalar/AMO/Vector relation-cycle case; per-case ISA legality and formal scope are recorded in case_ir metadata.",
+            "prose-spec",
+            "hardware-observation",
+            ["RV64I", "V"],
+            ["rule:vector_native_relation_cycle"],
+            "vector",
+            {"formal_forbidden_claim": "case-ir-specific"},
+        )
 
     invalid = _axis_validity(combination, requires)
     if invalid is not None:
@@ -110,6 +150,60 @@ def evaluate(combination: Combination) -> Decision:
             "vector",
         )
 
+    if combination.vector in DEFERRED_VECTOR_OPS:
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            f"Vector form {combination.vector} is intentionally outside the current vector-aware solver scope; "
+            "FOF/fault trimming, segment partial completion, restart, and whole-register behavior are deferred.",
+            "platform-specific",
+            "hardware-observation",
+            requires,
+            ["rule:vector_solver_scope"],
+            "vector",
+            {
+                "formal_forbidden_claim": "false",
+                "vector_solver": "unsupported",
+            },
+        )
+
+    # This repository targets Nanhu's implemented vector LSU contract.  Keep
+    # vector cases on ordinary cacheable memory; vector accesses to MMIO,
+    # uncacheable, or PBMT-tagged mappings are outside this target's supported
+    # legal corpus and must not be presented as RVWMO tests.
+    if combination.vector != "none" and combination.attribute not in NANHU_VECTOR_ATTRIBUTES:
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "Nanhu vector memory cases are restricted to cacheable mappings; "
+            f"vector + {combination.attribute} (MMIO/uncacheable/PBMT-tagged) "
+            "is outside the supported vector access path.",
+            "platform-specific",
+            "hardware-observation",
+            requires,
+            ["rule:vector_memory_type"],
+            "vector",
+            {
+                "target_nanhu": "unsupported",
+                "formal_forbidden_claim": "false",
+                "vector_memory_type": "cacheable-only",
+            },
+        )
+
+    if combination.vector != "none" and combination.params.get("pte") == "pbmt_flip":
+        return Decision(
+            EXCLUDED_UNSUPPORTED,
+            "Nanhu vector cases cannot cross a PTE transition that introduces a PBMT-tagged mapping.",
+            "platform-specific",
+            "hardware-observation",
+            requires,
+            ["rule:vector_memory_type"],
+            "vector",
+            {
+                "target_nanhu": "unsupported",
+                "formal_forbidden_claim": "false",
+                "vector_memory_type": "cacheable-only",
+            },
+        )
+
     sync = str(combination.params.get("sync", "none"))
     param_decision = _param_validity(combination, requires)
     if param_decision is not None:
@@ -161,17 +255,6 @@ def evaluate(combination: Combination) -> Decision:
             "cmo",
         )
 
-    if combination.vector in {"fof_load", "fof_segment_load"} and combination.attribute == "pbmt_io":
-        return Decision(
-            EXCLUDED_ILLEGAL,
-            "FOF access to non-idempotent PBMT=IO memory is not generated because restart/trimming safety is not proven.",
-            "negative-exception",
-            "negative-exception",
-            requires,
-            ["rule:vector_non_idempotent_fof"],
-            "vector",
-        )
-
     if combination.memory_event == "amo" and combination.attribute in {"pbmt_nc", "pbmt_io"}:
         return Decision(
             EXCLUDED_ILLEGAL,
@@ -217,17 +300,6 @@ def evaluate(combination: Combination) -> Decision:
             requires,
             ["rule:rvwmo_scope"],
             "cmo",
-        )
-
-    if combination.attribute == "pbmt_io" and combination.vector != "none":
-        return Decision(
-            HAND_REQUIRED,
-            "Vector access to PBMT=IO needs non-idempotent trap/restart policy and platform PMA setup.",
-            "platform-specific",
-            "platform-specific",
-            requires,
-            ["rule:vector_non_idempotent_fof", "rule:rvwmo_scope"],
-            "vector",
         )
 
     rvwmo_class = _rvwmo_class(combination)
@@ -350,7 +422,7 @@ def _axis_validity(combination: Combination, requires: List[str]) -> Decision | 
         ("attribute", combination.attribute, {"cacheable", *ATTRIBUTES, *NEGATIVE_ATTRIBUTES}),
         ("tlb", combination.tlb, {"no_tlb", *TLB_OPS, *NEGATIVE_TLBS}),
         ("cmo", combination.cmo, {"no_cmo", *CMO_OPS, *NEGATIVE_CMOS, *LEGACY_FAKE_CMOS}),
-        ("vector", combination.vector, {"none", "cross_page", *VECTOR_OPS, *ILLEGAL_VECTOR_FORMS}),
+        ("vector", combination.vector, {"none", "cross_page", *VECTOR_OPS, *DEFERRED_VECTOR_OPS, *ILLEGAL_VECTOR_FORMS}),
     ]
     for axis, value, allowed in checks:
         if value not in allowed:
@@ -398,6 +470,110 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             ["rule:parameter_scope"],
             "vector",
         )
+    if combination.vector != "none":
+        vector_domains = {
+            "sew": set(VECTOR_WIDTHS),
+            "lmul": set(VECTOR_LMULS),
+            "mask": set(VECTOR_MASKS),
+            "tail": set(VECTOR_TAILS),
+            "vl": set(VECTOR_LENGTHS),
+            "index_eew": set(VECTOR_INDEX_EEWS),
+        }
+        for key, allowed in vector_domains.items():
+            if key in combination.params and str(combination.params[key]) not in allowed:
+                return Decision(
+                    EXCLUDED_UNSUPPORTED,
+                    f"Vector parameter {key}={combination.params[key]!r} is outside the supported deterministic domain.",
+                    "platform-specific",
+                    "hardware-observation",
+                    requires,
+                    ["rule:vector_solver_scope"],
+                    "vector",
+                    {"formal_forbidden_claim": "false", "vector_solver": "unsupported"},
+                )
+        sew = str(combination.params.get("sew", "e32"))
+        lmul = str(combination.params.get("lmul", "m1"))
+        mask = str(combination.params.get("mask", "unmasked"))
+        vl = str(combination.params.get("vl", "vlmax"))
+        if vector_vlmax(sew, lmul) is None:
+            return Decision(
+                EXCLUDED_ILLEGAL,
+                f"SEW={sew}, LMUL={lmul} does not provide one complete element for VLEN=128.",
+                "negative-exception",
+                "negative-exception",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "illegal-vtype"},
+            )
+        endpoint = combination.params.get("vector_event")
+        endpoint_kind = "store" if combination.vector in VECTOR_STORE_OPS else "load"
+        valid_endpoints = VECTOR_ENDPOINTS.get(combination.skeleton, {}).get(endpoint_kind, [])
+        if endpoint is not None and str(endpoint) not in valid_endpoints:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                f"Vector endpoint {endpoint!r} is not a {endpoint_kind} event in {combination.skeleton}.",
+                "prose-spec",
+                "hardware-observation",
+                requires,
+                ["rule:vector_event_shape"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported-endpoint"},
+                )
+        index_eew = combination.params.get("index_eew")
+        if index_eew is not None and "indexed" not in combination.vector:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "index_eew only applies to indexed vector load/store forms.",
+                "platform-specific",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported-index-eew"},
+            )
+        if "indexed" in combination.vector and index_eew is not None and str(index_eew) not in VECTOR_INDEX_EEWS:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                f"Indexed vector parameter index_eew={index_eew!r} is outside the supported EEW domain.",
+                "platform-specific",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported-index-eew"},
+            )
+        if str(combination.params.get("footprint", "same_line")) == "same_line" and not vector_same_line_footprint(
+            combination.vector,
+            sew,
+            lmul,
+            mask,
+            vl,
+        ):
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "The active Vector element footprint exceeds one 64-byte cache line; "
+                "cross-line formal solving is deferred.",
+                "prose-spec",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "cross-line-deferred"},
+            )
+        deferred_params = sorted({"elem_order", "vstart"}.intersection(combination.params))
+        if deferred_params:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                f"Vector parameters {', '.join(deferred_params)} are outside the current solver scope; "
+                "element order is derived from the instruction form and restart/vstart is deferred.",
+                "platform-specific",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported"},
+            )
     vm_params = sorted(VM_PARAMS.intersection(combination.params))
     if vm_params and combination.tlb == "no_tlb":
         return Decision(
@@ -497,21 +673,32 @@ def _rendering_fidelity(combination: Combination, requires: List[str]) -> Decisi
 
 _FORMAL_VECTOR_PARAM_VALUES = {
     "variant": {"base", "fence_rw_rw", "fence_w_w_r_rw"},
-    "sew": {"e32"},
-    "lmul": {"m1"},
-    "mask": {"unmasked"},
-    "tail": {"ta_ma"},
+    "sew": {"e8", "e16", "e32", "e64"},
+    "lmul": set(VECTOR_LMULS),
+    "mask": {"unmasked", "masked"},
+    "tail": {"ta_ma", "ta_mu", "tu_ma", "tu_mu"},
     "footprint": {"same_line"},
-    "vl": {"vlmax"},
-    "elem_order": {"single_event"},
+    "vl": set(VECTOR_LENGTHS),
+    "index_eew": set(VECTOR_INDEX_EEWS),
     "stress": {"none"},
 }
 
 
 def _is_formal_vector_rvwmo(combination: Combination) -> bool:
-    if combination.skeleton != "MP" or combination.attribute not in {"cacheable", "pbmt_nc"}:
+    if (
+        combination.skeleton not in FORMAL_VECTOR_SKELETONS
+        or combination.attribute != "cacheable"
+        or combination.vector not in VECTOR_OPS
+    ):
         return False
     for key, value in combination.params.items():
+        if key == "vector_event":
+            endpoint_kind = "store" if combination.vector in VECTOR_STORE_OPS else "load"
+            if str(value) not in VECTOR_ENDPOINTS[combination.skeleton][endpoint_kind]:
+                return False
+            continue
+        if key == "index_eew" and "indexed" not in combination.vector:
+            return False
         allowed = _FORMAL_VECTOR_PARAM_VALUES.get(key)
         if allowed is None or str(value) not in allowed:
             return False

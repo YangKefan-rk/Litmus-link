@@ -8,8 +8,7 @@ from litmus_link.litmus_ir import MemoryAccess
 from litmus_link.memory_layout import all_accesses_overlap, expand_memory_layouts
 from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_edges import edge_by_label
-from litmus_link.native_scalar import lower_native_cycle
-from litmus_link.native_scalar import generate_native_templates
+from litmus_link.native_scalar import generate_native_templates, lower_native_cycle, native_template_audit
 from litmus_link.toolchain import ToolchainError, herd_judge, tools_available
 
 
@@ -35,19 +34,40 @@ def test_layout_expansion_covers_width_boundary_and_mixed_axes() -> None:
         widths=(2, 8),
         boundaries=("same16", "cross64"),
     )
-    assert len(layouts) == 1 + 2 * 2 + 2
+    assert len(layouts) == 1 + 2 * 2 + (2**2 - 2) * 2
     assert layouts[0].id == "aligned-w32"
     assert all(layout.to_json()["mag_bytes"] is None for layout in layouts)
+
+
+def test_atomic_layouts_cover_fixed_width_and_aligned_overlap_shapes() -> None:
+    layouts = expand_memory_layouts(
+        ("atomic", "atomic_mixed"),
+        widths=(2, 4, 8),
+        atomic_overlaps=("same_start", "partial_overlap"),
+        event_count=4,
+    )
+    assert [layout.id for layout in layouts[:3]] == ["atomic-w16", "atomic-w32", "atomic-w64"]
+    assert len(layouts) == 3 + (3**4 - 3) * 2
+    assert {layout.overlap for layout in layouts[3:]} == {"same_start", "partial_overlap"}
+    assert all(len(layout.width_pattern) == 4 for layout in layouts[3:])
+    assert all(len(set(layout.width_pattern)) >= 2 for layout in layouts[3:])
+    for layout in layouts:
+        accesses = [layout.access_for("x", index) for index in range(4)]
+        assert all(access.natural_aligned for access in accesses)
+        if layout.mode == "atomic_mixed":
+            assert all(access.atomicity_model == "mixed_size_atomic" for access in accesses)
+            assert len({access.size_bytes for access in accesses}) >= 2
+            assert all_accesses_overlap(accesses)
 
 
 @pytest.mark.parametrize("boundary", ["same16", "cross16", "cross64"])
 def test_mixed_layout_accesses_are_misaligned_and_share_bytes(boundary: str) -> None:
     layout = next(
-        item
-        for item in expand_memory_layouts(("mixed",), boundaries=(boundary,))
-        if item.boundary == boundary
+        item for item in expand_memory_layouts(
+            ("mixed",), boundaries=(boundary,), event_count=3
+        ) if item.width_pattern == (2, 4, 8)
     )
-    accesses = [layout.access_for("x", index) for index in range(6)]
+    accesses = [layout.access_for("x", index) for index in range(3)]
     assert {access.size_bytes for access in accesses} == {2, 4, 8}
     assert all(not access.natural_aligned for access in accesses)
     assert all(access.atomicity_model == "byte_level_no_mag" for access in accesses)
@@ -81,18 +101,84 @@ def test_native_lowering_emits_real_cross_line_misaligned_assembly() -> None:
 
 def test_mixed_native_lowering_varies_widths_within_each_location() -> None:
     layout = next(
-        item for item in expand_memory_layouts(("mixed",), boundaries=("same16",))
+        item for item in expand_memory_layouts(
+            ("mixed",), boundaries=("same16",), event_count=4
+        ) if item.width_pattern == (2, 4, 8, 2)
     )
     case = lower_native_cycle(_mp_cycle(), memory_layout=layout)
-    by_location = {}
+    by_event = {}
     for event in case.case_ir.events():
-        if event.memory_access is not None:
-            by_location.setdefault(event.location, []).append(event.memory_access)
-    assert by_location
-    for accesses in by_location.values():
-        assert {access.size_bytes for access in accesses} == {2, 4}
-        assert all_accesses_overlap(accesses)
-        assert len({access.covered_bytes for access in accesses}) == 2
+        if event.role == "cycle-event" and event.memory_access is not None:
+            by_event[event.event_id] = event.memory_access
+    assert [by_event[f"v{index}"].size_bytes for index in range(4)] == [2, 4, 8, 2]
+    assert all_accesses_overlap(by_event.values())
+
+
+def test_atomic_mixed_lowering_is_aligned_and_partial_overlap() -> None:
+    layout = next(
+        item
+        for item in expand_memory_layouts(
+            ("atomic_mixed",),
+            widths=(2, 4, 8),
+            atomic_overlaps=("partial_overlap",),
+            event_count=4,
+        )
+        if item.width_pattern == (2, 4, 2, 8)
+    )
+    cycle = NativeCycle(_mp_cycle().edges, "MP", ("AMO",) * 4)
+    case = lower_native_cycle(cycle, memory_layout=layout)
+    events = [event for event in case.case_ir.events() if event.role == "cycle-event"]
+    accesses = [event.memory_access for event in events]
+    assert all(access is not None and access.natural_aligned for access in accesses)
+    assert all(access is not None and access.atomicity_model == "mixed_size_atomic" for access in accesses)
+    assert any("amoor.h" in event.instruction or "amoswap.h" in event.instruction for event in events)
+    assert any(access is not None and access.offset_bytes == 4 for access in accesses)
+    assert case.case_ir.expected_outcome == "manual_oracle_required"
+
+
+def test_atomic_mixed_widths_are_assigned_per_cycle_event() -> None:
+    layout = next(
+        item
+        for item in expand_memory_layouts(
+            ("atomic_mixed",),
+            widths=(2, 4, 8),
+            atomic_overlaps=("same_start",),
+            event_count=4,
+        )
+        if item.width_pattern == (2, 4, 2, 8)
+    )
+    case = lower_native_cycle(
+        NativeCycle(_mp_cycle().edges, "MP", ("AMO",) * 4),
+        memory_layout=layout,
+    )
+    by_event = {
+        event.event_id: event.memory_access.size_bytes
+        for event in case.case_ir.events()
+        if event.role == "cycle-event" and event.memory_access is not None
+    }
+    assert by_event == {"v0": 2, "v1": 4, "v2": 2, "v3": 8}
+
+
+def test_audit_uses_concrete_event_level_layout_count() -> None:
+    layouts = expand_memory_layouts(
+        ("atomic", "atomic_mixed"),
+        widths=(2, 4, 8),
+        atomic_overlaps=("same_start", "partial_overlap"),
+    )
+    audit = native_template_audit(
+        ["MP"],
+        ("po",),
+        include_same=False,
+        annotations=("AMO",),
+        memory_layouts=layouts,
+    )
+    assert audit["accepted"] == 159
+    assert audit["memory_layout_counts_by_cycle_size"]["4"] == {
+        "cycle_events": 4,
+        "concrete_layouts": 159,
+        "mode_atomic": 3,
+        "mode_atomic_mixed": 156,
+    }
 
 
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")

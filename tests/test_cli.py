@@ -16,7 +16,7 @@ def test_cli_generate_and_validate(tmp_path: Path, capsys) -> None:  # type: ign
     assert main(["generate", "--profile", "smoke", "--out", str(out)]) == 0
     assert main(["validate", str(out / "@all")]) == 0
     captured = capsys.readouterr()
-    assert "validated 22 litmus files" in captured.out
+    assert "validated 24 litmus files" in captured.out
 
 
 def test_cli_list_rules(capsys) -> None:  # type: ignore[no-untyped-def]
@@ -49,7 +49,7 @@ def test_cli_native_catalog_and_generation(tmp_path: Path, capsys) -> None:  # t
         "--no-judge", "--out", str(out),
     ]) == 0
     report_output = capsys.readouterr().out
-    assert '"available_litmus": 106496' in report_output
+    assert '"available_litmus": 260000' in report_output
     assert len(validate_path(out / "@all")) == 3
 
 
@@ -131,7 +131,7 @@ def test_cli_rule_file_generate_and_audit(tmp_path: Path, capsys) -> None:  # ty
     rule_file.write_text(json.dumps({"name": "cli-custom", "axes": {"cmo": ["flush"]}}), encoding="utf-8")
     out = tmp_path / "custom"
     assert main(["generate", "--rule-file", str(rule_file), "--out", str(out)]) == 0
-    assert (out / "LL_cmo_MP_cmo_cacheable_no_tlb_flush_none.litmus").exists()
+    assert (out / "MP+cbo.flush.litmus").exists()
     assert main(["audit", "--rule-file", str(rule_file), "--out", str(tmp_path / "audit")]) == 0
     assert "cli-custom" in capsys.readouterr().out
 
@@ -147,6 +147,20 @@ def test_gui_options_and_preview() -> None:
     options = options_payload()
     assert "stress-large" in options["profiles"]
     assert "sew" in options["param_axes"]
+    assert set(options["axes"]["vector"]) == {
+        "none",
+        "unit_load",
+        "unit_store",
+        "strided_load",
+        "strided_store",
+        "indexed_unordered_load",
+        "indexed_unordered_store",
+        "indexed_ordered_load",
+        "indexed_ordered_store",
+    }
+    assert "elem_order" not in options["param_axes"]
+    assert options["param_axes"]["vl"] == ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
+    assert options["param_axes"]["index_eew"] == ["ei8", "ei16", "ei32", "ei64"]
     preview = preview_payload(
         {
             "mode": "rule",
@@ -160,6 +174,96 @@ def test_gui_options_and_preview() -> None:
     )
     assert preview["report"]["total_combinations"] == 1
     assert preview["sample"][0]["combination"]["params"]["sew"] == "e32"
+    assert preview["sample"][0]["solver"]["tool"] == "litmus-link-vector-rvwmo"
+    assert preview["sample"][0]["solver"]["vector"]["schema"] == "litmus-link.vector-solver.v1"
+
+
+def test_gui_supported_vector_matrix_expands_and_generates_every_form_mask_and_vl(tmp_path: Path) -> None:
+    options = options_payload()
+    forms = [value for value in options["axes"]["vector"] if value != "none"]
+    payload = {
+        "mode": "rule",
+        "rule": {
+            "name": "gui-vector-supported-matrix",
+            "axes": {
+                "skeleton": ["MP"],
+                "attribute": ["cacheable"],
+                "vector": forms,
+                "cmo": ["no_cmo"],
+                "tlb": ["no_tlb"],
+            },
+            "param_axes": {
+                "sew": ["e32"],
+                "lmul": ["m1"],
+                "mask": ["unmasked", "masked"],
+                "tail": ["ta_ma"],
+                "footprint": ["same_line"],
+                "vl": ["vl1", "vl2", "vl4", "vlmax"],
+            },
+            "limit": 192,
+        },
+        "sample_limit": 192,
+    }
+    preview = preview_payload(payload)
+    assert preview["report"]["total_combinations"] == 64
+    assert preview["report"]["generated"] == 64
+    assert preview["report"]["generated_litmus"] == 192
+    assert len(preview["sample"]) == 192
+    domain = preview["domain_classification_counts"]
+    assert domain["generated_cases"] == 192
+    assert domain["preview_displayed_cases"] == 192
+    assert set(domain["groups"]["vector"]) == set(forms)
+    observed = {
+        (
+            item["combination"]["vector"],
+            item["combination"]["params"]["mask"],
+            item["combination"]["params"]["vl"],
+        )
+        for item in preview["sample"]
+    }
+    assert len(observed) == 64
+    assert all(item["solver"]["tool"] == "litmus-link-vector-rvwmo" for item in preview["sample"])
+    generated = generate_payload({**payload, "out": str(tmp_path / "vector-matrix")})
+    assert generated["generated_litmus"] == 192
+    assert generated["generation_limited"] is False
+    assert generated["solver"] == {"verified": 192, "conflict": 0, "not_applicable": 0}
+
+
+def test_dedicated_vector_mode_uses_relation_cycles_and_random_final_cases(tmp_path: Path) -> None:
+    payload = {
+        "mode": "vector",
+        "name": "vector-gui-focused",
+        "complete": False,
+        "skeletons": ["MP"],
+        "mechanisms": ["po", "dependency"],
+        "endpoint_modes": ["P", "AMO"],
+        "forms": ["unit_load", "unit_store"],
+        "sew": ["e32"],
+        "lmul": ["m1"],
+        "index_eew": ["ei8"],
+        "mask": ["unmasked"],
+        "tail": ["ta_ma"],
+        "vl": ["vl1"],
+        "alignments": ["aligned"],
+        "sample_limit": 5,
+        "generate_limit": 3,
+        "random_seed": 9,
+        "out": str(tmp_path / "vector-gui"),
+    }
+    preview = preview_payload(payload)
+    assert preview["source"] == "litmus-link-native-cycle+rvv"
+    assert preview["report"]["total_combinations"] > 5
+    assert preview["report"]["generated_litmus"] == preview["report"]["total_combinations"]
+    assert len(preview["sample"]) == 5
+    assert {item["case_ir"]["variant"] for item in preview["sample"]} == {
+        "vector-native-cycle"
+    }
+    assert all("Rfe" in item["name"] or "Fre" in item["name"] for item in preview["sample"])
+
+    generated = generate_payload(payload)
+    assert generated["generated_litmus"] == 3
+    assert sum(generated["solver"].values()) == 3
+    assert generated["sampling"] == "coverage-stratified-random-without-replacement"
 
 
 @pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
@@ -215,9 +319,10 @@ def test_gui_native_scalar_preview_is_exhaustive_for_configured_mp_domain() -> N
             "judge": False,
         }
     )
-    assert preview["available_litmus"] == 106496
+    assert preview["available_litmus"] == 260000
     assert preview["displayed_litmus"] == 3
-    assert all(item["name"].startswith("NATIVE_MP_") for item in preview["sample"])
+    assert all(item["name"].startswith("MP+") for item in preview["sample"])
+    assert all("NATIVE" not in item["name"] for item in preview["sample"])
     assert all(item["decision"]["reason"].startswith("Scalar RVWMO test exhaustively") for item in preview["sample"])
     assert all(len(item["case_ir"]["relations"]) == 4 for item in preview["sample"])
 
@@ -237,6 +342,31 @@ def test_gui_native_diy_preview_uses_embedded_verification() -> None:
     assert preview["available_litmus"] == 30
     assert preview["displayed_litmus"] == 4
     assert all(item["solver"]["backend"] == "embedded" for item in preview["sample"])
+    assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
+
+
+def test_gui_native_cycle_preview_filters_impossible_coherence_cycles() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_cycles",
+            "mechanisms": ["po"],
+            "annotations": ["P"],
+            "include_same": True,
+            "include_internal": True,
+            "min_size": 2,
+            "size": 3,
+            "nprocs": 2,
+            "max_accesses_per_proc": 4,
+            "sample_limit": 20,
+            "judge": True,
+            "solver_backend": "embedded",
+        }
+    )
+    # Fre Wsi Rfe used to reach lowering first and abort the whole GUI preview:
+    # its rf/fr/co constraints require opposite write orders on one location.
+    assert preview["available_litmus"] == 5
+    assert preview["displayed_litmus"] == 5
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
 
 
@@ -261,13 +391,13 @@ def test_gui_native_preview_expands_misaligned_layout_configuration() -> None:
             },
         }
     )
-    assert preview["available_litmus"] == 6
-    assert preview["displayed_litmus"] == 6
+    assert preview["available_litmus"] == 32
+    assert preview["displayed_litmus"] == 10
     classifications = preview["classification_counts"]
-    assert classifications["displayed_cases"] == 6
-    assert classifications["groups"]["status"] == {"generated": 6}
-    assert classifications["groups"]["skeleton"] == {"MP": 6}
-    assert classifications["groups"]["memory_layout"] == {"misaligned": 4, "mixed": 2}
+    assert classifications["displayed_cases"] == 10
+    assert classifications["groups"]["status"] == {"generated": 10}
+    assert classifications["groups"]["skeleton"] == {"MP": 10}
+    assert classifications["groups"]["memory_layout"] == {"misaligned": 4, "mixed": 6}
     assert all(item["solver"]["status"] == "verified" for item in preview["sample"])
     assert any("mixed-size" in item["litmus"] or "mixed_" in item["name"] for item in preview["sample"])
     assert any(",60(" in item["litmus"] for item in preview["sample"])
@@ -277,6 +407,46 @@ def test_gui_native_preview_expands_misaligned_layout_configuration() -> None:
         expected = "FORBIDDEN" if item["solver"]["verdict"] == "forbidden" else "OBSERVABLE"
         assert expected in interpretation
         assert "byte-level no-MAG solver" in interpretation
+
+
+def test_gui_native_preview_expands_aligned_atomic_layouts() -> None:
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_templates",
+            "skeletons": ["MP"],
+            "mechanisms": ["po"],
+            "include_same": False,
+            "annotations": ["AMO"],
+            "sample_limit": 10,
+            "judge": True,
+            "solver_backend": "embedded",
+            "memory_layout": {
+                "enabled": True,
+                "include_aligned": False,
+                "modes": ["atomic", "atomic_mixed"],
+                "width_bits": [16, 32, 64],
+                "boundaries": ["same16"],
+                "atomic_overlaps": ["same_start", "partial_overlap"],
+            },
+        }
+    )
+    # MP with one selected relation cycle has three uniform widths plus every
+    # four-event non-uniform width assignment (3^4 - 3), for both overlap
+    # shapes.  The preview row cap remains independent from the audit count.
+    assert preview["available_litmus"] == 159
+    assert preview["displayed_litmus"] == 10
+    assert any("amoor.h" in item["litmus"] for item in preview["sample"])
+    assert any("amoor.d" in item["litmus"] for item in preview["sample"])
+    assert any(
+        "amoor.h" in item["litmus"] and "Zabha" in item["decision"]["requires"]
+        for item in preview["sample"]
+    )
+    assert any(
+        item["solver"]["status"] == "not_applicable"
+        and item["case_ir"]["expected_outcome"] == "manual_oracle_required"
+        for item in preview["sample"]
+    )
 
 
 def test_gui_options_expose_only_no_mag_atomicity() -> None:

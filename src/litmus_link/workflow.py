@@ -42,6 +42,7 @@ from .native_diy import (
     DiyConfig,
 )
 from .memory_layout import (
+    ATOMIC_OVERLAPS,
     MEMORY_LAYOUT_MODES,
     MISALIGNED_BOUNDARIES,
     MISALIGNED_WIDTHS,
@@ -52,11 +53,12 @@ from .profiles import (
     ATTRIBUTES,
     CMO_OPS,
     CMO_SYNC_SEQUENCES,
-    ELEMENT_ORDERS,
+    FORMAL_VECTOR_SKELETONS,
     SKELETONS,
     STRESSORS,
     TLB_OPS,
     VECTOR_FOOTPRINTS,
+    VECTOR_INDEX_EEWS,
     VECTOR_LENGTHS,
     VECTOR_LMULS,
     VECTOR_MASKS,
@@ -68,6 +70,7 @@ from .profiles import (
     SHOOTDOWN_SCOPES,
     list_profiles,
     profile_combinations,
+    vector_combinations,
 )
 from .renderer import render_cases
 from .rule_file import RuleFileError, load_rule_data, rule_field_values
@@ -82,6 +85,12 @@ from .scalar import (
 )
 from .solver import solve_generated_case
 from .toolchain import HerdVerdict
+from .vector_native import (
+    VECTOR_ALIGNMENTS,
+    VectorNativeDomain,
+    generate_vector_cases,
+    sample_vector_cases,
+)
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
@@ -89,12 +98,12 @@ PARAM_AXIS_VALUES: Dict[str, list[str]] = {
     "width": ["w8", "w16", "w32", "w64"],
     "outcome": ["allowed", "forbidden", "mixed_size"],
     "sew": list(VECTOR_WIDTHS),
+    "index_eew": list(VECTOR_INDEX_EEWS),
     "lmul": list(VECTOR_LMULS),
     "mask": list(VECTOR_MASKS),
     "tail": list(VECTOR_TAILS),
     "footprint": list(VECTOR_FOOTPRINTS),
     "vl": list(VECTOR_LENGTHS),
-    "elem_order": list(ELEMENT_ORDERS),
     "sync": list(CMO_SYNC_SEQUENCES),
     "vm": list(VM_CONTEXTS),
     "shootdown": list(SHOOTDOWN_SCOPES),
@@ -116,7 +125,7 @@ def options_payload() -> Dict[str, Any]:
             "tlb": ["no_tlb", *TLB_OPS],
         },
         "rule_file_fields": rule_fields,
-        "param_axes": PARAM_AXIS_VALUES,
+            "param_axes": PARAM_AXIS_VALUES,
         "features": feature_description_catalog(),
         "scalar": scalar_catalog(),
         "native_scalar": {
@@ -133,22 +142,48 @@ def options_payload() -> Dict[str, Any]:
                 "modes": list(MEMORY_LAYOUT_MODES),
                 "width_bits": [value * 8 for value in MISALIGNED_WIDTHS],
                 "boundaries": list(MISALIGNED_BOUNDARIES),
+                "atomic_overlaps": list(ATOMIC_OVERLAPS),
                 "atomicity_model": "byte_level_no_mag",
+                "aligned_atomic_models": ["aligned_atomic", "mixed_size_atomic"],
                 "mag_supported": False,
             },
+        },
+        "vector_native": {
+            "mechanisms": list(DEFAULT_NATIVE_MECHANISMS),
+            "endpoint_modes": list(NATIVE_ANNOTATIONS),
+            "alignments": list(VECTOR_ALIGNMENTS),
         },
     }
 
 
-def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def preview_payload(
+    payload: Dict[str, Any],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Dict[str, Any]:
     if str(payload.get("mode", "profile")) == "scalar":
-        return _scalar_preview_payload(payload)
+        return _scalar_preview_payload(payload, progress_callback=progress_callback)
+    if str(payload.get("mode", "profile")) == "vector":
+        return _vector_native_preview_payload(payload, progress_callback=progress_callback)
     name, combinations, source = _combinations_from_payload(payload)
     sample_limit = int(payload.get("sample_limit", 10))
-    use_corpus = source == "gui" and corpus_available()
+    compute_verdicts = bool(payload.get("compute_verdicts", True))
     cached = list(combinations) if isinstance(combinations, list) else None
+    use_corpus = (
+        source == "gui"
+        and corpus_available()
+        and cached is not None
+        and any(_is_scalar_corpus_combination(combination) for combination in cached)
+    )
 
     sample: list = []
+    progress_total = max(
+        sample_limit
+        if use_corpus or cached is None
+        else min(sample_limit, len(cached)),
+        1,
+    )
+    if progress_callback is not None:
+        progress_callback(0, progress_total, f"Preparing up to {sample_limit:,} preview entries")
     if use_corpus:
         # Total-item budget: bounds herd7 runs regardless of how many skeletons
         # are checked. Corpus combinations expand into real tool-generated tests.
@@ -157,31 +192,68 @@ def preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             if budget <= 0:
                 break
             if _is_scalar_corpus_combination(combination):
-                items = _corpus_preview_items(combination, min(budget, 8))
+                items = _corpus_preview_items(
+                    combination,
+                    min(budget, 8),
+                    compute_verdicts=compute_verdicts,
+                )
             else:
-                items = _render_preview_items(combination)
+                items = _render_preview_items(combination, compute_verdicts=compute_verdicts)
             for item in items:
                 if budget <= 0:
                     break
                 sample.append(item)
                 budget -= 1
+                if progress_callback is not None:
+                    progress_callback(
+                        min(len(sample), progress_total),
+                        progress_total,
+                        f"Prepared {len(sample):,} preview entries",
+                    )
     else:
         iterator = iter(cached if cached is not None else combinations)
-        for combination in islice(iterator, max(sample_limit, 0)):
-            sample.extend(_render_preview_items(combination))
+        for combination_index, combination in enumerate(
+            islice(iterator, max(sample_limit, 0)),
+            start=1,
+        ):
+            sample.extend(
+                _render_preview_items(
+                    combination,
+                    compute_verdicts=compute_verdicts,
+                )
+            )
+            if progress_callback is not None:
+                progress_callback(
+                    min(combination_index, progress_total),
+                    progress_total,
+                    f"Prepared {len(sample):,} cases from {combination_index:,} combinations",
+                )
 
     summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
-    report = (
-        _gui_corpus_report(name, summary_combinations, source)
-        if use_corpus
-        else audit_summary(name, summary_combinations, source=source)
-    )
+    domain_counts: Dict[str, Any] = {}
+    if cached is not None and not use_corpus:
+        domain_counts = _domain_classification_counts(
+            cached,
+            progress_callback=progress_callback,
+        )
+        report = _domain_audit_report(name, domain_counts, source)
+    else:
+        if progress_callback is not None:
+            progress_callback(progress_total, progress_total, "Classifying preview domain")
+        report = (
+            _gui_corpus_report(name, summary_combinations, source)
+            if use_corpus
+            else audit_summary(name, summary_combinations, source=source)
+        )
+    if domain_counts:
+        domain_counts["preview_displayed_cases"] = len(sample)
     return {
         "profile": name,
         "source": source,
         "report": report,
         "sample": sample,
         "classification_counts": _preview_classification_counts(sample),
+        "domain_classification_counts": domain_counts,
     }
 
 
@@ -231,11 +303,20 @@ def materialize_preview_diagram(item: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-def _scalar_preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _scalar_preview_payload(
+    payload: Dict[str, Any],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Dict[str, Any]:
     sample_limit = _positive_int(payload.get("sample_limit", 1000), "sample_limit")
     with TemporaryDirectory(prefix="litmus-link-scalar-preview-") as temporary:
         preview_dir = Path(temporary)
-        report = _run_scalar_generator(payload, preview_dir, limit=sample_limit)
+        report = _run_scalar_generator(
+            payload,
+            preview_dir,
+            limit=sample_limit,
+            progress_callback=progress_callback,
+        )
         sample = _scalar_preview_items(preview_dir, report)
     report = dict(report)
     report["displayed_litmus"] = len(sample)
@@ -255,6 +336,66 @@ def _scalar_preview_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "generation_limited": report.get("generation_limited", False),
         "sample": sample,
         "classification_counts": _preview_classification_counts(sample),
+    }
+
+
+def _vector_native_preview_payload(
+    payload: Dict[str, Any],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Dict[str, Any]:
+    compute_verdicts = bool(payload.get("compute_verdicts", True))
+    cases, audit = sample_vector_cases(
+        payload,
+        compute_verdicts=compute_verdicts,
+        progress_callback=progress_callback,
+    )
+    sample = [
+        _preview_item(
+            case.combination,
+            case.decision.to_json(),
+            case.name,
+            case.litmus,
+            case.case_ir.to_json() if case.case_ir is not None else None,
+            dict(case.solver or {}),
+            _deferred_preview_diagram(case.case_ir, dict(case.solver or {}))
+            if case.case_ir is not None
+            else None,
+        )
+        for case in cases
+    ]
+    report = {
+        "schema": "litmus-link.vector-native-preview.v1",
+        "profile": "vector-native",
+        "total_combinations": audit["total_cases"],
+        "generated": audit["total_cases"],
+        "generated_litmus": audit["total_cases"],
+        "displayed_litmus": len(sample),
+        "excluded_illegal": 0,
+        "excluded_unsupported": 0,
+        "hand_required": 0,
+        "missing": 0,
+        "sampling": audit["sampling"],
+        "random_seed": audit["sample_seed"],
+        "relation_cycles": audit["relation_cycles"],
+    }
+    return {
+        "profile": "vector-native",
+        "source": "litmus-link-native-cycle+rvv",
+        "report": report,
+        "available_litmus": audit["total_cases"],
+        "displayed_litmus": len(sample),
+        "sample": sample,
+        "classification_counts": _preview_classification_counts(sample),
+        "domain_classification_counts": {
+            "domain_cases": audit["total_cases"],
+            "generated_cases": audit["total_cases"],
+            "relation_cycles": audit["relation_cycles"],
+            "read_endpoint_choices": audit["read_endpoint_choices"],
+            "write_endpoint_choices": audit["write_endpoint_choices"],
+            "sampling": audit["sampling"],
+        },
+        "audit": audit,
     }
 
 
@@ -388,7 +529,7 @@ def _memory_layouts_from_payload(payload: Dict[str, Any]):
         return expand_memory_layouts(("aligned",))
     modes = _string_list(raw.get("modes"))
     if not modes:
-        raise ValueError("select at least one misaligned memory layout mode")
+        raise ValueError("select at least one scalar memory layout mode")
     if bool(raw.get("include_aligned", True)):
         modes = ["aligned", *modes]
     width_bits = [int(value) for value in raw.get("width_bits", ())]
@@ -399,10 +540,12 @@ def _memory_layouts_from_payload(payload: Dict[str, Any]):
     boundaries = _string_list(raw.get("boundaries"))
     if not boundaries:
         raise ValueError("select at least one misaligned address boundary")
+    atomic_overlaps = _string_list(raw.get("atomic_overlaps")) or list(ATOMIC_OVERLAPS)
     return expand_memory_layouts(
         modes,
         widths=tuple(value // 8 for value in width_bits),
         boundaries=boundaries,
+        atomic_overlaps=atomic_overlaps,
     )
 
 
@@ -532,7 +675,11 @@ def _is_scalar_corpus_combination(combination: Combination) -> bool:
     return skeleton_counts().get(combination.skeleton, 0) > 0
 
 
-def _render_preview_items(combination: Combination) -> list:
+def _render_preview_items(
+    combination: Combination,
+    *,
+    compute_verdicts: bool = True,
+) -> list:
     """Original (non-corpus) preview path: evaluate -> render -> solve -> draw."""
     decision = evaluate(combination)
     rendered_cases = render_cases(combination, decision) if decision.status == GENERATED else []
@@ -540,7 +687,11 @@ def _render_preview_items(combination: Combination) -> list:
         return [_preview_item(combination, decision.to_json(), combination.name, "", None, None, None)]
     items = []
     for case in rendered_cases:
-        solver = solve_generated_case(case).to_json()
+        solver = (
+            solve_generated_case(case).to_json()
+            if compute_verdicts
+            else _unchecked_preview_solver()
+        )
         diagram = (
             _deferred_preview_diagram(case.case_ir, solver)
             if case.case_ir is not None
@@ -618,7 +769,12 @@ def _corpus_decision_json(test) -> Dict[str, Any]:
     }
 
 
-def _corpus_preview_items(combination: Combination, limit: int) -> list:
+def _corpus_preview_items(
+    combination: Combination,
+    limit: int,
+    *,
+    compute_verdicts: bool = True,
+) -> list:
     items = []
     for test in tests_for_skeleton(combination.skeleton, limit=limit):
         # One malformed corpus sample (parse/IR error) must not
@@ -627,9 +783,13 @@ def _corpus_preview_items(combination: Combination, limit: int) -> list:
         # would 500 the request and lose every other valid sample. Degrade the
         # single bad row instead.
         try:
-            verdict = _safe_corpus_judge(test)
+            verdict = _safe_corpus_judge(test) if compute_verdicts else None
             ir = corpus_to_ir(test, verdict)
-            solver = _corpus_solver_json(verdict)
+            solver = (
+                _corpus_solver_json(verdict)
+                if compute_verdicts
+                else _unchecked_preview_solver()
+            )
             diagram = _deferred_preview_diagram(ir, solver)
             items.append(
                 _preview_item(
@@ -646,6 +806,24 @@ def _corpus_preview_items(combination: Combination, limit: int) -> list:
             # Skip just this malformed sample; keep every other valid one.
             continue
     return items
+
+
+def _unchecked_preview_solver() -> Dict[str, Any]:
+    return {
+        "schema": "litmus-link.solver.v1",
+        "status": "unchecked",
+        "verdict": "unchecked",
+        "allowed": None,
+        "model": "rvwmo",
+        "tool": "none",
+        "reason": "Fast preview skips outcome solving; use Verify Preview to calculate the verdict.",
+        "cross_check": "not_run",
+        "edges": [],
+        "fusion": None,
+        "observation": "",
+        "raw_output": "",
+        "command": [],
+    }
 
 
 def _gui_corpus_report(name: str, combinations: Iterable[Combination], source: str | None) -> Dict[str, Any]:
@@ -712,6 +890,16 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         "vector": Counter(),
         "cmo": Counter(),
         "tlb": Counter(),
+        "sew": Counter(),
+        "lmul": Counter(),
+        "index_eew": Counter(),
+        "mask": Counter(),
+        "tail": Counter(),
+        "vl": Counter(),
+        "endpoint_mode": Counter(),
+        "vector_event_form": Counter(),
+        "alignment": Counter(),
+        "relation_mechanism": Counter(),
     }
     for item in items:
         combination = item.get("combination", {}) or {}
@@ -721,6 +909,23 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         groups["verdict"][_preview_verdict(solver)] += 1
         for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
             groups[key][_count_value(combination.get(key), "none")] += 1
+        params = combination.get("params", {}) or {}
+        for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
+            if key in params:
+                groups[key][_count_value(params.get(key), "default")] += 1
+        case_ir = item.get("case_ir", {}) or {}
+        metadata = case_ir.get("metadata", {}) or {}
+        for choice in metadata.get("endpoint_choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            groups["endpoint_mode"][_count_value(choice.get("annotation"), "P")] += 1
+            if choice.get("category") == "vector":
+                groups["vector_event_form"][_count_value(choice.get("vector_form"), "vector")] += 1
+                choice_params = choice.get("params", {}) or {}
+                groups["alignment"][_count_value(choice_params.get("alignment"), "aligned")] += 1
+        for relation in case_ir.get("relations", []) or []:
+            if isinstance(relation, dict):
+                groups["relation_mechanism"][_count_value(relation.get("kind"), "unknown")] += 1
         groups["memory_layout"][_preview_memory_layout(item)] += 1
     return {
         "displayed_cases": len(items),
@@ -730,6 +935,96 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if counter
         },
     }
+
+
+def _domain_classification_counts(
+    combinations: Iterable[Combination],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Dict[str, Any]:
+    """Count the complete finite domain without rendering or solving cases.
+
+    A profile preview intentionally displays only a bounded sample.  These
+    counters keep the GUI honest about the full domain and weight generated
+    combinations by the number of Litmus ordering variants they expand into.
+    """
+    groups: Dict[str, Counter[str]] = {
+        "status": Counter(),
+        "skeleton": Counter(),
+        "category": Counter(),
+        "attribute": Counter(),
+        "memory_event": Counter(),
+        "vector": Counter(),
+        "cmo": Counter(),
+        "tlb": Counter(),
+        "sew": Counter(),
+        "lmul": Counter(),
+        "index_eew": Counter(),
+        "mask": Counter(),
+        "tail": Counter(),
+        "vl": Counter(),
+    }
+    domain_cases = 0
+    generated_cases = 0
+    total_combinations = len(combinations) if hasattr(combinations, "__len__") else 0
+    combination_status: Counter[str] = Counter()
+    last_percent = -1
+    for index, combination in enumerate(combinations, start=1):
+        decision = evaluate(combination)
+        combination_status[decision.status] += 1
+        weight = case_count(combination, decision) if decision.status == GENERATED else 1
+        domain_cases += weight
+        if decision.status == GENERATED:
+            generated_cases += weight
+        groups["status"][decision.status] += weight
+        axes = combination.axes()
+        for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
+            groups[key][_count_value(axes.get(key), "none")] += weight
+        for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
+            if key in combination.params:
+                groups[key][_count_value(combination.params.get(key), "default")] += weight
+        if progress_callback is not None and total_combinations:
+            percent = int(index * 100 / total_combinations)
+            if percent != last_percent:
+                last_percent = percent
+                progress_callback(
+                    index,
+                    total_combinations,
+                    f"Classified {index:,}/{total_combinations:,} domain combinations",
+                )
+    return {
+        "total_combinations": total_combinations,
+        "combination_status": dict(sorted(combination_status.items())),
+        "domain_cases": domain_cases,
+        "generated_cases": generated_cases,
+        "groups": {
+            key: dict(sorted(counter.items()))
+            for key, counter in groups.items()
+            if counter
+        },
+    }
+
+
+def _domain_audit_report(
+    name: str,
+    domain: Dict[str, Any],
+    source: str | None,
+) -> Dict[str, Any]:
+    statuses = domain.get("combination_status", {}) or {}
+    report = {
+        "schema": "litmus-link.audit.v1",
+        "profile": name,
+        "total_combinations": int(domain.get("total_combinations", 0)),
+        "generated": int(statuses.get(GENERATED, 0)),
+        "generated_litmus": int(domain.get("generated_cases", 0)),
+        "excluded_illegal": int(statuses.get("excluded_illegal", 0)),
+        "excluded_unsupported": int(statuses.get("excluded_unsupported", 0)),
+        "hand_required": int(statuses.get("hand_required", 0)),
+        "missing": int(statuses.get("missing", 0)),
+    }
+    if source:
+        report["source"] = source
+    return report
 
 
 def _preview_verdict(solver: Dict[str, Any]) -> str:
@@ -751,13 +1046,21 @@ def _preview_memory_layout(item: Dict[str, Any]) -> str:
         if isinstance(event.get("memory_access"), dict)
     ]
     if accesses:
+        atomic_mixed = [
+            access for access in accesses
+            if access.get("atomicity_model") == "mixed_size_atomic"
+        ]
+        if atomic_mixed:
+            return "atomic_mixed"
+        variant = str(case_ir.get("variant", "")).lower()
+        if "atomic-" in variant or "atomic_" in variant:
+            return "atomic"
         no_mag = [
             access for access in accesses
             if access.get("atomicity_model") == "byte_level_no_mag"
         ]
         if no_mag:
             sizes = {int(access.get("size_bytes", 0)) for access in no_mag}
-            variant = str(case_ir.get("variant", "")).lower()
             return "mixed" if len(sizes) > 1 or "mixed" in variant else "misaligned"
         return "aligned"
     combination = item.get("combination", {}) or {}
@@ -810,12 +1113,12 @@ def _cycle_text(combination: Combination, litmus: str) -> str:
         "LB": "po/R->W -> rfe -> po/R->W -> rfe",
         "SB": "po/W->R -> fre -> po/W->R -> fre",
         "WRC": "wse -> rfe -> po/R->W -> rfe -> fre",
-        "RWC": "rfe -> po/R->W -> wse -> rfe -> fre",
+        "RWC": "rfe -> po/R->R -> fre -> po/W->R -> fre",
         "IRIW": "wse -> rfe -> fre -> rfe -> fre",
-        "ISA2": "ppo/dependency-or-fence -> rf/fr/co observation",
-        "R": "read-shape rf/fr/dependency cycle",
-        "S": "store-shape co/propagation cycle",
-        "Co": "coherence per-location co/rf/fr cycle",
+        "ISA2": "fre -> po/W->W -> rfe -> po/R->W -> rfe -> po/R->R",
+        "R": "fre -> po/W->W -> co -> po/W->R",
+        "S": "rfe -> po/R->W -> co -> po/W->W",
+        "Co": "rfe -> po-loc/R->R -> fre",
     }
     base = skeleton_cycles.get(combination.skeleton, f"{combination.skeleton} relation cycle")
     features = [value for value in [combination.vector, combination.cmo, combination.tlb, combination.attribute] if value not in {"none", "no_cmo", "no_tlb", "cacheable"}]
@@ -908,6 +1211,13 @@ def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(payload.get("mode", "profile"))
     if mode == "scalar":
         return _scalar_audit_payload(payload, out_dir)
+    if mode == "vector":
+        out_dir.mkdir(parents=True, exist_ok=True)
+        audit = VectorNativeDomain.from_payload(payload).audit()
+        (out_dir / "audit-report.json").write_text(
+            json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return audit
     if mode == "profile":
         return write_audit(str(payload.get("profile") or "smoke"), out_dir, summary_only=summary_only)
     name, combinations, source = _combinations_from_payload(payload)
@@ -924,6 +1234,8 @@ def generate_payload(
     mode = str(payload.get("mode", "profile"))
     if mode == "scalar":
         return _run_scalar_generator(payload, out_dir, progress_callback=progress_callback)
+    if mode == "vector":
+        return generate_vector_cases(payload, out_dir, progress_callback=progress_callback)
     if mode == "profile":
         return generate_profile(
             str(payload.get("profile") or "smoke"),
@@ -1134,6 +1446,8 @@ def _combinations_from_payload(payload: Dict[str, Any]) -> Tuple[str, Iterable[C
     if mode == "profile":
         profile = str(payload.get("profile") or "smoke")
         return profile, profile_combinations(profile), None
+    if mode == "vector":
+        return _vector_combinations_from_payload(payload)
     rule = payload.get("rule")
     if not isinstance(rule, dict):
         raise RuleFileError("custom GUI requests must include a rule object")
@@ -1141,16 +1455,78 @@ def _combinations_from_payload(payload: Dict[str, Any]) -> Tuple[str, Iterable[C
     return rule_set.name, rule_set.combinations, "gui"
 
 
+def _vector_combinations_from_payload(
+    payload: Dict[str, Any],
+) -> Tuple[str, list[Combination], str | None]:
+    """Return the legality-filtered formal Vector domain selected by the GUI.
+
+    The dedicated Vector GUI filters the canonical ``vector_mem`` profile
+    instead of rebuilding a Cartesian product.  This preserves its conditional
+    SEW/LMUL, same-line, form/endpoint, and indexed-EEW legality rules.
+    """
+    if bool(payload.get("complete", False)):
+        return "vector_mem", vector_combinations("vector_mem"), "vector-gui"
+
+    skeletons = _vector_filter_values(
+        payload, "skeletons", FORMAL_VECTOR_SKELETONS
+    )
+    forms = _vector_filter_values(payload, "forms", VECTOR_OPS)
+    sews = _vector_filter_values(payload, "sew", VECTOR_WIDTHS)
+    lmuls = _vector_filter_values(payload, "lmul", VECTOR_LMULS)
+    index_eews = _vector_filter_values(payload, "index_eew", VECTOR_INDEX_EEWS)
+    masks = _vector_filter_values(payload, "mask", VECTOR_MASKS)
+    tails = _vector_filter_values(payload, "tail", VECTOR_TAILS)
+    vls = _vector_filter_values(payload, "vl", VECTOR_LENGTHS)
+    endpoint_scope = str(payload.get("endpoint_scope", "all"))
+    if endpoint_scope not in {"all", "first"}:
+        raise ValueError("vector endpoint_scope must be 'all' or 'first'")
+
+    selected = vector_combinations(
+        str(payload.get("name") or "vector-custom"),
+        skeletons=skeletons,
+        vectors=forms,
+        widths=sews,
+        lmuls=lmuls,
+        index_eews=index_eews,
+        masks=masks,
+        tails=tails,
+        lengths=vls,
+        endpoint_scope=endpoint_scope,
+    )
+
+    if not selected:
+        raise ValueError("the selected Vector filters contain no legal combinations")
+    return str(payload.get("name") or "vector-custom"), selected, "vector-gui"
+
+
+def _vector_filter_values(
+    payload: Dict[str, Any], key: str, allowed: Iterable[str]
+) -> list[str]:
+    domain = list(allowed)
+    selected = _string_list(payload.get(key))
+    if not selected:
+        raise ValueError(f"select at least one Vector {key} value")
+    unknown = sorted(set(selected) - set(domain))
+    if unknown:
+        raise ValueError(
+            f"unknown Vector {key} value(s): {', '.join(unknown)}"
+        )
+    selected_set = set(selected)
+    return [value for value in domain if value in selected_set]
+
+
 def _scalar_audit_payload(payload: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     engine = str(payload.get("engine", "native_templates"))
     if engine == "native_templates":
         presets = _string_list(payload.get("skeletons")) or ["MP"]
         mechanisms = _string_list(payload.get("mechanisms")) or list(DEFAULT_NATIVE_MECHANISMS)
+        memory_layouts = _memory_layouts_from_payload(payload)
         native_audit = native_template_audit(
             presets,
             mechanisms,
             include_same=bool(payload.get("include_same", True)),
             annotations=_string_list(payload.get("annotations")) or NATIVE_ANNOTATIONS,
+            memory_layouts=memory_layouts,
         )
         expanded = {
             "generator": {"engine": "litmus-link-native"},
@@ -1172,8 +1548,12 @@ def _scalar_audit_payload(payload: Dict[str, Any], out_dir: Path) -> Dict[str, A
         "audited_litmus": expanded.get("available_litmus", 0),
         "total_combinations": expanded.get("available_litmus", 0),
         "generated": expanded.get("available_litmus", 0),
-        "excluded_illegal": 0,
-        "excluded_unsupported": 0,
+        "excluded_illegal": int(
+            (native_audit or {}).get("excluded_illegal", 0)
+        ),
+        "excluded_unsupported": int(
+            (native_audit or {}).get("excluded_misaligned_atomic_annotations", 0)
+        ),
         "hand_required": 0,
         "missing": 0,
     }

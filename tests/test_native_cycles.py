@@ -62,6 +62,9 @@ def test_native_cycle_constraints_reject_invalid_rings() -> None:
     one_external = [edge_by_label("Rfe"), edge_by_label("PosRR"), edge_by_label("Fri")]
     assert validate_cycle(one_external).reason == "single_external_edge"
 
+    cyclic_coherence = [edge_by_label("Fre"), edge_by_label("Wsi"), edge_by_label("Rfe")]
+    assert validate_cycle(cyclic_coherence).reason == "coherence_constraint_cycle"
+
 
 def test_native_cycle_assigns_harts_and_locations_from_constraints() -> None:
     cycle = NativeCycle(
@@ -174,11 +177,53 @@ def test_native_annotations_expand_to_isa_legal_amo_forms() -> None:
     assert all("lw.aq" not in instruction and "sw.aq" not in instruction for instruction in memory_instructions)
 
 
+def test_native_relaxed_amo_has_no_aq_rl_suffix() -> None:
+    cycles, _audit = native_template_cycles(["MP"])
+    from litmus_link.native_scalar import annotated_native_cycles
+
+    annotated = next(
+        cycle for cycle in annotated_native_cycles(cycles[:1], ["AMO"])
+    )
+    lowered = lower_native_cycle(annotated)
+    instructions = [
+        event.instruction
+        for event in lowered.case_ir.events()
+        if event.kind == "amo"
+    ]
+    assert instructions
+    assert any(instruction.startswith("amoor.w ") for instruction in instructions)
+    assert any(instruction.startswith("amoswap.w ") for instruction in instructions)
+    assert all(".aq" not in instruction and ".rl" not in instruction for instruction in instructions)
+
+
+@pytest.mark.parametrize(
+    ("annotation", "suffix", "forbidden_suffix"),
+    [("Aq", ".aq", ".rl"), ("Rl", ".rl", ".aq"), ("AR", ".aq.rl", "")],
+)
+def test_native_atomic_ordering_bits_are_independent(
+    annotation: str, suffix: str, forbidden_suffix: str
+) -> None:
+    cycles, _audit = native_template_cycles(["MP"])
+    from litmus_link.native_scalar import annotated_native_cycles
+
+    annotated = next(annotated_native_cycles(cycles[:1], [annotation]))
+    lowered = lower_native_cycle(annotated)
+    instructions = [
+        event.instruction
+        for event in lowered.case_ir.events()
+        if event.kind == "amo"
+    ]
+    assert instructions
+    assert all(suffix in instruction for instruction in instructions)
+    if forbidden_suffix:
+        assert all(forbidden_suffix not in instruction for instruction in instructions)
+
+
 def test_native_full_template_domain_count_is_stable() -> None:
     counts = native_catalog()["template_counts_all_annotations"]
-    assert counts["MP"] == 106496
-    assert counts["ISA2"] == 72417280
-    assert sum(counts.values()) == 74873888
+    assert counts["MP"] == 260000
+    assert counts["ISA2"] == 276250000
+    assert sum(counts.values()) == 284286625
 
 
 def test_native_generation_does_not_spawn_diytools_when_judging_is_disabled(

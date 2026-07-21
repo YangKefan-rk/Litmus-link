@@ -47,14 +47,13 @@ def test_solver_native_allows_base_mp() -> None:
     assert result.allowed is True
 
 
-def test_solver_not_applicable_for_fusion() -> None:
-    # LB vector stays an observation/fusion case (MP vector cacheable now gets a
-    # real cycle verdict), so the solver makes no formal claim here.
+def test_solver_covers_non_mp_vector_skeletons() -> None:
+    # LB is now part of the native Vector-aware formal skeleton set.
     combination = Combination("test", "vector_mem", "LB", "vector_load", "cacheable", vector="unit_load")
     case = render_cases(combination, evaluate(combination))[0]
     result = solve_generated_case(case)
-    assert result.status == "not_applicable"
-    assert result.allowed is None
+    assert result.status == "verified"
+    assert result.allowed is True
 
 
 def _nc_case(variant: str):
@@ -114,6 +113,5 @@ def test_solver_vector_verdict_equals_scalar_twin() -> None:
             vec = solve_generated_case(_vector_mp_case(variant, vector, memory_event))
             assert vec.allowed == scalar.allowed, f"vector/scalar mismatch for {variant}/{vector}"
             assert vec.verdict == scalar.verdict, f"vector/scalar mismatch for {variant}/{vector}"
-
 
 

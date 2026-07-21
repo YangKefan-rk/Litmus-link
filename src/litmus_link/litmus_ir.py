@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
 
 from .models import Combination, Decision
+from .naming import case_display_name, case_name
+from .profiles import NANHU_VLEN_BITS, VECTOR_ENDPOINTS, VECTOR_INDEX_EEWS
 
 
 DEFAULT_SCALAR_VARIANTS = [
@@ -32,9 +34,10 @@ VECTOR_CYCLE_VARIANTS = [
 class MemoryAccess:
     """Byte-addressed footprint of one scalar memory instruction.
 
-    ``byte_level_no_mag`` is the only misaligned atomicity model currently
-    supported.  It deliberately carries no whole-instruction atomicity
-    guarantee; ordering relations still belong to the parent instruction.
+    ``byte_level_no_mag`` describes misaligned plain accesses with no whole
+    instruction atomicity guarantee. ``mixed_size_atomic`` describes a
+    naturally aligned atomic footprint whose overlapping widths still need a
+    mixed-size execution model.
     """
 
     base_symbol: str
@@ -55,17 +58,25 @@ class MemoryAccess:
             raise ValueError("covered_bytes must exactly match offset_bytes and size_bytes")
         if self.natural_aligned != (self.offset_bytes % self.size_bytes == 0):
             raise ValueError("natural_aligned does not match offset and access size")
-        if self.atomicity_model not in {"aligned_atomic", "byte_level_no_mag"}:
+        if self.atomicity_model not in {"aligned_atomic", "byte_level_no_mag", "mixed_size_atomic"}:
             raise ValueError(f"unknown scalar atomicity model: {self.atomicity_model}")
         if self.atomicity_model == "byte_level_no_mag" and self.natural_aligned:
             raise ValueError("byte_level_no_mag is reserved for misaligned accesses")
         if self.atomicity_model == "aligned_atomic" and not self.natural_aligned:
             raise ValueError("aligned_atomic requires a naturally aligned access")
+        if self.atomicity_model == "mixed_size_atomic" and not self.natural_aligned:
+            raise ValueError("mixed_size_atomic requires a naturally aligned access")
         if self.boundary != _access_boundary(self.offset_bytes, self.size_bytes):
             raise ValueError("memory access boundary does not match its byte range")
 
     @classmethod
-    def create(cls, base_symbol: str, offset_bytes: int, size_bytes: int) -> "MemoryAccess":
+    def create(
+        cls,
+        base_symbol: str,
+        offset_bytes: int,
+        size_bytes: int,
+        atomicity_model: str | None = None,
+    ) -> "MemoryAccess":
         aligned = offset_bytes % size_bytes == 0
         return cls(
             base_symbol=base_symbol,
@@ -74,7 +85,11 @@ class MemoryAccess:
             covered_bytes=tuple(range(offset_bytes, offset_bytes + size_bytes)),
             natural_aligned=aligned,
             boundary=_access_boundary(offset_bytes, size_bytes),
-            atomicity_model="aligned_atomic" if aligned else "byte_level_no_mag",
+            atomicity_model=(
+                atomicity_model
+                if atomicity_model is not None
+                else "aligned_atomic" if aligned else "byte_level_no_mag"
+            ),
         )
 
     @classmethod
@@ -103,7 +118,7 @@ class MemoryAccess:
             "natural_aligned": self.natural_aligned,
             "boundary": self.boundary,
             "atomicity_model": self.atomicity_model,
-            "whole_access_atomic": self.atomicity_model == "aligned_atomic",
+            "whole_access_atomic": self.atomicity_model in {"aligned_atomic", "mixed_size_atomic"},
             "mag_bytes": None,
         }
 
@@ -206,6 +221,7 @@ class LitmusCaseIR:
     model: str
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "LitmusCaseIR":
@@ -230,6 +246,7 @@ class LitmusCaseIR:
             model=str(data.get("model", "rvwmo")),
             description=str(data.get("description", "")),
             tags=[str(value) for value in data.get("tags", [])],
+            metadata=dict(data.get("metadata", {})),
         )
 
     def events(self) -> list[LitmusEvent]:
@@ -265,6 +282,7 @@ class LitmusCaseIR:
             "model": self.model,
             "description": self.description,
             "tags": list(self.tags),
+            "metadata": dict(self.metadata),
         }
 
 
@@ -284,7 +302,7 @@ def build_litmus_ir_cases(combination: Combination, decision: Decision) -> list[
     if _is_vector_rvwmo(combination, decision):
         variants = _vector_variant_ids(combination)
         expanded = len(variants) > 1
-        return [_vector_mp_case(combination, variant, _case_name(combination, variant, expanded)) for variant in variants]
+        return [_vector_case(combination, variant, _case_name(combination, variant, expanded)) for variant in variants]
     return [_observation_case(combination, decision)]
 
 
@@ -329,12 +347,27 @@ def _vector_variant_ids(combination: Combination) -> list[str]:
 def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
     events = [_event(f"{prefix}_vset", hart, "setup", _vector_vset_instruction(combination))]
     extra_init: list[str] = []
+    vl = str(combination.params.get("vl", "vlmax"))
+    if vl in {"vl32", "vl64"}:
+        # vsetivli has a 5-bit AVL immediate.  Larger finite AVL values use
+        # vsetvli with an initialized scalar register, keeping the emitted
+        # instruction architecturally legal rather than silently clamping it.
+        extra_init.append(f"{hart}:x11={int(vl[2:])};")
     if combination.params.get("mask") == "masked":
-        events.append(_event(f"{prefix}_mask", hart, "setup", "vmset.m v0"))
+        events.extend(
+            [
+                _event(f"{prefix}_mask_vid", hart, "setup", "vid.v v24"),
+                _event(f"{prefix}_mask_parity", hart, "setup", "vand.vi v24,v24,1"),
+                _event(f"{prefix}_mask", hart, "setup", "vmseq.vi v0,v24,0"),
+            ]
+        )
     if "indexed" in combination.vector:
-        events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v4"))
+        events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v16"))
+        shift = _vector_element_bytes(combination).bit_length() - 1
+        if shift:
+            events.append(_event(f"{prefix}_index_scale", hart, "setup", f"vsll.vi v16,v16,{shift}"))
     if "strided" in combination.vector:
-        extra_init.append(f"{hart}:x9=4;")
+        extra_init.append(f"{hart}:x20={_vector_stride_bytes(combination)};")
     return events, extra_init
 
 
@@ -342,66 +375,162 @@ def _rebase_vector(instruction: str, base_reg: str) -> str:
     return re.sub(r"\(x\d+\)", f"({base_reg})", instruction, count=1)
 
 
-def _vector_mp_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
-    # Vector message passing: the data-carrying access is a vector load/store,
-    # the flag stays scalar. The RVV spec reduces vector memory ordering to
-    # per-element RVWMO, and a FENCE orders those element accesses exactly like
-    # scalar -- so the data-carrying event keeps kind store/load and the cycle
-    # verdict equals the scalar MP twin.
-    init = ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;"]
-    if combination.memory_event == "vector_store":
-        setup, extra_init = _vector_setup(combination, 0, "p0")
-        vinstr = _rebase_vector(_vector_instruction(combination), "x6")
-        p0 = [
-            *setup,
-            _event("p0_vbcast", 0, "setup", "vmv.v.x v8,x5"),
-            _event("p0_wx", 0, "store", vinstr, "x", value="1", role="data-write"),
-            *_ordering_events(0, variant, "p0", "writer"),
-            _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1", role="flag-write"),
-        ]
-        p1 = [
-            _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1", role="flag-read"),
-            *_ordering_events(1, variant, "p1", "reader"),
-            _event("p1_rx", 1, "load", "lw x7,0(x8)", "x", register="x7", value="0", role="data-read"),
-        ]
-        if extra_init:
-            init[0] = init[0] + " " + " ".join(extra_init)
-    else:
-        setup, extra_init = _vector_setup(combination, 1, "p1")
-        vinstr = _rebase_vector(_vector_instruction(combination), "x8")
-        p0 = [
-            _event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1", role="data-write"),
-            *_ordering_events(0, variant, "p0", "writer"),
-            _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1", role="flag-write"),
-        ]
-        p1 = [
-            *setup,
-            _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1", role="flag-read"),
-            *_ordering_events(1, variant, "p1", "reader"),
-            _event("p1_rx", 1, "load", vinstr, "x", register="v8", value="0", role="data-read"),
-            _event("p1_extract", 1, "extract", "vmv.x.s x7,v8", register="x7", role="vector-extract"),
-        ]
-        if extra_init:
-            init[1] = init[1] + " " + " ".join(extra_init)
+def _vector_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    builder = {
+        "MP": _mp_case,
+        "LB": _lb_case,
+        "SB": _sb_case,
+        "WRC": _wrc_case,
+        "RWC": _rwc_case,
+        "IRIW": _iriw_case,
+        "ISA2": _isa2_case,
+        "R": _r_case,
+        "S": _s_case,
+        "Co": _co_case,
+    }.get(combination.skeleton)
+    if builder is None:
+        raise ValueError(f"no formal Vector skeleton renderer for {combination.skeleton}")
 
-    relations = [
-        _relation("p0_wx", "p0_wy", "po", _variant_po_label("PodWW", variant), True),
-        _relation("p0_wy", "p1_ry", "rfe", "Rfe"),
-        _relation("p1_ry", "p1_rx", "po", _variant_po_label("PodRR", variant), True),
-        _relation("p1_rx", "p0_wx", "fre", "Fre"),
-    ]
-    return _case(
-        combination,
-        name,
-        variant,
-        _cycle_label("PodWW -> Rfe -> PodRR -> Fre", variant),
-        init,
-        [p0, p1],
-        relations,
-        "(1:x5=1 /\\ 1:x7=0)",
-        f"Vector message passing ({combination.vector}): per-element RVWMO reduction; FENCE orders the vector element accesses exactly like scalar.",
-        tags=["vector", "rvwmo", combination.skeleton, variant, combination.vector],
+    scalar = Combination(
+        combination.profile,
+        combination.category,
+        combination.skeleton,
+        "scalar_pair",
+        combination.attribute,
+        combination.tlb,
+        combination.cmo,
+        "none",
+        combination.params,
     )
+    base = builder(scalar, variant, name)
+    endpoint_kind = "store" if combination.memory_event == "vector_store" else "load"
+    default_endpoint = _default_vector_endpoint(combination, endpoint_kind)
+    target_id = str(
+            combination.params.get(
+                "vector_event",
+                default_endpoint or "p0_wx",
+            )
+    )
+    target = base.event_map().get(target_id)
+    expected_kind = "store" if combination.memory_event == "vector_store" else "load"
+    if target is None or target.kind != expected_kind:
+        raise ValueError(
+            f"Vector endpoint {target_id!r} is not a {expected_kind} in {combination.skeleton}"
+        )
+
+    resized = _resize_scalar_location(base, target.location, _vector_width(combination))
+    target = resized.event_map()[target_id]
+    harts: list[list[LitmusEvent]] = []
+    init_lines = list(resized.init_lines)
+    for hart_id, sequence in enumerate(resized.harts):
+        expanded: list[LitmusEvent] = []
+        for event in sequence:
+            if event.event_id != target_id:
+                expanded.append(event)
+                continue
+            base_register, data_register = _scalar_memory_operands(event)
+            setup, extra_init = _vector_setup(combination, hart_id, f"{target_id}_vector")
+            expanded.extend(setup)
+            vector_instruction = _rebase_vector(_vector_instruction(combination), base_register)
+            if event.kind == "store":
+                expanded.append(
+                    _event(
+                        f"{target_id}_broadcast",
+                        hart_id,
+                        "setup",
+                        f"vmv.v.x v8,{data_register}",
+                        role="vector-broadcast",
+                    )
+                )
+                expanded.append(
+                    replace(
+                        event,
+                        instruction=vector_instruction,
+                        register="v8",
+                        role=f"{event.role}:vector-store" if event.role else "vector-store",
+                    )
+                )
+            else:
+                expanded.append(
+                    replace(
+                        event,
+                        instruction=vector_instruction,
+                        register="v8",
+                        role=f"{event.role}:vector-load" if event.role else "vector-load",
+                    )
+                )
+                expanded.append(
+                    _event(
+                        f"{target_id}_extract",
+                        hart_id,
+                        "extract",
+                        f"vmv.x.s {data_register},v8",
+                        register=data_register,
+                        role="vector-extract-element0",
+                    )
+                )
+            if extra_init:
+                init_lines[hart_id] = init_lines[hart_id] + " " + " ".join(extra_init)
+        harts.append(expanded)
+
+    return replace(
+        resized,
+        name=name,
+        display_name=name,
+        combination_name=combination.name,
+        harts=harts,
+        init_lines=init_lines,
+        description=(
+            f"{combination.skeleton} with {target_id} replaced by {combination.vector}; "
+            "active elements are checked by the Vector-aware RVWMO solver."
+        ),
+        tags=["vector", "rvwmo", combination.skeleton, variant, combination.vector, target_id],
+        metadata={"vector": _vector_metadata(combination)},
+    )
+
+
+def _resize_scalar_location(case: LitmusCaseIR, location: str, width: str) -> LitmusCaseIR:
+    bits = int(width)
+    mnemonics = {
+        "load": {8: "lb", 16: "lh", 32: "lw", 64: "ld"},
+        "store": {8: "sb", 16: "sh", 32: "sw", 64: "sd"},
+    }
+    harts: list[list[LitmusEvent]] = []
+    for sequence in case.harts:
+        updated: list[LitmusEvent] = []
+        for event in sequence:
+            if event.location != location or event.kind not in mnemonics:
+                updated.append(event)
+                continue
+            instruction = re.sub(
+                r"^\s*[a-z0-9.]+",
+                mnemonics[event.kind][bits],
+                event.instruction,
+                count=1,
+            )
+            updated.append(replace(event, instruction=instruction))
+        harts.append(updated)
+    return replace(case, harts=harts)
+
+
+def _default_vector_endpoint(combination: Combination, endpoint_kind: str) -> str | None:
+    # Preserve the original MP helper defaults for existing custom rules.  The
+    # complete profile always carries an explicit vector_event parameter.
+    if combination.skeleton == "MP":
+        return "p0_wx" if endpoint_kind == "store" else "p1_rx"
+    endpoints = VECTOR_ENDPOINTS.get(combination.skeleton, {}).get(endpoint_kind, [])
+    return endpoints[0] if endpoints else None
+
+
+def _scalar_memory_operands(event: LitmusEvent) -> tuple[str, str]:
+    match = re.fullmatch(
+        r"\s*[a-z0-9.]+\s+(x\d+)\s*,\s*-?\d+\((x\d+)\)\s*",
+        event.instruction.lower(),
+    )
+    if match is None:
+        raise ValueError(f"cannot extract scalar operands from {event.instruction!r}")
+    data_register, base_register = match.groups()
+    return base_register, data_register
 
 
 def _scalar_case(combination: Combination, variant: str, expanded: bool) -> LitmusCaseIR:
@@ -412,15 +541,17 @@ def _scalar_case(combination: Combination, variant: str, expanded: bool) -> Litm
         "WRC": _wrc_case,
         "RWC": _rwc_case,
         "IRIW": _iriw_case,
+        "ISA2": _isa2_case,
+        "R": _r_case,
+        "S": _s_case,
+        "Co": _co_case,
     }.get(combination.skeleton, _generic_scalar_case)
     name = _case_name(combination, variant, expanded)
     return builder(combination, _effective_ordering_variant(variant), name)
 
 
 def _case_name(combination: Combination, variant: str, expanded: bool) -> str:
-    if not expanded:
-        return combination.name
-    return f"{combination.name}_var-{_sanitize_variant(variant)}"
+    return case_name(combination, variant)
 
 
 def _sanitize_variant(value: str) -> str:
@@ -502,11 +633,12 @@ def _case(
     exists: str,
     description: str,
     tags: list[str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> LitmusCaseIR:
     expected = _expected_outcome(combination)
     return LitmusCaseIR(
         name=name,
-        display_name=f"{combination.skeleton}.{variant}",
+        display_name=case_display_name(combination, variant),
         combination_name=combination.name,
         skeleton=combination.skeleton,
         variant=variant,
@@ -519,6 +651,7 @@ def _case(
         model="rvwmo",
         description=description,
         tags=tags if tags is not None else ["scalar", "rvwmo", combination.skeleton, variant],
+        metadata=dict(metadata or {}),
     )
 
 
@@ -657,22 +790,27 @@ def _rwc_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR
         *_ordering_events(1, variant, "p1", "reader"),
         _event("p1_ry", 1, "load", "lw x7,0(x8)", "y", register="x7", value="0"),
     ]
-    p2 = [_event("p2_wy", 2, "store", "sw x5,0(x6)", "y", value="1")]
+    p2 = [
+        _event("p2_wy", 2, "store", "sw x5,0(x6)", "y", value="1"),
+        *_ordering_events(2, variant, "p2", "writer"),
+        _event("p2_rx", 2, "load", "lw x7,0(x8)", "x", register="x7", value="0"),
+    ]
     return _case(
         combination,
         name,
         variant,
-        _cycle_label("Rfe -> PodRR -> Fre -> Wse", variant),
-        ["0:x5=1; 0:x6=x;", "1:x6=x; 1:x8=y;", "2:x5=1; 2:x6=y;"],
+        _cycle_label("Rfe -> PodRR -> Fre -> PodWR -> Fre", variant),
+        ["0:x5=1; 0:x6=x;", "1:x6=x; 1:x8=y;", "2:x5=1; 2:x6=y; 2:x8=x;"],
         [p0, p1, p2],
         [
             _relation("p0_wx", "p1_rx", "rfe", "Rfe"),
             _relation("p1_rx", "p1_ry", "po", _variant_po_label("PodRR", variant), True),
             _relation("p1_ry", "p2_wy", "fre", "Fre"),
-            _relation("p2_wy", "p0_wx", "co", "Wse"),
+            _relation("p2_wy", "p2_rx", "po", _variant_po_label("PodWR", variant), True),
+            _relation("p2_rx", "p0_wx", "fre", "Fre"),
         ],
-        "(1:x5=1 /\\ 1:x7=0)",
-        "Read-write causality: a read of one write is paired with an old read of another location.",
+        "(1:x5=1 /\\ 1:x7=0 /\\ 2:x7=0)",
+        "Read-write causality: two readers observe the causal writes while the final reader still observes old x.",
     )
 
 
@@ -706,6 +844,128 @@ def _iriw_case(combination: Combination, variant: str, name: str) -> LitmusCaseI
         ],
         "(2:x5=1 /\\ 2:x7=0 /\\ 3:x5=1 /\\ 3:x7=0)",
         "Independent reads of independent writes: two readers observe independent writers in opposite orders.",
+    )
+
+
+def _isa2_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    p0 = [
+        _event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1"),
+        *_ordering_events(0, variant, "p0", "writer"),
+        _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1"),
+    ]
+    p1 = [
+        _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1"),
+        *_ordering_events(1, variant, "p1", "reader"),
+        _event("p1_wz", 1, "store", "sw x12,0(x7)", "z", value="1"),
+    ]
+    p2 = [
+        _event("p2_rz", 2, "load", "lw x5,0(x6)", "z", register="x5", value="1"),
+        *_ordering_events(2, variant, "p2", "reader"),
+        _event("p2_rx", 2, "load", "lw x7,0(x8)", "x", register="x7", value="0"),
+    ]
+    return _case(
+        combination,
+        name,
+        variant,
+        _cycle_label("Fre -> PodWW -> Rfe -> PodRW -> Rfe -> PodRR", variant),
+        [
+            "0:x5=1; 0:x6=x; 0:x7=y;",
+            "1:x6=y; 1:x7=z; 1:x12=1;",
+            "2:x6=z; 2:x8=x;",
+        ],
+        [p0, p1, p2],
+        [
+            _relation("p2_rx", "p0_wx", "fre", "Fre"),
+            _relation("p0_wx", "p0_wy", "po", _variant_po_label("PodWW", variant), True),
+            _relation("p0_wy", "p1_ry", "rfe", "Rfe"),
+            _relation("p1_ry", "p1_wz", "po", _variant_po_label("PodRW", variant), True),
+            _relation("p1_wz", "p2_rz", "rfe", "Rfe"),
+            _relation("p2_rz", "p2_rx", "po", _variant_po_label("PodRR", variant), True),
+        ],
+        "(1:x5=1 /\\ 2:x5=1 /\\ 2:x7=0)",
+        "ISA2 causality: visibility propagates through y and z while the final hart still observes old x.",
+    )
+
+
+def _r_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    p0 = [
+        _event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1"),
+        *_ordering_events(0, variant, "p0", "writer"),
+        _event("p0_wy", 0, "store", "sw x5,0(x7)", "y", value="1"),
+    ]
+    p1 = [
+        _event("p1_wy", 1, "store", "sw x5,0(x6)", "y", value="2"),
+        *_ordering_events(1, variant, "p1", "writer"),
+        _event("p1_rx", 1, "load", "lw x7,0(x8)", "x", register="x7", value="0"),
+    ]
+    return _case(
+        combination,
+        name,
+        variant,
+        _cycle_label("Fre -> PodWW -> Wse -> PodWR", variant),
+        ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x5=2; 1:x6=y; 1:x8=x;"],
+        [p0, p1],
+        [
+            _relation("p1_rx", "p0_wx", "fre", "Fre"),
+            _relation("p0_wx", "p0_wy", "po", _variant_po_label("PodWW", variant), True),
+            _relation("p0_wy", "p1_wy", "co", "Wse"),
+            _relation("p1_wy", "p1_rx", "po", _variant_po_label("PodWR", variant), True),
+        ],
+        "(1:x7=0 /\\ y=2)",
+        "Read shape: coherence orders the two y writes while the second hart still reads old x.",
+    )
+
+
+def _s_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    p0 = [
+        _event("p0_wy", 0, "store", "sw x5,0(x6)", "y", value="2"),
+        *_ordering_events(0, variant, "p0", "writer"),
+        _event("p0_wx", 0, "store", "sw x9,0(x7)", "x", value="1"),
+    ]
+    p1 = [
+        _event("p1_rx", 1, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
+        *_ordering_events(1, variant, "p1", "reader"),
+        _event("p1_wy", 1, "store", "sw x12,0(x7)", "y", value="1"),
+    ]
+    return _case(
+        combination,
+        name,
+        variant,
+        _cycle_label("Rfe -> PodRW -> Wse -> PodWW", variant),
+        ["0:x5=2; 0:x6=y; 0:x7=x; 0:x9=1;", "1:x6=x; 1:x7=y; 1:x12=1;"],
+        [p0, p1],
+        [
+            _relation("p0_wx", "p1_rx", "rfe", "Rfe"),
+            _relation("p1_rx", "p1_wy", "po", _variant_po_label("PodRW", variant), True),
+            _relation("p1_wy", "p0_wy", "co", "Wse"),
+            _relation("p0_wy", "p0_wx", "po", _variant_po_label("PodWW", variant), True),
+        ],
+        "(1:x5=1 /\\ y=2)",
+        "Store shape: the reader observes x while coherence places its y write before the other hart's y write.",
+    )
+
+
+def _co_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
+    p0 = [_event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1")]
+    p1 = [
+        _event("p1_rx_new", 1, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
+        *_ordering_events(1, variant, "p1", "reader"),
+        _event("p1_rx_old", 1, "load", "lw x7,0(x6)", "x", register="x7", value="0"),
+    ]
+    return _case(
+        combination,
+        name,
+        variant,
+        _cycle_label("Rfe -> PosRR -> Fre", variant),
+        ["0:x5=1; 0:x6=x;", "1:x6=x;"],
+        [p0, p1],
+        [
+            _relation("p0_wx", "p1_rx_new", "rfe", "Rfe"),
+            _relation("p1_rx_new", "p1_rx_old", "po", _variant_po_label("PosRR", variant), True),
+            _relation("p1_rx_old", "p0_wx", "fre", "Fre"),
+        ],
+        "(1:x5=1 /\\ 1:x7=0)",
+        "CoRR coherence: one hart must not read a newer value and then an older value from the same location.",
     )
 
 
@@ -812,19 +1072,18 @@ def _cmo_events(combination: Combination, hart: int, prefix: str) -> list[Litmus
 def _vector_instruction(combination: Combination) -> str:
     width = _vector_width(combination)
     mask = _vector_mask_suffix(combination)
+    index_eew = str(combination.params.get("index_eew", "ei32"))
+    if index_eew not in VECTOR_INDEX_EEWS:
+        index_eew = "ei32"
     table = {
         "unit_load": f"vle{width}.v v8,(x6){mask}",
         "unit_store": f"vse{width}.v v8,(x6){mask}",
-        "strided_load": f"vlse{width}.v v8,(x6),x9{mask}",
-        "strided_store": f"vsse{width}.v v8,(x6),x9{mask}",
-        "indexed_ordered_load": f"vloxei32.v v8,(x6),v4{mask}",
-        "indexed_unordered_load": f"vluxei32.v v8,(x6),v4{mask}",
-        "indexed_ordered_store": f"vsoxei32.v v8,(x6),v4{mask}",
-        "indexed_unordered_store": f"vsuxei32.v v8,(x6),v4{mask}",
-        "segment_load": f"vlseg2e{width}.v v8,(x6){mask}",
-        "segment_store": f"vsseg2e{width}.v v8,(x6){mask}",
-        "fof_load": f"vle{width}ff.v v8,(x6){mask}",
-        "fof_segment_load": f"vlseg2e{width}ff.v v8,(x6){mask}",
+        "strided_load": f"vlse{width}.v v8,(x6),x20{mask}",
+        "strided_store": f"vsse{width}.v v8,(x6),x20{mask}",
+        "indexed_ordered_load": f"vlox{index_eew}.v v8,(x6),v16{mask}",
+        "indexed_unordered_load": f"vlux{index_eew}.v v8,(x6),v16{mask}",
+        "indexed_ordered_store": f"vsox{index_eew}.v v8,(x6),v16{mask}",
+        "indexed_unordered_store": f"vsux{index_eew}.v v8,(x6),v16{mask}",
     }
     return table.get(combination.vector, f"vle{width}.v v8,(x6){mask}")
 
@@ -832,6 +1091,56 @@ def _vector_instruction(combination: Combination) -> str:
 def _vector_width(combination: Combination) -> str:
     sew = str(combination.params.get("sew", "e32"))
     return {"e8": "8", "e16": "16", "e32": "32", "e64": "64"}.get(sew, "32")
+
+
+def _vector_element_bytes(combination: Combination) -> int:
+    return int(_vector_width(combination)) // 8
+
+
+def _vector_scalar_load(combination: Combination, destination: str, base: str) -> str:
+    mnemonic = {8: "lb", 16: "lh", 32: "lw", 64: "ld"}[int(_vector_width(combination))]
+    return f"{mnemonic} {destination},0({base})"
+
+
+def _vector_scalar_store(combination: Combination, source: str, base: str) -> str:
+    mnemonic = {8: "sb", 16: "sh", 32: "sw", 64: "sd"}[int(_vector_width(combination))]
+    return f"{mnemonic} {source},0({base})"
+
+
+def _vector_stride_bytes(combination: Combination) -> int:
+    configured = combination.params.get("stride_bytes")
+    if configured is not None:
+        return int(str(configured), 0)
+    return _vector_element_bytes(combination) * 2
+
+
+def _vector_metadata(combination: Combination) -> dict[str, Any]:
+    form = combination.vector
+    return {
+        "schema": "litmus-link.vector-config.v1",
+        "form": form,
+        "vlen_bits": NANHU_VLEN_BITS,
+        "sew_bits": int(_vector_width(combination)),
+        "lmul": str(combination.params.get("lmul", "m1")),
+        "index_eew": str(combination.params.get("index_eew", "ei32")) if "indexed" in form else None,
+        "avl": str(combination.params.get("vl", "vlmax")),
+        "mask": str(combination.params.get("mask", "unmasked")),
+        "mask_pattern": "even-elements" if combination.params.get("mask") == "masked" else "all-elements",
+        "tail_policy": str(combination.params.get("tail", "ta_ma")),
+        "footprint": str(combination.params.get("footprint", "same_line")),
+        "stride_bytes": _vector_stride_bytes(combination) if "strided" in form else None,
+        "index_pattern": "scaled-element-index" if "indexed" in form else None,
+        "ordered_elements": form.startswith("indexed_ordered"),
+        "vector_event": str(
+            combination.params.get(
+                "vector_event",
+                _default_vector_endpoint(
+                    combination,
+                    "store" if form.endswith("store") else "load",
+                ) or "p0_wx",
+            )
+        ),
+    }
 
 
 def _vector_policy(combination: Combination) -> str:
@@ -848,7 +1157,13 @@ def _vector_vset_instruction(combination: Combination) -> str:
         return f"vsetivli x10,1,{sew},{lmul},{policy}"
     if vl == "vl2":
         return f"vsetivli x10,2,{sew},{lmul},{policy}"
-    if vl == "vl_random":
+    if vl == "vl4":
+        return f"vsetivli x10,4,{sew},{lmul},{policy}"
+    if vl == "vl8":
+        return f"vsetivli x10,8,{sew},{lmul},{policy}"
+    if vl == "vl16":
+        return f"vsetivli x10,16,{sew},{lmul},{policy}"
+    if vl in {"vl32", "vl64"}:
         return f"vsetvli x10,x11,{sew},{lmul},{policy}"
     return f"vsetvli x10,x0,{sew},{lmul},{policy}"
 
