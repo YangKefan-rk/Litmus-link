@@ -21,10 +21,11 @@ import itertools
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import factorial
 from typing import Iterable, Iterator, Mapping, Sequence
 
+from .amo import AmoError, AmoSpec, apply_amo, parse_amo_mnemonic
 from .litmus_ir import LitmusCaseIR
 
 
@@ -76,6 +77,10 @@ class MemoryEvent:
     read_bytes: tuple[tuple[str, int | None], ...] = ()
     write_bytes: tuple[tuple[str, int | None], ...] = ()
     transaction_kind: str = "legacy"
+    amo_op: str = ""
+    amo_operand: int | None = None
+    amo_width_bytes: int | None = None
+    amo_ordering: str = ""
 
     @property
     def rcsc(self) -> bool:
@@ -125,6 +130,10 @@ class MemoryEvent:
                 for location, value in self.write_bytes
             ],
             "transaction_kind": self.transaction_kind,
+            "amo_operation": self.amo_op or None,
+            "amo_operand": self.amo_operand,
+            "amo_width_bytes": self.amo_width_bytes,
+            "amo_ordering": self.amo_ordering or None,
         }
 
 
@@ -255,15 +264,26 @@ def solve_rvwmo(
     candidates = 0
     consistent = 0
     last_execution: Execution | None = None
+    last_resolved_events = events
     try:
-        for co in _co_candidates(events, final_values):
-            for rf in _rf_candidates(events, co):
+        for co in _co_candidates(events):
+            if time.monotonic() - started > timeout_seconds:
+                raise _SearchLimit("timeout")
+            resolved_events = _resolve_amo_transactions(events, co)
+            if resolved_events is None:
+                continue
+            last_resolved_events = resolved_events
+            if not _final_values_match(resolved_events, co, final_values):
+                continue
+            for rf in _rf_candidates(resolved_events, co):
                 if time.monotonic() - started > timeout_seconds:
                     raise _SearchLimit("timeout")
                 candidates += 1
                 if candidates > max_candidates:
                     raise _SearchLimit("candidate_limit")
-                execution, failure, cycle = _check_execution(events, static, rf, co)
+                execution, failure, cycle = _check_execution(
+                    resolved_events, static, rf, co
+                )
                 last_execution = execution
                 if failure is None:
                     consistent += 1
@@ -275,7 +295,7 @@ def solve_rvwmo(
                         consistent_candidates=consistent,
                         reason="At least one candidate execution satisfies riscv.cat.",
                         elapsed_seconds=time.monotonic() - started,
-                        events=events,
+                        events=resolved_events,
                         execution=execution,
                         violation_counts=violations,
                         example_cycles=examples,
@@ -295,7 +315,7 @@ def solve_rvwmo(
                 "a forbidden verdict requires exhaustive search."
             ),
             elapsed_seconds=time.monotonic() - started,
-            events=events,
+            events=last_resolved_events,
             violation_counts=violations,
             example_cycles=examples,
         )
@@ -308,7 +328,7 @@ def solve_rvwmo(
         consistent_candidates=0,
         reason="Every candidate execution violates at least one riscv.cat axiom.",
         elapsed_seconds=time.monotonic() - started,
-        events=events,
+        events=last_resolved_events,
         execution=last_execution,
         violation_counts=violations,
         example_cycles=examples,
@@ -392,10 +412,6 @@ def _classify_events(
     instruction_id: str,
 ) -> tuple[MemoryEvent, ...]:
     access = event.memory_access
-    if access is not None and access.atomicity_model == "mixed_size_atomic" and event.kind == "amo":
-        raise RvwmoSolverError(
-            f"mixed-size AMO access {event.event_id} requires the AMO transaction model"
-        )
     if access is not None and access.atomicity_model == "byte_level_no_mag":
         if event.kind not in {"load", "store"}:
             raise RvwmoSolverError(
@@ -441,9 +457,8 @@ def _classify_events(
 
 def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: str) -> MemoryEvent:
     instruction = event.instruction.lower().replace(" ", "")
-    aq = ".aq" in instruction or ".aq.rl" in instruction
-    rl = ".rl" in instruction or ".aq.rl" in instruction
-    value = _integer(event.value, f"event {event.event_id} value") if event.value else None
+    value_text = event.read_value if event.kind == "amo" and event.read_value else event.value
+    value = _integer(value_text, f"event {event.event_id} value") if value_text else None
     access = event.memory_access
     inferred_size, inferred_offset = _instruction_access_shape(event.instruction)
     access_metadata = {
@@ -469,7 +484,7 @@ def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: s
             raise RvwmoSolverError(f"load {event.event_id} has no target read value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, True, False, value, None,
-            aq=aq, rl=rl, instruction_id=instruction_id,
+            instruction_id=instruction_id,
             footprint=footprint, read_bytes=read_bytes,
             transaction_kind=transaction_kind, **access_metadata,
         )
@@ -478,35 +493,104 @@ def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: s
             raise RvwmoSolverError(f"store {event.event_id} has no write value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, False, True, None, value,
-            aq=aq, rl=rl, instruction_id=instruction_id,
+            instruction_id=instruction_id,
             footprint=footprint, write_bytes=_value_bytes(footprint, value),
             transaction_kind=transaction_kind, **access_metadata,
         )
-    if "amoor" in instruction:
-        if value is None:
-            raise RvwmoSolverError(f"AMO load {event.event_id} has no target read value")
-        return MemoryEvent(
-            event.event_id, hart, order, event.location, True, True, value, value,
-            aq=aq, rl=rl, amo=True, instruction_id=instruction_id,
-            footprint=footprint,
-            read_bytes=read_bytes,
-            write_bytes=_value_bytes(footprint, value),
-            transaction_kind="amo_rmw",
-            **access_metadata,
+    if event.kind != "amo":
+        raise RvwmoSolverError(
+            f"unsupported memory event kind in {event.event_id}: {event.kind}"
         )
-    if "amoswap" in instruction:
-        if value is None:
-            raise RvwmoSolverError(f"AMO store {event.event_id} has no write value")
-        return MemoryEvent(
-            event.event_id, hart, order, event.location, True, True, None, value,
-            aq=aq, rl=rl, amo=True, instruction_id=instruction_id,
-            footprint=footprint,
-            read_bytes=tuple((location, None) for location in footprint),
-            write_bytes=_value_bytes(footprint, value),
-            transaction_kind="amo_rmw",
-            **access_metadata,
+
+    try:
+        parsed = parse_amo_mnemonic(event.instruction)
+        spec = AmoSpec(
+            event.amo_op or parsed.operation,
+            event.amo_width_bytes or parsed.width_bytes,
+            event.amo_ordering or parsed.ordering,
         )
-    raise RvwmoSolverError(f"unsupported AMO instruction in {event.event_id}: {event.instruction}")
+    except AmoError as exc:
+        raise RvwmoSolverError(str(exc)) from exc
+    if spec != parsed:
+        raise RvwmoSolverError(
+            f"AMO metadata does not match instruction in {event.event_id}: "
+            f"metadata={spec}, instruction={parsed}"
+        )
+    if len(footprint) != spec.width_bytes:
+        raise RvwmoSolverError(
+            f"AMO footprint width in {event.event_id} is {len(footprint)} bytes, "
+            f"instruction requires {spec.width_bytes}"
+        )
+    offset = access.offset_bytes if access is not None else inferred_offset
+    if offset % spec.width_bytes:
+        raise RvwmoSolverError(
+            f"misaligned AMO {event.event_id} is outside Nanhu formal scope"
+        )
+
+    explicit_metadata = any(
+        (
+            event.read_value,
+            event.write_value,
+            event.amo_op,
+            event.amo_operand,
+            event.amo_width_bytes,
+            event.amo_ordering,
+        )
+    )
+    if explicit_metadata:
+        if not event.amo_operand:
+            raise RvwmoSolverError(f"AMO {event.event_id} has no operand value")
+        operand = _integer(event.amo_operand, f"event {event.event_id} AMO operand")
+        expected_write = (
+            _integer(event.write_value, f"event {event.event_id} AMO write value")
+            if event.write_value
+            else None
+        )
+    elif parsed.operation == "or" and ",x0," in instruction:
+        # case_ir.v1 compatibility: amoor with rs2=x0 is a read endpoint.
+        operand = 0
+        expected_write = value
+    elif parsed.operation == "swap":
+        # case_ir.v1 compatibility: amoswap write endpoints stored rs2's value
+        # in ``value`` and discarded rd.
+        if value is None:
+            raise RvwmoSolverError(f"legacy AMO {event.event_id} has no operand value")
+        operand = value
+        value = None
+        expected_write = operand
+        read_bytes = tuple((location, None) for location in footprint)
+    else:
+        raise RvwmoSolverError(
+            f"AMO {event.event_id} requires explicit operand metadata"
+        )
+
+    return MemoryEvent(
+        event.event_id,
+        hart,
+        order,
+        event.location,
+        True,
+        True,
+        value,
+        expected_write,
+        aq=spec.ordering in {"aq", "aqrl"},
+        rl=spec.ordering in {"rl", "aqrl"},
+        amo=True,
+        instruction_id=instruction_id,
+        footprint=footprint,
+        read_bytes=read_bytes,
+        write_bytes=(
+            _value_bytes(footprint, expected_write)
+            if expected_write is not None
+            else tuple((location, None) for location in footprint)
+        ),
+        transaction_kind="amo_rmw",
+        amo_op=spec.operation,
+        amo_operand=operand,
+        amo_width_bytes=spec.width_bytes,
+        amo_ordering=spec.ordering,
+        **access_metadata,
+    )
 
 
 def _initial_values(lines: Sequence[str]) -> dict[str, int]:
@@ -550,6 +634,11 @@ def _instruction_access_shape(instruction: str) -> tuple[int | None, int]:
         "ld": 8,
         "sd": 8,
     }.get(mnemonic)
+    if size is None and mnemonic.startswith("amo"):
+        try:
+            size = parse_amo_mnemonic(mnemonic).width_bytes
+        except AmoError:
+            pass
     match = re.search(r"(-?\d+)\(x\d+\)", normalized)
     return size, int(match.group(1)) if match else 0
 
@@ -735,16 +824,27 @@ def _rf_candidates(
     choices: list[list[ByteEdge]] = []
     for read in reads:
         for location, read_value in read.read_bytes:
-            sources = [
-                write
-                for write in writes
-                if write.writes_byte(location)
-                and write.event_id != read.event_id
-                and (
-                    read_value is None
-                    or write.write_byte_value(location) == read_value
+            if read.amo:
+                predecessor = _immediate_co_predecessor(
+                    read.event_id, location, co.bytes
                 )
-            ]
+                sources = [
+                    write
+                    for write in writes
+                    if write.event_id == predecessor
+                    and write.write_byte_value(location) == read_value
+                ]
+            else:
+                sources = [
+                    write
+                    for write in writes
+                    if write.writes_byte(location)
+                    and write.event_id != read.event_id
+                    and (
+                        read_value is None
+                        or write.write_byte_value(location) == read_value
+                    )
+                ]
             if not sources:
                 return
             choices.append(
@@ -765,7 +865,6 @@ def _rf_candidates(
 
 def _co_candidates(
     events: Sequence[MemoryEvent],
-    final_values: Mapping[str, int],
 ) -> Iterator[_CandidateRelation]:
     event_map = {event.event_id: event for event in events}
     by_location: dict[str, list[str]] = defaultdict(list)
@@ -796,7 +895,6 @@ def _co_candidates(
     for selected in itertools.product(*orientation_domains):
         normal_order = set().union(*selected) if selected else set()
         byte_edges: ByteRelation = set()
-        valid_final = True
         for location, writers in sorted(by_location.items()):
             initial = initial_by_location[location]
             active = [writer for writer in writers if writer != initial]
@@ -806,17 +904,129 @@ def _co_candidates(
                 for left, right in normal_order
                 if left in active and right in active
             )
-            latest = _latest_write(active, normal_order) if active else initial
-            target = _final_byte_value(final_values, location)
-            if target is not None and event_map[latest].write_byte_value(location) != target:
-                valid_final = False
-                break
-        if not valid_final:
-            continue
         yield _CandidateRelation(
             {(left, right) for left, right, _location in byte_edges},
             byte_edges,
         )
+
+
+def _resolve_amo_transactions(
+    events: Sequence[MemoryEvent],
+    co: _CandidateRelation,
+) -> tuple[MemoryEvent, ...] | None:
+    """Evaluate AMOs from their immediate coherence predecessors.
+
+    Each byte reads its immediate coherence predecessor. Different bytes may
+    legitimately have different source transactions after a narrower
+    partial-overlap write. The AMO still writes its whole W/D footprint as one
+    transaction, so no observer can see an intermediate AMO state.
+    """
+
+    event_map = {event.event_id: event for event in events}
+    resolved = dict(event_map)
+    amo_ids = {event.event_id for event in events if event.amo}
+    unresolved = set(amo_ids)
+    while unresolved:
+        progressed = False
+        for event_id in sorted(unresolved):
+            event = resolved[event_id]
+            predecessors = tuple(
+                _immediate_co_predecessor(event_id, location, co.bytes)
+                for location in event.footprint
+            )
+            if any(source is None for source in predecessors):
+                return None
+            if any(source_id in unresolved for source_id in predecessors):
+                continue
+            old_bytes = [
+                resolved[source_id].write_byte_value(location)
+                for source_id, location in zip(predecessors, event.footprint)
+                if source_id is not None
+            ]
+            if any(value is None for value in old_bytes):
+                return None
+            old = _bytes_value(int(value) for value in old_bytes)
+            if event.amo_operand is None or event.amo_width_bytes is None:
+                return None
+            new = apply_amo(event.amo_op, event.amo_width_bytes, old, event.amo_operand)
+            if event.read_value is not None and event.read_value != old:
+                return None
+            if event.write_value is not None and event.write_value != new:
+                return None
+            resolved[event_id] = replace(
+                event,
+                read_value=old,
+                write_value=new,
+                read_bytes=_value_bytes(event.footprint, old),
+                write_bytes=_value_bytes(event.footprint, new),
+            )
+            unresolved.remove(event_id)
+            progressed = True
+        if not progressed:
+            return None
+    return tuple(resolved[event.event_id] for event in events)
+
+
+def _immediate_co_predecessor(
+    event_id: str,
+    location: str,
+    co: ByteRelation,
+) -> str | None:
+    predecessors = {
+        before
+        for before, after, byte in co
+        if after == event_id and byte == location
+    }
+    immediate = {
+        candidate
+        for candidate in predecessors
+        if not any(
+            (candidate, middle, location) in co
+            and (middle, event_id, location) in co
+            for middle in predecessors
+            if middle != candidate
+        )
+    }
+    return next(iter(immediate)) if len(immediate) == 1 else None
+
+
+def _final_values_match(
+    events: Sequence[MemoryEvent],
+    co: _CandidateRelation,
+    final_values: Mapping[str, int],
+) -> bool:
+    event_map = {event.event_id: event for event in events}
+    locations = {location for event in events for location in event.byte_locations}
+    for location in locations:
+        target = _final_byte_value(final_values, location)
+        if target is None:
+            continue
+        writers = [event.event_id for event in events if event.writes_byte(location)]
+        latest = _latest_byte_write(writers, location, co.bytes)
+        if latest is None or event_map[latest].write_byte_value(location) != target:
+            return False
+    return True
+
+
+def _latest_byte_write(
+    writes: Sequence[str],
+    location: str,
+    ordering: ByteRelation,
+) -> str | None:
+    latest = [
+        write
+        for write in writes
+        if not any(
+            (write, other, location) in ordering
+            for other in writes
+            if other != write
+        )
+    ]
+    return latest[0] if len(latest) == 1 else None
+
+
+def _bytes_value(values: Iterable[int]) -> int:
+    return sum((value & 0xFF) << (8 * index) for index, value in enumerate(values))
 
 
 def _write_components(
@@ -935,7 +1145,7 @@ def _check_execution(
     cycle = _find_cycle(model)
     if cycle:
         return execution, "Model", cycle
-    if not _atomicity_ok(events, rf, co):
+    if not _atomicity_ok(events, rf_candidate.bytes, co_candidate.bytes):
         # Report the equivalent cat relation when possible.
         atomic_pairs = _compose(fre, coe)
         cycle = tuple(next(iter(atomic_pairs))) if atomic_pairs else None
@@ -1061,27 +1271,24 @@ def _loads_read_different_writes(
     return False
 
 
-def _atomicity_ok(events: Sequence[MemoryEvent], rf: Relation, co: Relation) -> bool:
-    source_for_read = {read: write for write, read in rf}
-    by_location: dict[str, list[str]] = defaultdict(list)
-    for event in events:
-        if event.write:
-            by_location[event.location].append(event.event_id)
+def _atomicity_ok(
+    events: Sequence[MemoryEvent],
+    rf: ByteRelation,
+    co: ByteRelation,
+) -> bool:
+    source_for_read = {
+        (read, location): write
+        for write, read, location in rf
+    }
     for event in events:
         if not event.amo:
             continue
-        source = source_for_read.get(event.event_id)
-        if source is None:
-            return False
-        order = sorted(
-            by_location[event.location],
-            key=lambda candidate: sum((other, candidate) in co for other in by_location[event.location]),
-        )
-        try:
-            if order.index(event.event_id) != order.index(source) + 1:
+        for location in event.footprint:
+            source = source_for_read.get((event.event_id, location))
+            if source is None or source != _immediate_co_predecessor(
+                event.event_id, location, co
+            ):
                 return False
-        except ValueError:
-            return False
     return True
 
 

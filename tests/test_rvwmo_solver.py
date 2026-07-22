@@ -4,7 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from litmus_link.litmus_ir import LitmusCaseIR
+from litmus_link.amo import AMO_OPERATIONS, AMO_ORDERINGS, AmoSpec, apply_amo
+from litmus_link.litmus_ir import LitmusCaseIR, LitmusEvent, MemoryAccess
 from litmus_link.memory_layout import MemoryLayoutConfig, expand_memory_layouts
 from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_diy import DEFAULT_DIY_RELAX, DEFAULT_DIY_SAFE, DiyConfig, enumerate_diy_cycles
@@ -17,6 +18,52 @@ from litmus_link.toolchain import herd_judge, tools_available
 def _case(labels: list[str]):
     cycle = NativeCycle(tuple(edge_by_label(label) for label in labels), "TEST")
     return lower_native_cycle(cycle)
+
+
+def _amo_case(
+    operation: str,
+    width_bytes: int,
+    ordering: str,
+    *,
+    old: int,
+    operand: int,
+) -> LitmusCaseIR:
+    spec = AmoSpec(operation, width_bytes, ordering)
+    new = apply_amo(operation, width_bytes, old, operand)
+    return LitmusCaseIR(
+        name="AMO",
+        display_name="AMO",
+        combination_name="AMO",
+        skeleton="AMO",
+        variant="amo-value",
+        cycle="Rmw",
+        init_lines=[f"x=0x{old:x};", "0:x6=x;", f"0:x7=0x{operand:x};"],
+        harts=[
+            [
+                LitmusEvent(
+                    "a0",
+                    0,
+                    "amo",
+                    f"{spec.mnemonic} x5,x7,(x6)",
+                    "x",
+                    "x5",
+                    read_value=f"0x{old:x}",
+                    write_value=f"0x{new:x}",
+                    amo_op=operation,
+                    amo_operand=f"0x{operand:x}",
+                    amo_width_bytes=width_bytes,
+                    amo_ordering=ordering,
+                    memory_access=MemoryAccess.create(
+                        "x", 0, width_bytes, transaction_kind="amo_rmw"
+                    ),
+                )
+            ]
+        ],
+        relations=[],
+        exists=f"(0:x5=0x{old:x} /\\ x=0x{new:x})",
+        expected_outcome="solver_required",
+        model="rvwmo",
+    )
 
 
 @pytest.mark.parametrize(
@@ -166,6 +213,95 @@ def test_memory_access_round_trips_through_case_ir_json() -> None:
     restored = LitmusCaseIR.from_json(case.to_json())
     assert restored.to_json() == case.to_json()
     assert restored.events()[0].memory_access is not None
+
+
+@pytest.mark.parametrize("operation", AMO_OPERATIONS)
+@pytest.mark.parametrize("width_bytes", [4, 8])
+@pytest.mark.parametrize("ordering", AMO_ORDERINGS)
+def test_nanhu_amo_old_operand_new_values_are_solved(
+    operation: str, width_bytes: int, ordering: str
+) -> None:
+    mask = (1 << (width_bytes * 8)) - 1
+    old = (mask - 0x10203) & mask
+    operand = 0x102030405 & mask
+    verdict = solve_rvwmo(
+        _amo_case(operation, width_bytes, ordering, old=old, operand=operand)
+    )
+    assert verdict.status == "verified"
+    assert verdict.verdict == "observable"
+    amo = next(event for event in verdict.events if event.event_id == "a0")
+    assert amo.read_value == old
+    assert amo.amo_operand == operand
+    assert amo.write_value == apply_amo(operation, width_bytes, old, operand)
+    assert amo.aq is (ordering in {"aq", "aqrl"})
+    assert amo.rl is (ordering in {"rl", "aqrl"})
+
+
+def test_amo_d_reconstructs_old_value_from_partial_overlap_sources() -> None:
+    old = 0x1122334455667788
+    high = 0xAABBCCDD
+    reconstructed = 0xAABBCCDD55667788
+    case = _amo_case("or", 8, "relaxed", old=reconstructed, operand=0)
+    store = LitmusEvent(
+        "w0",
+        0,
+        "store",
+        "sw x9,4(x6)",
+        "x",
+        "x9",
+        value=f"0x{high:x}",
+        memory_access=MemoryAccess.create("x", 4, 4),
+    )
+    amo = replace(case.harts[0][0], hart=1)
+    case = replace(
+        case,
+        init_lines=[f"x=0x{old:x};", "0:x6=x;", "1:x6=x;", f"0:x9=0x{high:x};"],
+        harts=[[store], [amo]],
+        exists=f"(1:x5=0x{reconstructed:x} /\\ x=0x{reconstructed:x})",
+    )
+    verdict = solve_rvwmo(case)
+    assert verdict.status == "verified"
+    assert verdict.verdict == "observable"
+    assert verdict.execution is not None
+    assert all(
+        (f"init:x[{byte}]", "a0", f"x[{byte}]") in verdict.execution.rf_bytes
+        for byte in range(4)
+    )
+    assert all(
+        ("w0", "a0", f"x[{byte}]") in verdict.execution.rf_bytes
+        for byte in range(4, 8)
+    )
+
+
+def test_aligned_load_cannot_observe_a_torn_amo_value() -> None:
+    case = _amo_case("swap", 8, "relaxed", old=0, operand=0xFFFFFFFFFFFFFFFF)
+    amo = case.harts[0][0]
+    load = LitmusEvent(
+        "r0",
+        1,
+        "load",
+        "ld x10,0(x6)",
+        "x",
+        "x10",
+        value="0xffffffff",
+        memory_access=MemoryAccess.create("x", 0, 8),
+    )
+    torn = replace(
+        case,
+        init_lines=["x=0;", "0:x6=x;", "1:x6=x;", "0:x7=-1;"],
+        harts=[[amo], [load]],
+        exists="(0:x5=0 /\\ 1:x10=0xffffffff /\\ x=0xffffffffffffffff)",
+    )
+    verdict = solve_rvwmo(torn)
+    assert verdict.status == "verified"
+    assert verdict.verdict == "forbidden"
+
+
+def test_misaligned_amo_is_rejected_from_nanhu_formal_scope() -> None:
+    with pytest.raises(ValueError, match="amo_rmw transactions must be naturally aligned"):
+        MemoryAccess.create(
+            "x", 2, 4, "byte_level_no_mag", transaction_kind="amo_rmw"
+        )
 
 
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")
