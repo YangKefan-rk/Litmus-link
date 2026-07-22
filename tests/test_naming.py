@@ -117,7 +117,8 @@ def test_vector_native_name_separates_relation_map_and_file_identity() -> None:
     )
 
     assert identity["display_name"] == (
-        "MP+{PodWW>Rfe>PodRR>Fre}+V{E0:VSE16,E3:VLOXEI32/E16}"
+        "MP+{PodWW>Rfe>PodRR>Fre}+E{E0:VSE16,E1:SR32,E2:SR32,"
+        "E3:VLOXEI32/E16}+O{same_start}"
     )
     assert re.fullmatch(r"LLV-MP-[0-9a-f]{64}", identity["machine_name"])
     assert identity["file_name"] == identity["machine_name"] + ".litmus"

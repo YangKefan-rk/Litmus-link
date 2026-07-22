@@ -200,6 +200,14 @@ class LitmusEvent:
         if self.kind == "amo" and self.memory_access is not None:
             if self.memory_access.transaction_kind not in {"scalar_plain", "amo_rmw"}:
                 raise ValueError("amo events require an amo_rmw transaction")
+        if self.kind == "amo" and self.amo_width_bytes is not None:
+            if self.amo_width_bytes not in {4, 8}:
+                raise ValueError("Nanhu AMO metadata supports only W/D widths")
+            if self.memory_access is not None and self.memory_access.size_bytes != self.amo_width_bytes:
+                raise ValueError("AMO metadata width does not match memory footprint")
+        if self.kind == "amo" and self.amo_ordering:
+            if self.amo_ordering not in {"relaxed", "aq", "rl", "aqrl"}:
+                raise ValueError(f"unsupported AMO ordering: {self.amo_ordering}")
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "LitmusEvent":

@@ -188,6 +188,74 @@ def vector_same_line_footprint(
     stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
     return max(active) * stride + element_bytes <= 64
 
+
+def vector_memory_config_legal(
+    vector: str,
+    sew: str,
+    lmul: str,
+    mask: str,
+    vl: str,
+    index_eew: str | None = None,
+) -> bool:
+    """Check the register-group and finite-memory axes used by this target."""
+
+    effective_vl = vector_effective_vl(sew, lmul, vl)
+    if effective_vl is None or mask not in VECTOR_MASKS or vector not in VECTOR_OPS:
+        return False
+    data_lmul = VECTOR_LMUL_FACTORS.get(lmul)
+    if data_lmul is None:
+        return False
+    if data_lmul >= 1:
+        group = int(data_lmul)
+        if 8 % group or 8 + group > 32:
+            return False
+    if "indexed" in vector:
+        if index_eew not in VECTOR_INDEX_EEWS:
+            return False
+        index_bits = int(str(index_eew).removeprefix("ei"))
+        sew_bits = int(str(sew).removeprefix("e"))
+        index_emul = data_lmul * Fraction(index_bits, sew_bits)
+        if index_emul < Fraction(1, 8) or index_emul > 8:
+            return False
+        if index_emul >= 1:
+            group = int(index_emul)
+            if index_emul.denominator != 1 or 16 % group or 16 + group > 32:
+                return False
+            data_registers = set(range(8, 8 + int(data_lmul))) if data_lmul >= 1 else {8}
+            index_registers = set(range(16, 16 + group))
+            if data_registers & index_registers:
+                return False
+    elif index_eew is not None:
+        return False
+    return True
+
+
+def vector_footprint_kind(
+    vector: str,
+    sew: str,
+    lmul: str,
+    mask: str,
+    vl: str,
+    *,
+    base_offset: int = 0,
+) -> str | None:
+    effective_vl = vector_effective_vl(sew, lmul, vl)
+    if effective_vl is None or mask not in VECTOR_MASKS:
+        return None
+    active = [
+        index
+        for index in range(effective_vl)
+        if mask == "unmasked" or index % 2 == 0
+    ]
+    if not active:
+        return None
+    element_bytes = int(sew.removeprefix("e")) // 8
+    stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
+    end = base_offset + max(active) * stride + element_bytes
+    if end > 4096:
+        return "cross_page"
+    return "cross_line" if base_offset // 64 != (end - 1) // 64 else "same_line"
+
 CMO_SYNC_SEQUENCES = ["none", "pre_fence", "post_fence", "full_alias_sync", "fence_i_after"]
 VM_CONTEXTS = ["bare", "sv39", "sv39_asid", "sv39_global", "satp_switch"]
 SHOOTDOWN_SCOPES = ["none", "local", "remote_ipi", "remote_missing", "global"]

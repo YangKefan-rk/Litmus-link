@@ -13,11 +13,23 @@ import bisect
 import json
 import random
 import re
+from collections import Counter
 from dataclasses import dataclass, replace
-from itertools import product
+from functools import cached_property, lru_cache
+from itertools import permutations, product
+from math import prod as _product
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
+from .amo import AMO_OPERATIONS, AMO_ORDERINGS, AmoSpec
+from .fusion_layout import (
+    FUSION_OVERLAP_LAYOUTS,
+    FusionAddressLayout,
+    FusionLayoutError,
+    endpoint_footprint,
+    synthesize_address_layout,
+)
+from .fusion_values import FusionValuePlan, synthesize_fusion_values
 from .litmus_ir import (
     LitmusCaseIR,
     LitmusEvent,
@@ -30,11 +42,10 @@ from .litmus_ir import (
 )
 from .models import Combination, Decision, GENERATED, GeneratedCase
 from .naming import vector_native_case_identity
-from .native_cycles import NativeCycle
+from .native_cycles import NativeCycle, location_ids, vertex_directions
 from .native_edges import READ, WRITE
 from .native_scalar import (
     DEFAULT_NATIVE_MECHANISMS,
-    NATIVE_ANNOTATIONS,
     lower_native_cycle,
     native_template_cycles,
 )
@@ -47,7 +58,8 @@ from .profiles import (
     VECTOR_OPS,
     VECTOR_TAILS,
     VECTOR_WIDTHS,
-    vector_same_line_footprint,
+    vector_footprint_kind,
+    vector_memory_config_legal,
 )
 from .renderer import render_ir
 from .solver import solve_generated_case
@@ -55,12 +67,25 @@ from .solver import solve_generated_case
 
 ProgressCallback = Callable[[int, int, str], None]
 
-VECTOR_ALIGNMENTS = (
-    "aligned",
-    "misalign_same16",
-    "misalign_cross16",
-    "misalign_cross64",
+VECTOR_ALIGNMENTS = ("aligned",)
+
+SCALAR_WIDTHS = ("b", "h", "w", "d")
+SCALAR_WIDTH_BYTES = {"b": 1, "h": 2, "w": 4, "d": 8}
+AMO_WIDTHS = ("w", "d")
+AMO_WIDTH_BYTES = {"w": 4, "d": 8}
+ENDPOINT_CATEGORIES = ("scalar", "amo", "vector")
+ENDPOINT_COMPOSITIONS = (
+    "vector_only",
+    "vector_scalar",
+    "vector_amo",
+    "vector_scalar_amo",
 )
+_COMPOSITION_CATEGORIES = {
+    "vector_only": frozenset({"vector"}),
+    "vector_scalar": frozenset({"vector", "scalar"}),
+    "vector_amo": frozenset({"vector", "amo"}),
+    "vector_scalar_amo": frozenset({"vector", "scalar", "amo"}),
+}
 
 VECTOR_SAMPLE_BALANCED = "balanced"
 VECTOR_SAMPLE_DOMAIN_WEIGHTED = "domain_weighted"
@@ -77,6 +102,117 @@ VECTOR_SAMPLING_LABELS = {
     VECTOR_SAMPLE_DOMAIN_WEIGHTED: "domain-weighted-random-without-replacement",
     VECTOR_GENERATE_ALL: "exhaustive-deterministic-enumeration",
 }
+
+
+def _amo_mask_satisfiable(cycle: NativeCycle, amo_mask: int) -> bool:
+    """Return whether AMO read facets admit a coherent writer order.
+
+    A relation-cycle ``R`` vertex normally has no write facet.  Selecting AMO
+    for that vertex adds a write to coherence and constrains its read facet to
+    observe either the initial value or the cycle's explicit ``rf`` source.
+    The check is structural: fusion layouts place every same-location endpoint
+    around a common naturally aligned byte, so an intervening writer would
+    necessarily invalidate the required AMO source.
+    """
+
+    directions, locations, relations = _cycle_structure_key(cycle)
+    return _amo_structure_satisfiable(directions, locations, relations, amo_mask)
+
+
+def _cycle_structure_key(
+    cycle: NativeCycle,
+) -> tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]]:
+    """Collapse label-only variants that have identical memory structure."""
+
+    return (
+        vertex_directions(cycle.edges),
+        location_ids(cycle.edges),
+        tuple(
+            edge.relation if edge.relation in {"rf", "fr", "co"} else "local"
+            for edge in cycle.edges
+        ),
+    )
+
+
+@lru_cache(maxsize=None)
+def _amo_structure_satisfiable(
+    directions: tuple[str, ...],
+    locations: tuple[int, ...],
+    relations: tuple[str, ...],
+    amo_mask: int,
+) -> bool:
+    if amo_mask < 0 or amo_mask >> len(directions):
+        return False
+
+    rf_sources = {
+        (vertex + 1) % len(relations): vertex
+        for vertex, relation in enumerate(relations)
+        if relation == "rf"
+    }
+    writers = {
+        vertex
+        for vertex, direction in enumerate(directions)
+        if direction == WRITE or amo_mask & (1 << vertex)
+    }
+    constraints: set[tuple[int, int]] = set()
+    for vertex, relation in enumerate(relations):
+        target = (vertex + 1) % len(relations)
+        if relation == "co":
+            constraints.add((vertex, target))
+        elif relation == "fr":
+            source = rf_sources.get(vertex)
+            if source is not None:
+                constraints.add((source, target))
+            if amo_mask & (1 << vertex):
+                constraints.add((vertex, target))
+        elif relation == "rf" and amo_mask & (1 << target):
+            constraints.add((vertex, target))
+
+    for location in sorted(set(locations)):
+        location_writers = tuple(
+            vertex
+            for vertex in sorted(writers)
+            if locations[vertex] == location
+        )
+        location_constraints = tuple(
+            (before, after)
+            for before, after in constraints
+            if locations[before] == location and locations[after] == location
+        )
+        read_amos = tuple(
+            vertex
+            for vertex in location_writers
+            if directions[vertex] == READ and amo_mask & (1 << vertex)
+        )
+
+        found = False
+        for order in permutations(location_writers):
+            positions = {vertex: index for index, vertex in enumerate(order)}
+            if any(
+                positions[before] >= positions[after]
+                for before, after in location_constraints
+            ):
+                continue
+            valid = True
+            for vertex in read_amos:
+                source = rf_sources.get(vertex)
+                position = positions[vertex]
+                if source is None:
+                    valid = position == 0
+                else:
+                    valid = (
+                        source in positions
+                        and position > 0
+                        and order[position - 1] == source
+                    )
+                if not valid:
+                    break
+            if valid:
+                found = True
+                break
+        if not found:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -96,6 +232,15 @@ class EndpointChoice:
     def alignment(self) -> str:
         return "aligned"
 
+    @property
+    def width_bytes(self) -> int:
+        values = dict(self.params or {})
+        if self.category == "vector":
+            return int(str(values.get("sew", "e32")).removeprefix("e")) // 8
+        if self.category == "amo":
+            return int(values.get("amo_width_bytes", 4))
+        return int(values.get("width_bytes", 4))
+
     def to_json(self) -> dict[str, Any]:
         return {
             "choice_id": self.choice_id,
@@ -112,10 +257,15 @@ class VectorAssignment:
     cycle: NativeCycle
     choices: tuple[EndpointChoice, ...]
     alignment: str = "aligned"
+    overlap_layout: str = "same_start"
 
     def __post_init__(self) -> None:
         if self.alignment not in VECTOR_ALIGNMENTS:
             raise ValueError(f"unknown Vector assignment alignment: {self.alignment}")
+        if self.overlap_layout not in FUSION_OVERLAP_LAYOUTS:
+            raise ValueError(
+                f"unknown Vector assignment overlap layout: {self.overlap_layout}"
+            )
         directions = tuple(edge.src for edge in self.cycle.edges)
         if len(self.choices) != len(directions):
             raise ValueError("Vector assignment must provide one endpoint choice per cycle vertex")
@@ -123,17 +273,8 @@ class VectorAssignment:
             raise ValueError("Vector endpoint choice direction does not match its cycle vertex")
         if not any(choice.is_vector for choice in self.choices):
             raise ValueError("Vector assignment must contain at least one Vector memory endpoint")
-        if self.alignment != "aligned":
-            illegal = [
-                choice.choice_id
-                for choice in self.choices
-                if not _choice_allowed_alignment(choice, self.alignment)
-            ]
-            if illegal:
-                raise ValueError(
-                    "misaligned Vector assignments exclude AMO and byte-sized Vector endpoints: "
-                    + ", ".join(illegal)
-                )
+        if any(choice.width_bytes < 1 for choice in self.choices):
+            raise ValueError("endpoint widths must be positive")
 
     @property
     def key(self) -> tuple[Any, ...]:
@@ -141,6 +282,7 @@ class VectorAssignment:
             self.cycle.family,
             self.cycle.canonical_key,
             self.alignment,
+            self.overlap_layout,
             *(choice.choice_id for choice in self.choices),
         )
 
@@ -151,15 +293,11 @@ class VectorNativeDomain:
     read_choices: tuple[EndpointChoice, ...]
     write_choices: tuple[EndpointChoice, ...]
     relation_audit: Mapping[str, Any]
-    read_nonvector_choices: int
-    write_nonvector_choices: int
-    read_plain_choices: int
-    write_plain_choices: int
-    read_no_amo_choices: int
-    write_no_amo_choices: int
-    read_misaligned_choices: int
-    write_misaligned_choices: int
     alignments: tuple[str, ...]
+    overlap_layouts: tuple[str, ...]
+    compositions: tuple[str, ...]
+    endpoint_audit: Mapping[str, Any]
+    request_exclusions: Mapping[str, int]
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "VectorNativeDomain":
@@ -176,77 +314,205 @@ class VectorNativeDomain:
         if not cycles:
             raise ValueError("the selected relation mechanisms produce no legal cycles")
 
-        endpoint_modes = _selected(payload, "endpoint_modes", NATIVE_ANNOTATIONS)
-        unknown_modes = set(endpoint_modes) - set(NATIVE_ANNOTATIONS)
-        if unknown_modes:
-            raise ValueError(f"unknown endpoint mode(s): {', '.join(sorted(unknown_modes))}")
-
-        vector_choices = _vector_choices(payload)
-        alignments = _selected(payload, "alignments", ("aligned",))
-        unknown_alignments = set(alignments) - set(VECTOR_ALIGNMENTS)
+        categories = _endpoint_categories(payload)
+        vector_choices, vector_audit = (
+            _vector_choices_with_audit(payload)
+            if "vector" in categories
+            else ((), _empty_endpoint_audit())
+        )
+        scalar_choices = _scalar_choices(payload) if "scalar" in categories else ()
+        amo_choices, amo_audit = (
+            _amo_choices_with_audit(payload)
+            if "amo" in categories
+            else ((), _empty_endpoint_audit())
+        )
+        requested_alignments = _selected(payload, "alignments", ("aligned",))
+        known_misaligned = {
+            "misalign_same16",
+            "misalign_cross16",
+            "misalign_cross64",
+        }
+        unknown_alignments = (
+            set(requested_alignments) - set(VECTOR_ALIGNMENTS) - known_misaligned
+        )
         if unknown_alignments:
             raise ValueError(f"unknown Vector alignment(s): {', '.join(sorted(unknown_alignments))}")
-        plain = tuple(
-            EndpointChoice(f"scalar:{mode}", "scalar" if mode == "P" else "amo", direction, mode)
-            for direction in (READ, WRITE)
-            for mode in endpoint_modes
+        alignments = tuple(
+            alignment
+            for alignment in requested_alignments
+            if alignment in VECTOR_ALIGNMENTS
         )
-        read_choices = tuple(choice for choice in plain if choice.direction == READ) + tuple(
-            choice for choice in vector_choices if choice.direction == READ
+        request_exclusions, supported_scope_requested = _fusion_request_audit(
+            payload,
+            categories,
+            requested_alignments,
         )
-        write_choices = tuple(choice for choice in plain if choice.direction == WRITE) + tuple(
-            choice for choice in vector_choices if choice.direction == WRITE
+        if not supported_scope_requested:
+            alignments = ()
+        overlap_layouts = _selected(payload, "overlap_layouts", ("same_start",))
+        unknown_layouts = set(overlap_layouts) - set(FUSION_OVERLAP_LAYOUTS)
+        if unknown_layouts:
+            raise ValueError(
+                f"unknown fusion overlap layout(s): {', '.join(sorted(unknown_layouts))}"
+            )
+        compositions = _selected(
+            payload,
+            "endpoint_compositions",
+            tuple(
+                name
+                for name, required in _COMPOSITION_CATEGORIES.items()
+                if required <= set(categories)
+            ),
         )
-        if not any(choice.is_vector for choice in read_choices + write_choices):
-            raise ValueError("the Vector relation domain must include at least one Vector form")
+        unknown_compositions = set(compositions) - set(ENDPOINT_COMPOSITIONS)
+        if unknown_compositions:
+            raise ValueError(
+                f"unknown endpoint composition(s): {', '.join(sorted(unknown_compositions))}"
+            )
+        if not compositions:
+            raise ValueError("select at least one endpoint composition")
+        if any(not _COMPOSITION_CATEGORIES[name] <= set(categories) for name in compositions):
+            raise ValueError("endpoint composition requires a disabled endpoint category")
+
+        choices = tuple((*scalar_choices, *amo_choices, *vector_choices))
+        read_choices = tuple(choice for choice in choices if choice.direction == READ)
+        write_choices = tuple(choice for choice in choices if choice.direction == WRITE)
         return cls(
             tuple(cycles),
             read_choices,
             write_choices,
             relation_audit,
-            sum(not choice.is_vector for choice in read_choices),
-            sum(not choice.is_vector for choice in write_choices),
-            sum(not choice.is_vector and choice.annotation == "P" for choice in read_choices),
-            sum(not choice.is_vector and choice.annotation == "P" for choice in write_choices),
-            sum(choice.is_vector or choice.annotation == "P" for choice in read_choices),
-            sum(choice.is_vector or choice.annotation == "P" for choice in write_choices),
-            sum(_choice_allowed_alignment(choice, "misalign_same16") for choice in read_choices),
-            sum(_choice_allowed_alignment(choice, "misalign_same16") for choice in write_choices),
             alignments,
+            overlap_layouts,
+            compositions,
+            {
+                "scalar": {
+                    "raw_configurations": len(scalar_choices),
+                    "generated_endpoint_choices": len(scalar_choices),
+                    "excluded": {},
+                },
+                "amo": amo_audit,
+                "vector": vector_audit,
+            },
+            request_exclusions,
         )
 
     def choices_for(self, direction: str) -> tuple[EndpointChoice, ...]:
         return self.read_choices if direction == READ else self.write_choices
 
     def count_for_cycle(self, cycle: NativeCycle) -> int:
-        directions = tuple(edge.src for edge in cycle.edges)
-        total = 1
-        nonvector = 1
-        plain_nonvector = 1
-        misaligned_total = 1
-        for direction in directions:
-            choices = self.choices_for(direction)
-            total *= len(choices)
-            nonvector *= (
-                self.read_nonvector_choices
-                if direction == READ
-                else self.write_nonvector_choices
-            )
-            misaligned_total *= (
-                self.read_misaligned_choices
-                if direction == READ
-                else self.write_misaligned_choices
-            )
-            plain_nonvector *= (
-                self.read_plain_choices if direction == READ else self.write_plain_choices
-            )
-        aligned = total - nonvector if "aligned" in self.alignments else 0
-        misaligned = (misaligned_total - plain_nonvector) * sum(
-            alignment != "aligned" for alignment in self.alignments
-        )
-        return aligned + misaligned
+        return self._cycle_count_breakdown(cycle)["generated"]
 
-    @property
+    @cached_property
+    def _breakdowns_by_structure(
+        self,
+    ) -> Mapping[
+        tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
+        Mapping[str, Any],
+    ]:
+        representatives: dict[
+            tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
+            NativeCycle,
+        ] = {}
+        for cycle in self.cycles:
+            representatives.setdefault(_cycle_structure_key(cycle), cycle)
+        return {
+            key: self._calculate_cycle_count_breakdown(cycle)
+            for key, cycle in representatives.items()
+        }
+
+    @cached_property
+    def _width_multiplicities(
+        self,
+    ) -> Mapping[str, Mapping[str, Mapping[int, int]]]:
+        by_direction: dict[str, dict[str, Counter[int]]] = {}
+        for direction in (READ, WRITE):
+            by_category: dict[str, Counter[int]] = {}
+            for choice in self.choices_for(direction):
+                by_category.setdefault(choice.category, Counter())[choice.width_bytes] += 1
+            by_direction[direction] = by_category
+        return by_direction
+
+    def _cycle_count_breakdown(self, cycle: NativeCycle) -> Mapping[str, Any]:
+        return self._breakdowns_by_structure[_cycle_structure_key(cycle)]
+
+    def _calculate_cycle_count_breakdown(self, cycle: NativeCycle) -> dict[str, Any]:
+        if not self.alignments:
+            return {"raw": 0, "generated": 0, "excluded": {}}
+        directions = vertex_directions(cycle.edges)
+        locations = location_ids(cycle.edges)
+        category_domains = [
+            tuple(self._width_multiplicities[direction])
+            for direction in directions
+        ]
+        allowed_compositions = {
+            _COMPOSITION_CATEGORIES[name] for name in self.compositions
+        }
+        location_groups = [
+            tuple(
+                vertex
+                for vertex, actual_location in enumerate(locations)
+                if actual_location == location
+            )
+            for location in sorted(set(locations))
+        ]
+
+        raw = 0
+        generated = 0
+        excluded: Counter[str] = Counter()
+        for categories in product(*category_domains):
+            if frozenset(categories) not in allowed_compositions:
+                continue
+            width_counts = [
+                self._width_multiplicities[direction][category]
+                for direction, category in zip(directions, categories)
+            ]
+            endpoint_count = 1
+            for counts in width_counts:
+                endpoint_count *= sum(counts.values())
+
+            # Naturally aligned power-of-two accesses can realize a nontrivial
+            # low/center/high containment layout iff at least one abstract
+            # location contains two different endpoint widths.  Count its
+            # complement analytically: every endpoint in each location picks
+            # the same width.
+            all_locations_uniform = 1
+            for vertices in location_groups:
+                uniform_at_location = sum(
+                    _product(width_counts[vertex].get(width, 0) for vertex in vertices)
+                    for width in (1, 2, 4, 8)
+                )
+                all_locations_uniform *= uniform_at_location
+            mixed_width_count = endpoint_count - all_locations_uniform
+
+            amo_mask = sum(
+                1 << vertex
+                for vertex, category in enumerate(categories)
+                if category == "amo"
+            )
+            structure_ok = _amo_mask_satisfiable(cycle, amo_mask)
+            for layout in self.overlap_layouts:
+                weighted = endpoint_count * len(self.alignments)
+                raw += weighted
+                if not structure_ok or layout == "disjoint_control":
+                    excluded["excluded_unsatisfiable_value_layout"] += weighted
+                    continue
+                eligible = (
+                    endpoint_count
+                    if layout == "same_start"
+                    else mixed_width_count
+                ) * len(self.alignments)
+                generated += eligible
+                excluded["excluded_unsatisfiable_value_layout"] += weighted - eligible
+        return {
+            "raw": raw,
+            "generated": generated,
+            "excluded": {
+                reason: count for reason, count in excluded.items() if count
+            },
+        }
+
+    @cached_property
     def total_cases(self) -> int:
         return sum(self.count_for_cycle(cycle) for cycle in self.cycles)
 
@@ -322,45 +588,26 @@ class VectorNativeDomain:
 
         rng = random.Random(seed)
         selected: dict[tuple[Any, ...], VectorAssignment] = {}
-        alignment_domains = {
-            (alignment, direction): tuple(
-                choice
-                for choice in self.choices_for(direction)
-                if _choice_allowed_alignment(choice, alignment)
-            )
-            for alignment in self.alignments
-            for direction in (READ, WRITE)
-        }
-        alignment_weights: dict[tuple[str, ...], tuple[list[int], list[int]]] = {}
-
         def random_assignment(cycle: NativeCycle) -> VectorAssignment:
-            directions = tuple(edge.src for edge in cycle.edges)
-            cached = alignment_weights.get(directions)
-            if cached is None:
-                per_alignment = [
-                    _assignment_count_for_domains(
-                        [alignment_domains[(alignment, direction)] for direction in directions]
-                    )
-                    for alignment in self.alignments
-                ]
-                alignment_cumulative: list[int] = []
-                alignment_running = 0
-                for count in per_alignment:
-                    alignment_running += count
-                    alignment_cumulative.append(alignment_running)
-                cached = (per_alignment, alignment_cumulative)
-                alignment_weights[directions] = cached
-            per_alignment, alignment_cumulative = cached
-            alignment_total = sum(per_alignment)
-            alignment_index = bisect.bisect_right(
-                alignment_cumulative, rng.randrange(alignment_total)
-            )
-            alignment = self.alignments[alignment_index]
-            domains = [alignment_domains[(alignment, direction)] for direction in directions]
+            directions = vertex_directions(cycle.edges)
             while True:
-                choices = tuple(rng.choice(domain) for domain in domains)
-                if any(choice.is_vector for choice in choices):
-                    return VectorAssignment(cycle, choices, alignment)
+                choices = tuple(
+                    rng.choice(self.choices_for(direction)) for direction in directions
+                )
+                alignment = rng.choice(self.alignments)
+                overlap_layout = rng.choice(self.overlap_layouts)
+                if not self._composition_allowed(choices):
+                    continue
+                try:
+                    self._layout_for(cycle, choices, overlap_layout)
+                except FusionLayoutError:
+                    continue
+                return VectorAssignment(
+                    cycle,
+                    choices,
+                    alignment,
+                    overlap_layout,
+                )
 
         attempts = 0
         max_attempts = max(target * 40, 1000)
@@ -380,237 +627,135 @@ class VectorNativeDomain:
     def _coverage_weighted_assignments(
         self, limit: int, seed: int
     ) -> list[VectorAssignment]:
-        if limit < 1:
-            return []
-        total = self.total_cases
-        if total < 1:
-            return []
-        target = min(limit, total)
-        weights = [self.count_for_cycle(cycle) for cycle in self.cycles]
-        cumulative: list[int] = []
-        running = 0
-        for weight in weights:
-            running += weight
-            cumulative.append(running)
+        # Family balancing is handled by the caller. Within one family, sample
+        # the exact generated domain without replacement by rejection over its
+        # finite endpoint product; invalid layout states are never returned.
+        return self._domain_weighted_assignments(limit, seed)
 
-        rng = random.Random(seed)
-        selected: dict[tuple[Any, ...], VectorAssignment] = {}
-        alignment_domains = {
-            (alignment, direction): tuple(
-                choice
-                for choice in self.choices_for(direction)
-                if _choice_allowed_alignment(choice, alignment)
+    def _composition_allowed(self, choices: Sequence[EndpointChoice]) -> bool:
+        categories = frozenset(choice.category for choice in choices)
+        return any(
+            categories == _COMPOSITION_CATEGORIES[name]
+            for name in self.compositions
+        )
+
+    def _assignment_structure_allowed(
+        self,
+        cycle: NativeCycle,
+        choices: Sequence[EndpointChoice],
+    ) -> bool:
+        amo_mask = sum(
+            1 << vertex
+            for vertex, choice in enumerate(choices)
+            if choice.category == "amo"
+        )
+        return _amo_mask_satisfiable(cycle, amo_mask)
+
+    def _layout_for(
+        self,
+        cycle: NativeCycle,
+        choices: Sequence[EndpointChoice],
+        layout: str,
+    ) -> FusionAddressLayout:
+        if not self._assignment_structure_allowed(cycle, choices):
+            raise FusionLayoutError(
+                "excluded_unsatisfiable_value_layout",
+                "AMO read facets cannot realize the cycle's rf/fr/co witness",
             )
-            for alignment in self.alignments
-            for direction in (READ, WRITE)
-        }
-        vector_domains = {
-            (alignment, direction): tuple(
-                choice
-                for choice in alignment_domains[(alignment, direction)]
-                if choice.is_vector
+        locations = location_ids(cycle.edges)
+        groups = [
+            tuple(
+                vertex
+                for vertex, actual in enumerate(locations)
+                if actual == location
             )
-            for alignment in self.alignments
-            for direction in (READ, WRITE)
-        }
-        nonvector_domains = {
-            (alignment, direction): tuple(
-                choice
-                for choice in alignment_domains[(alignment, direction)]
-                if not choice.is_vector
-            )
-            for alignment in self.alignments
-            for direction in (READ, WRITE)
-        }
-
-        def add_stratum(
-            *,
-            forced_choices: Sequence[EndpointChoice] = (),
-            mechanism: str | None = None,
-            exact_vector_count: int | None = None,
-            alignment: str | None = None,
-        ) -> None:
-            if len(selected) >= target:
-                return
-            eligible_cycles = [
-                cycle
-                for cycle in self.cycles
-                if mechanism is None or any(edge.mechanism == mechanism for edge in cycle.edges)
-            ]
-            rng.shuffle(eligible_cycles)
-            for cycle in eligible_cycles[:100]:
-                selected_alignment = alignment or rng.choice(self.alignments)
-                directions = tuple(edge.src for edge in cycle.edges)
-                available_vertices = list(range(len(directions)))
-                assignment: list[EndpointChoice | None] = [None] * len(directions)
-                ok = True
-                for forced in forced_choices:
-                    if not _choice_allowed_alignment(forced, selected_alignment):
-                        ok = False
-                        break
-                    candidates = [
-                        vertex
-                        for vertex in available_vertices
-                        if directions[vertex] == forced.direction
-                    ]
-                    if not candidates:
-                        ok = False
-                        break
-                    vertex = rng.choice(candidates)
-                    assignment[vertex] = forced
-                    available_vertices.remove(vertex)
-                if not ok:
-                    continue
-
-                forced_vector_count = sum(
-                    choice is not None and choice.is_vector for choice in assignment
-                )
-                desired_vectors = exact_vector_count
-                if desired_vectors is None and forced_vector_count == 0:
-                    desired_vectors = 1
-                if desired_vectors is not None:
-                    needed = desired_vectors - forced_vector_count
-                    candidates = [
-                        vertex
-                        for vertex in available_vertices
-                        if vector_domains[(selected_alignment, directions[vertex])]
-                    ]
-                    if needed < 0 or len(candidates) < needed:
-                        continue
-                    for vertex in rng.sample(candidates, needed):
-                        vector_domain = vector_domains[
-                            (selected_alignment, directions[vertex])
-                        ]
-                        assignment[vertex] = rng.choice(vector_domain)
-                        available_vertices.remove(vertex)
-
-                for vertex in available_vertices:
-                    domain = (
-                        nonvector_domains[(selected_alignment, directions[vertex])]
-                        if exact_vector_count is not None
-                        else alignment_domains[(selected_alignment, directions[vertex])]
-                    )
-                    if exact_vector_count is not None:
-                        if not domain:
-                            ok = False
-                            break
-                    assignment[vertex] = rng.choice(domain)
-                concrete = tuple(choice for choice in assignment if choice is not None)
-                if not ok or len(concrete) != len(directions) or not any(choice.is_vector for choice in concrete):
-                    continue
-                if selected_alignment != "aligned" and any(
-                    choice.category == "amo" for choice in concrete
-                ):
-                    continue
-                candidate = VectorAssignment(cycle, concrete, selected_alignment)
-                selected.setdefault(candidate.key, candidate)
-                return
-
-        nonvector = self.read_choices + self.write_choices
-        for annotation in ("AMO", "Aq", "Rl", "AR", "P"):
-            choices = [
-                choice
-                for choice in nonvector
-                if not choice.is_vector and choice.annotation == annotation
-            ]
-            if choices:
-                add_stratum(
-                    forced_choices=(rng.choice(choices),),
-                    alignment="aligned" if annotation != "P" else None,
-                )
-        add_stratum(exact_vector_count=1)
-        add_stratum(exact_vector_count=2)
-
-        vectors = [choice for choice in self.read_choices + self.write_choices if choice.is_vector]
-        for form in dict.fromkeys(choice.vector_form for choice in vectors):
-            choices = [choice for choice in vectors if choice.vector_form == form]
-            selected_choice = rng.choice(choices)
-            add_stratum(
-                forced_choices=(selected_choice,),
-                alignment=(
-                    "aligned"
-                    if str((selected_choice.params or {}).get("sew")) == "e8"
-                    else None
-                ),
-            )
-        for alignment in self.alignments:
-            add_stratum(alignment=alignment)
-        for mechanism in ("po", "fence", "dependency"):
-            if any(edge.mechanism == mechanism for cycle in self.cycles for edge in cycle.edges):
-                add_stratum(mechanism=mechanism)
-
-        attempts = 0
-        max_attempts = max(target * 40, 1000)
-        while len(selected) < target and attempts < max_attempts:
-            attempts += 1
-            cycle_index = bisect.bisect_right(cumulative, rng.randrange(total))
-            cycle = self.cycles[cycle_index]
-            directions = tuple(edge.src for edge in cycle.edges)
-            alignment = rng.choice(self.alignments)
-            while True:
-                choices = tuple(
-                    rng.choice(alignment_domains[(alignment, direction)])
-                    for direction in directions
-                )
-                if any(choice.is_vector for choice in choices):
-                    break
-            assignment = VectorAssignment(cycle, choices, alignment)
-            selected.setdefault(assignment.key, assignment)
-
-        if len(selected) < target:
-            for assignment in self.assignments():
-                selected.setdefault(assignment.key, assignment)
-                if len(selected) >= target:
-                    break
-        return list(selected.values())
+            for location in sorted(set(locations))
+        ]
+        return synthesize_address_layout(
+            [
+                endpoint_footprint(vertex, choice)
+                for vertex, choice in enumerate(choices)
+            ],
+            groups,
+            layout,
+        )
 
     def assignments(self) -> Iterator[VectorAssignment]:
         for cycle in self.cycles:
-            directions = tuple(edge.src for edge in cycle.edges)
+            directions = vertex_directions(cycle.edges)
             for alignment in self.alignments:
-                domains = [
-                    tuple(
-                        choice
-                        for choice in self.choices_for(direction)
-                        if _choice_allowed_alignment(choice, alignment)
-                    )
-                    for direction in directions
-                ]
-                for choices in product(*domains):
-                    if not any(choice.is_vector for choice in choices):
-                        continue
-                    yield VectorAssignment(cycle, tuple(choices), alignment)
+                domains = [self.choices_for(direction) for direction in directions]
+                for overlap_layout in self.overlap_layouts:
+                    for choices in product(*domains):
+                        if not self._composition_allowed(choices):
+                            continue
+                        try:
+                            self._layout_for(cycle, choices, overlap_layout)
+                        except FusionLayoutError:
+                            continue
+                        yield VectorAssignment(
+                            cycle, tuple(choices), alignment, overlap_layout
+                        )
 
     def audit(self) -> dict[str, Any]:
         family_cycles: dict[str, int] = {}
         family_cases: dict[str, int] = {}
+        raw = 0
+        excluded: Counter[str] = Counter()
         for cycle in self.cycles:
+            breakdown = self._cycle_count_breakdown(cycle)
             family_cycles[cycle.family] = family_cycles.get(cycle.family, 0) + 1
             family_cases[cycle.family] = (
-                family_cases.get(cycle.family, 0) + self.count_for_cycle(cycle)
+                family_cases.get(cycle.family, 0) + breakdown["generated"]
             )
+            raw += breakdown["raw"]
+            excluded.update(breakdown["excluded"])
         return {
-            "schema": "litmus-link.vector-native-audit.v1",
+            "schema": "litmus-link.vector-native-audit.v2",
             "relation_cycles": len(self.cycles),
             "read_endpoint_choices": len(self.read_choices),
             "write_endpoint_choices": len(self.write_choices),
             "alignments": list(self.alignments),
+            "overlap_layouts": list(self.overlap_layouts),
+            "endpoint_compositions": list(self.compositions),
+            "formal_scope": {
+                "pbmt": 0,
+                "attribute": "cacheable",
+                "pma_atomic": True,
+                "natural_alignment": True,
+            },
+            "raw_combinations": raw,
             "total_cases": self.total_cases,
+            "generated": self.total_cases,
+            "excluded": dict(sorted(excluded.items())),
+            "excluded_illegal": sum(
+                count
+                for reason, count in self.request_exclusions.items()
+                if reason.startswith("excluded_illegal")
+            ) + sum(
+                count
+                for audit in self.endpoint_audit.values()
+                for reason, count in dict(audit.get("excluded", {})).items()
+                if reason.startswith("excluded_illegal")
+            ),
+            "excluded_unsupported": sum(
+                count
+                for reason, count in self.request_exclusions.items()
+                if reason.startswith("excluded_unsupported")
+            ) + sum(
+                count
+                for audit in self.endpoint_audit.values()
+                for reason, count in dict(audit.get("excluded", {})).items()
+                if reason.startswith("excluded_unsupported")
+            ),
+            "endpoint_domain": dict(self.endpoint_audit),
+            "request_exclusions": dict(sorted(self.request_exclusions.items())),
+            "hand_required": 0,
+            "missing": 0,
             "family_relation_cycles": dict(sorted(family_cycles.items())),
             "family_cases": dict(sorted(family_cases.items())),
             "relation_audit": dict(self.relation_audit),
         }
-
-
-def _assignment_count_for_domains(
-    domains: Sequence[Sequence[EndpointChoice]],
-) -> int:
-    total = 1
-    nonvector = 1
-    for domain in domains:
-        total *= len(domain)
-        nonvector *= sum(not choice.is_vector for choice in domain)
-    return total - nonvector
 
 
 def _derived_seed(seed: int, family: str) -> int:
@@ -649,58 +794,259 @@ def _balanced_quotas(
     return quotas
 
 
-def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
-    annotations = tuple(choice.annotation if not choice.is_vector else "P" for choice in assignment.choices)
-    annotated = NativeCycle(assignment.cycle.edges, assignment.cycle.family, annotations)
-    scalar = lower_native_cycle(annotated)
-    case = scalar.case_ir
-    harts: list[list[LitmusEvent]] = []
-    init_lines = list(case.init_lines)
-    vector_metadata: dict[str, dict[str, Any]] = {}
+def _lower_scalar_endpoint(
+    event: LitmusEvent,
+    choice: EndpointChoice,
+    value: Any,
+    offset: int,
+) -> tuple[LitmusEvent, list[LitmusEvent]]:
+    size = choice.width_bytes
+    load = {1: "lbu", 2: "lhu", 4: "lwu", 8: "ld"}
+    store = {1: "sb", 2: "sh", 4: "sw", 8: "sd"}
+    base_register, data_register = _scalar_memory_operands(event)
+    mnemonic = load[size] if event.kind == "load" else store[size]
+    observed = (
+        value.read_register_value
+        if event.kind == "load"
+        else value.write_value
+    )
+    return (
+        replace(
+            event,
+            instruction=f"{mnemonic} {data_register},{offset}({base_register})",
+            value=f"0x{int(observed or 0):x}",
+            role="scalar-fusion-cycle-event",
+            memory_access=MemoryAccess.create(event.location, offset, size),
+        ),
+        [],
+    )
+
+
+def _lower_amo_endpoint(
+    event: LitmusEvent,
+    choice: EndpointChoice,
+    value: Any,
+    offset: int,
+    sequence: Sequence[LitmusEvent],
+) -> tuple[LitmusEvent, list[LitmusEvent]]:
+    params = dict(choice.params or {})
+    spec = AmoSpec(
+        str(params["amo_op"]),
+        int(params["amo_width_bytes"]),
+        str(params["amo_ordering"]),
+    )
+    base_register, destination = _scalar_memory_operands(event)
+    temporary_count = int(event.kind == "load") + int(offset != 0)
+    temporary_registers = iter(_free_temp_registers(sequence, temporary_count))
+    operand_register = (
+        next(temporary_registers) if event.kind == "load" else destination
+    )
+    address_register = base_register
+    setup = (
+        [
+            LitmusEvent(
+                f"{event.event_id}_amo_operand",
+                event.hart,
+                "setup",
+                f"li {operand_register},{int(value.amo_operand or 0)}",
+                role="amo-operand",
+            )
+        ]
+        if event.kind == "load"
+        else []
+    )
+    if offset:
+        address_register = next(temporary_registers)
+        setup.append(
+            LitmusEvent(
+                f"{event.event_id}_amo_base",
+                event.hart,
+                "setup",
+                f"addi {address_register},{base_register},{offset}",
+                role="amo-fusion-base",
+            )
+        )
+    if event.kind == "store":
+        destination = "x0"
+    return (
+        replace(
+            event,
+            kind="amo",
+            instruction=(
+                f"{spec.mnemonic} {destination},{operand_register},"
+                f"({address_register})"
+            ),
+            value=f"0x{int(value.read_register_value or 0):x}",
+            read_value=f"0x{int(value.amo_old or 0):x}",
+            write_value=f"0x{int(value.amo_new or 0):x}",
+            amo_op=spec.operation,
+            amo_operand=f"0x{int(value.amo_operand or 0):x}",
+            amo_width_bytes=spec.width_bytes,
+            amo_ordering=spec.ordering,
+            role="amo-fusion-cycle-event",
+            memory_access=MemoryAccess.create(
+                event.location,
+                offset,
+                spec.width_bytes,
+                transaction_kind="amo_rmw",
+            ),
+        ),
+        setup,
+    )
+
+
+def _fusion_init_lines(
+    old_lines: Sequence[str],
+    case: LitmusCaseIR,
+    choices: Sequence[EndpointChoice],
+    plan: FusionValuePlan,
+) -> list[str]:
+    location_names = set(plan.initial_bytes)
+    declarations = [
+        (
+            f"uint8_t {name}[{len(values)}]={{"
+            + ",".join(f"0x{value:02x}" for value in values)
+            + "};"
+        )
+        for name, values in sorted(plan.initial_bytes.items())
+    ]
+    register_values: dict[tuple[int, str], int] = {}
+    for vertex, choice in enumerate(choices):
+        source = case.event_map()[f"v{vertex}"]
+        if source.kind != "store":
+            continue
+        endpoint = plan.endpoints[vertex]
+        register_values[(source.hart, source.register)] = int(
+            endpoint.amo_operand
+            if choice.category == "amo"
+            else endpoint.write_value
+            or 0
+        )
+    address_init: list[str] = []
+    register_pattern = re.compile(
+        r"\s*(\d+):(x\d+)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))\s*;\s*"
+    )
+    for line in old_lines:
+        if any(
+            re.fullmatch(rf"\s*{re.escape(name)}\s*=.*", line)
+            for name in location_names
+        ):
+            continue
+        match = register_pattern.fullmatch(line)
+        key = (int(match.group(1)), match.group(2)) if match else None
+        if key in register_values:
+            address_init.append(
+                f"{key[0]}:{key[1]}=0x{register_values[key]:x};"
+            )
+        else:
+            address_init.append(line)
+    return [*declarations, *address_init]
+
+
+def _fusion_exists(case: LitmusCaseIR, plan: FusionValuePlan) -> str:
     source_events = case.event_map()
-    vector_locations = {
-        source_events[f"v{vertex}"].location
-        for vertex, choice in enumerate(assignment.choices)
-        if choice.is_vector
+    terms: list[str] = []
+    for vertex, value in sorted(plan.endpoints.items()):
+        event = source_events[f"v{vertex}"]
+        if event.kind != "load":
+            continue
+        terms.append(
+            f"{event.hart}:{event.register}=0x{int(value.read_register_value or 0):x}"
+        )
+    for name, offsets in sorted(plan.observed_final_bytes.items()):
+        image = plan.final_bytes[name]
+        terms.extend(
+            f"{name}[{offset}]=0x{image[offset]:02x}"
+            for offset in offsets
+        )
+    if not terms:
+        raise FusionLayoutError(
+            "excluded_unsatisfiable_value_layout",
+            "fusion case has no observable register or final-memory value",
+        )
+    return "(" + " /\\ ".join(terms) + ")"
+
+
+def _composition_name(choices: Sequence[EndpointChoice]) -> str:
+    categories = frozenset(choice.category for choice in choices)
+    for name, required in _COMPOSITION_CATEGORIES.items():
+        if categories == required:
+            return name
+    return "+".join(sorted(categories))
+
+
+def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
+    scalar = lower_native_cycle(assignment.cycle)
+    case = scalar.case_ir
+    locations = location_ids(assignment.cycle.edges)
+    location_names = {
+        location: case.event_map()[f"v{vertex}"].location
+        for vertex, location in enumerate(locations)
     }
-    base_offset = _alignment_offset(assignment.alignment)
-    location_sizes: dict[str, int] = {}
+    groups = [
+        tuple(
+            vertex
+            for vertex, actual in enumerate(locations)
+            if actual == location
+        )
+        for location in sorted(set(locations))
+    ]
+    address_layout = synthesize_address_layout(
+        [
+            endpoint_footprint(vertex, choice)
+            for vertex, choice in enumerate(assignment.choices)
+        ],
+        groups,
+        assignment.overlap_layout,
+    )
+    value_plan = synthesize_fusion_values(
+        assignment.cycle,
+        assignment.choices,
+        address_layout,
+        location_names,
+    )
+
+    harts: list[list[LitmusEvent]] = []
+    init_lines = _fusion_init_lines(
+        case.init_lines, case, assignment.choices, value_plan
+    )
+    vector_metadata: dict[str, dict[str, Any]] = {}
 
     for hart_id, sequence in enumerate(case.harts):
         expanded: list[LitmusEvent] = []
         for event in sequence:
             vertex = _event_vertex(event.event_id)
-            if vertex is None or not assignment.choices[vertex].is_vector:
-                if (
-                    assignment.alignment != "aligned"
-                    and event.kind in {"load", "store"}
-                    and event.location in vector_locations
-                ):
-                    access = event.memory_access
-                    size = access.size_bytes if access is not None else 4
-                    location_sizes[event.location] = max(location_sizes.get(event.location, 0), size)
-                    expanded.append(
-                        replace(
-                            event,
-                            instruction=_replace_memory_offset(event.instruction, base_offset),
-                            role="scalar-misaligned-cycle-event",
-                            memory_access=MemoryAccess.create(
-                                event.location, base_offset, size, "byte_level_no_mag"
-                            ),
-                        )
-                    )
-                else:
-                    expanded.append(event)
+            if vertex is None:
+                expanded.append(event)
                 continue
             choice = assignment.choices[vertex]
+            value = value_plan.endpoints[vertex]
+            offset = address_layout.offsets[vertex]
+            if choice.category == "scalar":
+                scalar_event, setup = _lower_scalar_endpoint(
+                    event, choice, value, offset
+                )
+                expanded.extend(setup)
+                expanded.append(scalar_event)
+                continue
+            if choice.category == "amo":
+                amo_event, setup = _lower_amo_endpoint(
+                    event, choice, value, offset, sequence
+                )
+                expanded.extend(setup)
+                expanded.append(amo_event)
+                continue
+
             combination = _choice_combination(assignment.cycle.family, event, choice)
             base_register, data_register = _scalar_memory_operands(event)
             setup, extra_init = _vector_setup(combination, hart_id, f"{event.event_id}_vector")
-            large_avl = str(choice.params.get("vl")) in {"vl32", "vl64"}
+            large_avl = str((choice.params or {}).get("vl")) in {"vl32", "vl64"}
             strided = "strided" in choice.vector_form
-            misaligned = assignment.alignment != "aligned"
             temporary_registers = iter(
-                _free_temp_registers(sequence, 1 + int(large_avl) + int(strided) + int(misaligned))
+                _free_temp_registers(
+                    sequence,
+                    1 + int(large_avl) + int(strided) + int(offset != 0),
+                )
             )
             config_register = next(temporary_registers)
             register_map = {"x10": config_register}
@@ -715,17 +1061,16 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             extra_init = [_replace_registers(line, register_map) for line in extra_init]
             expanded.extend(setup)
             vector_base = base_register
-            element_bytes = int(str(choice.params["sew"])[1:]) // 8
-            location_sizes[event.location] = max(location_sizes.get(event.location, 0), element_bytes)
-            if base_offset:
+            element_bytes = choice.width_bytes
+            if offset:
                 vector_base = next(temporary_registers)
                 expanded.append(
                     LitmusEvent(
-                        f"{event.event_id}_misalign_base",
+                        f"{event.event_id}_offset_base",
                         hart_id,
                         "setup",
-                        f"addi {vector_base},{base_register},{base_offset}",
-                        role="vector-misaligned-base",
+                        f"addi {vector_base},{base_register},{offset}",
+                        role="vector-fusion-base",
                     )
                 )
             instruction = _replace_registers(
@@ -734,9 +1079,9 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             )
             vector_access = MemoryAccess.create(
                 event.location,
-                base_offset,
+                offset,
                 element_bytes,
-                "aligned_atomic" if base_offset == 0 else "byte_level_no_mag",
+                "aligned_atomic",
             )
             if event.kind == "store":
                 expanded.append(
@@ -753,6 +1098,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                         event,
                         instruction=instruction,
                         register="v8",
+                        value=f"0x{int(value.write_value or 0):x}",
                         role="vector-store",
                         memory_access=vector_access,
                     )
@@ -763,6 +1109,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                         event,
                         instruction=instruction,
                         register="v8",
+                        value=f"0x{int(value.read_memory_value or 0):x}",
                         role="vector-load",
                         memory_access=vector_access,
                     )
@@ -778,24 +1125,28 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                     )
                 )
             if extra_init:
-                init_lines[hart_id] = init_lines[hart_id] + " " + " ".join(extra_init)
+                init_lines.extend(extra_init)
             metadata = dict(_vector_metadata(combination))
+            footprint = vector_footprint_kind(
+                choice.vector_form,
+                str((choice.params or {}).get("sew", "e32")),
+                str((choice.params or {}).get("lmul", "m1")),
+                str((choice.params or {}).get("mask", "unmasked")),
+                str((choice.params or {}).get("vl", "vl1")),
+                base_offset=offset,
+            )
             metadata.update(
                 {
-                    "base_offset_bytes": base_offset,
-                    "alignment": assignment.alignment,
-                    "atomicity_model": "aligned_atomic" if base_offset == 0 else "byte_level_no_mag",
+                    "base_offset_bytes": offset,
+                    "alignment": "aligned",
+                    "atomicity_model": "aligned_atomic",
+                    "footprint": footprint,
                 }
             )
             vector_metadata[event.event_id] = metadata
         harts.append(expanded)
 
-    if assignment.alignment != "aligned":
-        init_lines, exists = _rewrite_misaligned_storage(
-            init_lines, case.exists, vector_locations, location_sizes, base_offset
-        )
-    else:
-        exists = case.exists
+    exists = _fusion_exists(case, value_plan)
     cycle_labels = tuple(edge.label for edge in assignment.cycle.edges)
     cycle_text = " ".join(cycle_labels)
     endpoint_choices = [choice.to_json() for choice in assignment.choices]
@@ -805,13 +1156,41 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         cycle_labels,
         endpoint_choices,
         assignment.alignment,
+        assignment.overlap_layout,
     )
     name = str(identity["machine_name"])
     relations = [
-        replace(relation, label=cycle_labels[index])
+        replace(
+            relation,
+            label=cycle_labels[index],
+            src_facet=(
+                "read"
+                if assignment.choices[index].category == "amo"
+                and assignment.cycle.edges[index].src == READ
+                else "write"
+                if assignment.choices[index].category == "amo"
+                else ""
+            ),
+            dst_facet=(
+                "read"
+                if assignment.choices[(index + 1) % len(assignment.choices)].category
+                == "amo"
+                and assignment.cycle.edges[index].dst == READ
+                else "write"
+                if assignment.choices[(index + 1) % len(assignment.choices)].category
+                == "amo"
+                else ""
+            ),
+        )
         for index, relation in enumerate(case.relations)
     ]
-    transformed = replace(case, harts=harts, init_lines=init_lines, relations=relations, exists=exists)
+    transformed = replace(
+        case,
+        harts=harts,
+        init_lines=init_lines,
+        relations=relations,
+        exists=exists,
+    )
     formal, formal_reason = _formal_scope(transformed, assignment)
     metadata = dict(case.metadata)
     metadata.update(
@@ -822,9 +1201,13 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             "file_identity": identity,
             "memory_layout": {
                 "alignment": assignment.alignment,
-                "base_offset_bytes": base_offset,
-                "locations": sorted(vector_locations),
+                "pbmt": 0,
+                "attribute": "cacheable",
+                "pma_atomic": True,
+                "overlap_layout": assignment.overlap_layout,
+                "address_layout": address_layout.to_json(),
             },
+            "value_plan": value_plan.to_json(),
             "formal_scope": formal_reason,
         }
     )
@@ -850,7 +1233,9 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         vector="relation_cycle",
         params={
             "cycle": cycle_text,
-            "endpoint_modes": [choice.choice_id for choice in assignment.choices],
+            "endpoint_choices": [choice.choice_id for choice in assignment.choices],
+            "endpoint_composition": _composition_name(assignment.choices),
+            "overlap_layout": assignment.overlap_layout,
         },
     )
     decision = Decision(
@@ -1047,7 +1432,194 @@ def _claim_vector_file_identity(
         )
 
 
-def _vector_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
+def _endpoint_categories(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    explicit = payload.get("endpoint_categories")
+    if explicit is not None:
+        selected = _selected(payload, "endpoint_categories", ENDPOINT_CATEGORIES)
+    else:
+        legacy = _selected(payload, "endpoint_modes", ())
+        selected_values = {"vector"}
+        if "P" in legacy or not legacy:
+            selected_values.add("scalar")
+        if any(mode in {"AMO", "Aq", "Rl", "AR"} for mode in legacy) or not legacy:
+            selected_values.add("amo")
+        selected = tuple(
+            category for category in ENDPOINT_CATEGORIES if category in selected_values
+        )
+    unknown = set(selected) - set(ENDPOINT_CATEGORIES)
+    if unknown:
+        raise ValueError(f"unknown endpoint category: {', '.join(sorted(unknown))}")
+    if "vector" not in selected:
+        raise ValueError("Vector workflow requires the vector endpoint category")
+    return selected
+
+
+def _fusion_request_audit(
+    payload: Mapping[str, Any],
+    categories: Sequence[str],
+    requested_alignments: Sequence[str],
+) -> tuple[dict[str, int], bool]:
+    """Classify requests outside the fixed Nanhu aligned fusion scope."""
+
+    excluded: Counter[str] = Counter()
+    supported_scope = True
+
+    misaligned = sum(
+        alignment != "aligned" for alignment in requested_alignments
+    )
+    if misaligned:
+        reason = (
+            "excluded_illegal_misaligned_amo_request"
+            if "amo" in categories
+            else "excluded_unsupported_misaligned_fusion_request"
+        )
+        excluded[reason] += misaligned
+    if "aligned" not in requested_alignments:
+        supported_scope = False
+
+    raw_attributes = payload.get("attributes", payload.get("attribute"))
+    if raw_attributes is not None:
+        attributes = _request_values(raw_attributes, "attributes")
+        known = {
+            "cacheable",
+            "pbmt_nc",
+            "pbmt_io",
+            "nc_alias",
+            "cacheable_nc_alias",
+            "nc",
+            "io",
+        }
+        unknown = set(attributes) - known
+        if unknown:
+            raise ValueError(
+                f"unknown fusion memory attribute(s): {', '.join(sorted(unknown))}"
+            )
+        unsupported = sum(attribute != "cacheable" for attribute in attributes)
+        if unsupported:
+            excluded["excluded_unsupported_pbmt_nc_io_request"] += unsupported
+        if "cacheable" not in attributes:
+            supported_scope = False
+
+    if "pbmt" in payload:
+        pbmt_values = _request_values(payload.get("pbmt"), "pbmt")
+        parsed_pbmt: list[int] = []
+        for value in pbmt_values:
+            try:
+                parsed = int(value, 0)
+            except ValueError as exc:
+                raise ValueError(f"PBMT value must be 0, 1, 2, or 3: {value!r}") from exc
+            if parsed not in {0, 1, 2, 3}:
+                raise ValueError(f"PBMT value must be 0, 1, 2, or 3: {parsed}")
+            parsed_pbmt.append(parsed)
+        excluded["excluded_unsupported_pbmt_nc_io_request"] += sum(
+            value in {1, 2} for value in parsed_pbmt
+        )
+        excluded["excluded_illegal_pbmt_reserved_request"] += sum(
+            value == 3 for value in parsed_pbmt
+        )
+        if 0 not in parsed_pbmt:
+            supported_scope = False
+
+    if payload.get("pma_atomic") is False:
+        excluded["excluded_unsupported_pma_nonatomic_request"] += 1
+        supported_scope = False
+
+    return (
+        {reason: count for reason, count in sorted(excluded.items()) if count},
+        supported_scope,
+    )
+
+
+def _request_values(value: Any, field: str) -> tuple[str, ...]:
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        return (str(value),)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be a value or list")
+    return tuple(dict.fromkeys(str(item) for item in value))
+
+
+def _scalar_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
+    widths = _selected(payload, "scalar_widths", SCALAR_WIDTHS)
+    unknown = set(widths) - set(SCALAR_WIDTHS)
+    if unknown:
+        raise ValueError(f"unknown scalar width(s): {', '.join(sorted(unknown))}")
+    return tuple(
+        EndpointChoice(
+            f"scalar:{width}:{direction}",
+            "scalar",
+            direction,
+            "P",
+            params={
+                "width": width,
+                "width_bytes": str(SCALAR_WIDTH_BYTES[width]),
+            },
+        )
+        for direction in (READ, WRITE)
+        for width in widths
+    )
+
+
+def _empty_endpoint_audit() -> dict[str, Any]:
+    return {
+        "raw_configurations": 0,
+        "generated_endpoint_choices": 0,
+        "excluded": {},
+    }
+
+
+def _amo_choices_with_audit(
+    payload: Mapping[str, Any],
+) -> tuple[tuple[EndpointChoice, ...], dict[str, Any]]:
+    operations = _selected(payload, "amo_ops", AMO_OPERATIONS)
+    widths = _selected(payload, "amo_widths", AMO_WIDTHS)
+    orderings = _selected(payload, "amo_orderings", AMO_ORDERINGS)
+    unknown_ops = set(operations) - set(AMO_OPERATIONS)
+    unknown_widths = set(widths) - {"b", "h", *AMO_WIDTHS}
+    unknown_orderings = set(orderings) - set(AMO_ORDERINGS)
+    if unknown_ops:
+        raise ValueError(f"unknown Nanhu AMO operation(s): {', '.join(sorted(unknown_ops))}")
+    if unknown_widths:
+        raise ValueError(f"unknown AMO width(s): {', '.join(sorted(unknown_widths))}")
+    if unknown_orderings:
+        raise ValueError(f"unknown AMO ordering(s): {', '.join(sorted(unknown_orderings))}")
+    choices: list[EndpointChoice] = []
+    excluded: Counter[str] = Counter()
+    raw = 0
+    for direction in (READ, WRITE):
+        for operation, width, ordering in product(operations, widths, orderings):
+            raw += 1
+            if width not in AMO_WIDTHS:
+                excluded["excluded_illegal_nanhu_amo_width"] += 1
+                continue
+            choices.append(
+                EndpointChoice(
+                    f"amo:{operation}:{width}:{ordering}:{direction}",
+                    "amo",
+                    direction,
+                    {
+                        "relaxed": "AMO",
+                        "aq": "Aq",
+                        "rl": "Rl",
+                        "aqrl": "AR",
+                    }[ordering],
+                    params={
+                        "amo_op": operation,
+                        "amo_width": width,
+                        "amo_width_bytes": str(AMO_WIDTH_BYTES[width]),
+                        "amo_ordering": ordering,
+                    },
+                )
+            )
+    return tuple(choices), {
+        "raw_configurations": raw,
+        "generated_endpoint_choices": len(choices),
+        "excluded": dict(sorted(excluded.items())),
+    }
+
+
+def _vector_choices_with_audit(
+    payload: Mapping[str, Any],
+) -> tuple[tuple[EndpointChoice, ...], dict[str, Any]]:
     forms = _selected(payload, "forms", VECTOR_OPS)
     sews = _selected(payload, "sew", VECTOR_WIDTHS)
     lmuls = _selected(payload, "lmul", VECTOR_LMULS)
@@ -1055,23 +1627,46 @@ def _vector_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
     masks = _selected(payload, "mask", VECTOR_MASKS)
     tails = _selected(payload, "tail", VECTOR_TAILS)
     vls = _selected(payload, "vl", VECTOR_LENGTHS)
+    validators = (
+        ("Vector form", forms, VECTOR_OPS),
+        ("SEW", sews, VECTOR_WIDTHS),
+        ("LMUL", lmuls, VECTOR_LMULS),
+        ("index EEW", index_eews, VECTOR_INDEX_EEWS),
+        ("mask mode", masks, VECTOR_MASKS),
+        ("tail policy", tails, VECTOR_TAILS),
+        ("Vector length", vls, VECTOR_LENGTHS),
+    )
+    for label, selected, known in validators:
+        unknown = set(selected) - set(known)
+        if unknown:
+            raise ValueError(f"unknown {label}(s): {', '.join(sorted(unknown))}")
     out: list[EndpointChoice] = []
+    excluded: Counter[str] = Counter()
+    raw = 0
     for form, sew, lmul, mask, tail, vl in product(
         forms, sews, lmuls, masks, tails, vls
     ):
-        if form not in VECTOR_OPS:
-            raise ValueError(f"unsupported Vector form: {form}")
-        if not vector_same_line_footprint(form, sew, lmul, mask, vl):
-            continue
         selected_indexes: Sequence[str | None] = index_eews if "indexed" in form else (None,)
         for index_eew in selected_indexes:
+            raw += 1
+            if not vector_memory_config_legal(
+                form, sew, lmul, mask, vl, index_eew
+            ):
+                excluded["excluded_illegal_vector_config"] += 1
+                continue
+            footprint = vector_footprint_kind(
+                form, sew, lmul, mask, vl
+            )
+            if footprint not in {"same_line", "cross_line"}:
+                excluded["excluded_unsupported_cross_page"] += 1
+                continue
             params = {
                 "sew": sew,
                 "lmul": lmul,
                 "mask": mask,
                 "tail": tail,
                 "vl": vl,
-                "footprint": "same_line",
+                "footprint": footprint,
             }
             if index_eew is not None:
                 params["index_eew"] = index_eew
@@ -1080,17 +1675,11 @@ def _vector_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
                 [form, sew, lmul, str(index_eew or "-"), mask, tail, vl]
             )
             out.append(EndpointChoice(choice_id, "vector", direction, "P", form, params))
-    if not out:
-        raise ValueError("the selected Vector axes contain no ISA-legal endpoint choices")
-    return tuple(out)
-
-
-def _choice_allowed_alignment(choice: EndpointChoice, alignment: str) -> bool:
-    if alignment == "aligned":
-        return True
-    if choice.is_vector:
-        return str((choice.params or {}).get("sew")) != "e8"
-    return choice.annotation == "P"
+    return tuple(out), {
+        "raw_configurations": raw,
+        "generated_endpoint_choices": len(out),
+        "excluded": dict(sorted(excluded.items())),
+    }
 
 
 def _choice_combination(family: str, event: LitmusEvent, choice: EndpointChoice) -> Combination:
@@ -1109,59 +1698,6 @@ def _choice_combination(family: str, event: LitmusEvent, choice: EndpointChoice)
 def _event_vertex(event_id: str) -> int | None:
     match = re.fullmatch(r"v(\d+)", event_id)
     return int(match.group(1)) if match else None
-
-
-def _alignment_offset(alignment: str) -> int:
-    if alignment == "aligned":
-        return 0
-    return {
-        "misalign_same16": 1,
-        "misalign_cross16": 15,
-        "misalign_cross64": 63,
-    }[alignment]
-
-
-def _replace_memory_offset(instruction: str, offset: int) -> str:
-    updated, count = re.subn(r"-?\d+\((x\d+)\)", rf"{offset}(\1)", instruction, count=1)
-    if count != 1:
-        raise ValueError(f"cannot apply a misaligned offset to {instruction!r}")
-    return updated
-
-
-def _rewrite_misaligned_storage(
-    init_lines: Sequence[str],
-    exists: str,
-    locations: set[str],
-    sizes: Mapping[str, int],
-    offset: int,
-) -> tuple[list[str], str]:
-    rewritten_init: list[str] = []
-    location_pattern = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*0\s*;\s*$")
-    for line in init_lines:
-        match = location_pattern.fullmatch(line)
-        if match and match.group(1) in locations:
-            rewritten_init.append(f"uint8_t {match.group(1)}[128];")
-        else:
-            rewritten_init.append(line)
-
-    body = exists.strip()
-    if body.startswith("(") and body.endswith(")"):
-        body = body[1:-1]
-    terms = [term.strip() for term in body.split("/\\") if term.strip()]
-    rewritten_terms: list[str] = []
-    final_pattern = re.compile(
-        r"^([A-Za-z_]\w*)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))$"
-    )
-    for term in terms:
-        match = final_pattern.fullmatch(term)
-        if not match or match.group(1) not in locations:
-            rewritten_terms.append(term)
-            continue
-        location = match.group(1)
-        value = int(match.group(2), 0)
-        for byte in range(sizes.get(location, 4)):
-            rewritten_terms.append(f"{location}[{offset + byte}]=0x{(value >> (8 * byte)) & 0xff:02x}")
-    return rewritten_init, "(" + " /\\ ".join(rewritten_terms) + ")"
 
 
 def _free_temp_registers(sequence: Sequence[LitmusEvent], count: int) -> tuple[str, ...]:
@@ -1188,23 +1724,25 @@ def _formal_scope(case: LitmusCaseIR, assignment: VectorAssignment) -> tuple[boo
     if assignment.alignment != "aligned":
         return (
             False,
-            "Legal cacheable Vector misalignment is generated as a no-MAG byte-level observation; "
-            "mixed scalar/Vector partial-overlap atomicity is outside the current formal solver.",
+            "Misaligned Vector/scalar/AMO fusion is outside the Nanhu aligned formal domain.",
         )
-    widths_by_location: dict[str, set[int]] = {}
     for event in case.events():
         if event.kind not in {"load", "store", "amo"} or not event.location:
             continue
-        width = event.memory_access.size_bytes if event.memory_access is not None else 4
-        widths_by_location.setdefault(event.location, set()).add(width)
-    vector_widths: dict[str, set[int]] = {}
-    for vertex, choice in enumerate(assignment.choices):
-        if choice.is_vector:
-            event = case.event_map()[f"v{vertex}"]
-            vector_widths.setdefault(event.location, set()).add(int(str(choice.params["sew"])[1:]) // 8)
-    if any(len(widths_by_location.get(location, set()) | widths) > 1 for location, widths in vector_widths.items()):
-        return False, "Mixed-size scalar/AMO/Vector overlap is generated for observation, but is outside the current formal solver."
-    return True, "ISA-legal aligned scalar/AMO/Vector relation cycle supported by the Vector-aware RVWMO solver."
+        if event.memory_access is None or not event.memory_access.natural_aligned:
+            return False, f"Memory event {event.event_id} is not naturally aligned."
+        if event.kind == "amo" and event.memory_access.size_bytes not in {4, 8}:
+            return False, f"AMO event {event.event_id} is not a Nanhu W/D AMO."
+    metadata = case.metadata.get("vectors")
+    if isinstance(metadata, Mapping):
+        for event_id, raw in metadata.items():
+            if isinstance(raw, Mapping) and raw.get("footprint") == "cross_page":
+                return False, f"Vector event {event_id} crosses the formal 4 KiB page."
+    return (
+        True,
+        "Nanhu aligned fusion: PBMT=0, cacheable main memory, PMA atomic=true; "
+        "mixed-size byte overlap and W/D AMO transactions are modeled by the Vector-aware RVWMO solver.",
+    )
 
 
 def _selected(payload: Mapping[str, Any], key: str, default: Sequence[str]) -> tuple[str, ...]:

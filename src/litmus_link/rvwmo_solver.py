@@ -596,14 +596,47 @@ def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: s
 def _initial_values(lines: Sequence[str]) -> dict[str, int]:
     out: dict[str, int] = {}
     for line in lines:
+        array = re.fullmatch(
+            r"\s*(?:u?int8_t|char)\s+([A-Za-z_]\w*)\s*\[(\d+)\]\s*"
+            r"(?:=\s*\{([^}]*)\})?\s*;\s*",
+            line,
+        )
+        if array:
+            name, size_text, values_text = array.groups()
+            size = int(size_text)
+            values = (
+                [
+                    int(token.strip(), 0) & 0xFF
+                    for token in values_text.split(",")
+                    if token.strip()
+                ]
+                if values_text is not None
+                else []
+            )
+            if len(values) > size:
+                raise RvwmoSolverError(
+                    f"array initializer for {name} has {len(values)} values, size is {size}"
+                )
+            for offset in range(size):
+                out[f"{name}[{offset}]"] = values[offset] if offset < len(values) else 0
+            continue
         for term in line.split(";"):
             match = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))\s*", term)
             if match:
                 out[match.group(1)] = int(match.group(2), 0)
+                continue
+            byte = re.fullmatch(
+                r"\s*([A-Za-z_]\w*\[\d+\])\s*=\s*(-?(?:0x[0-9a-fA-F]+|\d+))\s*",
+                term,
+            )
+            if byte:
+                out[byte.group(1)] = int(byte.group(2), 0) & 0xFF
     return out
 
 
 def _initial_byte_value(initial: Mapping[str, int], byte_location: str) -> int:
+    if byte_location in initial:
+        return initial[byte_location] & 0xFF
     base, offset = _split_byte_location(byte_location)
     return (initial.get(base, 0) >> (8 * offset)) & 0xFF
 

@@ -108,7 +108,7 @@ class VectorConfig:
         if tail_policy not in {"ta_ma", "ta_mu", "tu_ma", "tu_mu"}:
             raise VectorSolverError(f"unsupported tail policy: {tail_policy}")
         footprint = str(raw.get("footprint", ""))
-        if footprint != "same_line":
+        if footprint not in {"same_line", "cross_line"}:
             raise VectorSolverError(
                 f"footprint {footprint!r} is outside the current formal vector solver scope"
             )
@@ -190,9 +190,9 @@ class VectorConfig:
         ]
         if not active_offsets:
             raise VectorSolverError("vector instruction has no active elements")
-        if config.base_offset_bytes + max(active_offsets) + config.element_bytes > 128:
+        if config.base_offset_bytes + max(active_offsets) + config.element_bytes > 4096:
             raise VectorSolverError(
-                "active Vector element footprint exceeds the current 128-byte formal object"
+                "active Vector element footprint crosses the current 4 KiB formal object"
             )
         return config
 

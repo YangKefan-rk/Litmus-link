@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import Any, Callable, Dict, Iterable
 
+from .amo import AMO_OPERATIONS, AMO_ORDERINGS
 from .corpus_ir import corpus_to_ir
 from .corpus_riscv import parse_litmus
 from .diagram import DIAGRAM_RENDER_VERSION, diagram_summary, render_diagram
@@ -56,6 +57,11 @@ from .scalar import (
 )
 from .toolchain import HerdVerdict
 from .vector_native import (
+    AMO_WIDTHS,
+    ENDPOINT_CATEGORIES,
+    ENDPOINT_COMPOSITIONS,
+    FUSION_OVERLAP_LAYOUTS,
+    SCALAR_WIDTHS,
     VECTOR_ALIGNMENTS,
     VECTOR_GENERATION_MODES,
     VECTOR_SAMPLE_MODES,
@@ -104,7 +110,16 @@ def options_payload() -> Dict[str, Any]:
         },
         "vector_native": {
             "mechanisms": list(DEFAULT_NATIVE_MECHANISMS),
+            # Kept until the Qt control migration in the next GUI phase.  The
+            # backend translates this legacy axis into independent categories.
             "endpoint_modes": list(NATIVE_ANNOTATIONS),
+            "endpoint_categories": list(ENDPOINT_CATEGORIES),
+            "endpoint_compositions": list(ENDPOINT_COMPOSITIONS),
+            "scalar_widths": list(SCALAR_WIDTHS),
+            "amo_ops": list(AMO_OPERATIONS),
+            "amo_widths": list(AMO_WIDTHS),
+            "amo_orderings": list(AMO_ORDERINGS),
+            "overlap_layouts": list(FUSION_OVERLAP_LAYOUTS),
             "alignments": list(VECTOR_ALIGNMENTS),
             "preview_sampling_modes": list(VECTOR_SAMPLE_MODES),
             "generation_modes": list(VECTOR_GENERATION_MODES),
@@ -236,14 +251,16 @@ def _vector_native_preview_payload(
         for case in cases
     ]
     report = {
-        "schema": "litmus-link.vector-native-preview.v1",
+        "schema": "litmus-link.vector-native-preview.v2",
         "profile": "vector-native",
         "total_combinations": audit["total_cases"],
         "generated": audit["total_cases"],
         "generated_litmus": audit["total_cases"],
         "displayed_litmus": len(sample),
-        "excluded_illegal": 0,
-        "excluded_unsupported": 0,
+        "raw_combinations": audit.get("raw_combinations", audit["total_cases"]),
+        "excluded_illegal": audit.get("excluded_illegal", 0),
+        "excluded_unsupported": audit.get("excluded_unsupported", 0),
+        "excluded": audit.get("excluded", {}),
         "hand_required": 0,
         "missing": 0,
         "sampling": audit["sampling"],
@@ -265,6 +282,7 @@ def _vector_native_preview_payload(
             "read_endpoint_choices": audit["read_endpoint_choices"],
             "write_endpoint_choices": audit["write_endpoint_choices"],
             "sampling": audit["sampling"],
+            "excluded": audit.get("excluded", {}),
         },
         "audit": audit,
     }
@@ -579,6 +597,13 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         "tail": Counter(),
         "vl": Counter(),
         "endpoint_mode": Counter(),
+        "endpoint_category": Counter(),
+        "endpoint_composition": Counter(),
+        "scalar_width": Counter(),
+        "amo_opcode": Counter(),
+        "amo_width": Counter(),
+        "amo_ordering": Counter(),
+        "overlap_layout": Counter(),
         "vector_event_form": Counter(),
         "alignment": Counter(),
         "relation_mechanism": Counter(),
@@ -601,10 +626,33 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if not isinstance(choice, dict):
                 continue
             groups["endpoint_mode"][_count_value(choice.get("annotation"), "P")] += 1
+            category = _count_value(choice.get("category"), "unknown")
+            groups["endpoint_category"][category] += 1
+            choice_params = choice.get("params", {}) or {}
+            if category == "scalar":
+                groups["scalar_width"][_count_value(choice_params.get("width"), "w")] += 1
+            elif category == "amo":
+                groups["amo_opcode"][_count_value(choice_params.get("amo_op"), "swap")] += 1
+                groups["amo_width"][_count_value(choice_params.get("amo_width"), "w")] += 1
+                groups["amo_ordering"][_count_value(choice_params.get("amo_ordering"), "relaxed")] += 1
             if choice.get("category") == "vector":
                 groups["vector_event_form"][_count_value(choice.get("vector_form"), "vector")] += 1
-                choice_params = choice.get("params", {}) or {}
                 groups["alignment"][_count_value(choice_params.get("alignment"), "aligned")] += 1
+        memory_layout = metadata.get("memory_layout", {}) or {}
+        groups["overlap_layout"][_count_value(memory_layout.get("overlap_layout"), "same_start")] += 1
+        choices = metadata.get("endpoint_choices", []) or []
+        category_set = frozenset(
+            str(choice.get("category"))
+            for choice in choices
+            if isinstance(choice, dict)
+        )
+        composition = {
+            frozenset({"vector"}): "vector_only",
+            frozenset({"vector", "scalar"}): "vector_scalar",
+            frozenset({"vector", "amo"}): "vector_amo",
+            frozenset({"vector", "scalar", "amo"}): "vector_scalar_amo",
+        }.get(category_set, "+".join(sorted(category_set)) or "unknown")
+        groups["endpoint_composition"][composition] += 1
         for relation in case_ir.get("relations", []) or []:
             if isinstance(relation, dict):
                 groups["relation_mechanism"][_count_value(relation.get("kind"), "unknown")] += 1

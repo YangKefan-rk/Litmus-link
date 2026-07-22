@@ -205,6 +205,35 @@ def test_aligned_partial_overlap_is_computed_by_byte_footprint() -> None:
     assert ("init:x[5]", "v1", "x[5]") in rf_bytes
 
 
+def test_byte_array_initializer_populates_embedded_initial_writes() -> None:
+    case = _case(["Rfe", "PodRR", "Fre", "PodWW"]).case_ir
+    load = LitmusEvent(
+        "r0",
+        0,
+        "load",
+        "lw x5,0(x6)",
+        "x",
+        "x5",
+        value="0x44332211",
+        memory_access=MemoryAccess.create("x", 0, 4),
+    )
+    array_case = replace(
+        case,
+        init_lines=["uint8_t x[8]={0x11,0x22,0x33,0x44,0,0,0,0};", "0:x6=x;"],
+        harts=[[load]],
+        relations=[],
+        exists="(0:x5=0x44332211)",
+    )
+    verdict = solve_rvwmo(array_case)
+    assert verdict.status == "verified"
+    assert verdict.verdict == "observable"
+    assert verdict.execution is not None
+    assert {
+        (f"init:x[{offset}]", "r0", f"x[{offset}]")
+        for offset in range(4)
+    } <= verdict.execution.rf_bytes
+
+
 def test_memory_access_round_trips_through_case_ir_json() -> None:
     case = lower_native_cycle(
         _case(["Rfe", "PodRR", "Fre", "PodWW"]).cycle,

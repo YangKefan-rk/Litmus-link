@@ -193,9 +193,7 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         assert filtered["generation_mode"] == "balanced"
         assert set(filtered["endpoint_modes"]) == {"P", "AMO", "Aq", "Rl", "AR"}
         assert set(filtered["mechanisms"]) == {"po", "fence", "dependency"}
-        assert set(filtered["alignments"]) == {
-            "aligned", "misalign_same16", "misalign_cross16", "misalign_cross64"
-        }
+        assert filtered["alignments"] == ["aligned"]
 
         all_index = ui.vector_generation_mode.findData("all")
         ui.vector_generation_mode.setCurrentIndex(all_index)
