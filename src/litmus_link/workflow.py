@@ -110,9 +110,6 @@ def options_payload() -> Dict[str, Any]:
         },
         "vector_native": {
             "mechanisms": list(DEFAULT_NATIVE_MECHANISMS),
-            # Kept until the Qt control migration in the next GUI phase.  The
-            # backend translates this legacy axis into independent categories.
-            "endpoint_modes": list(NATIVE_ANNOTATIONS),
             "endpoint_categories": list(ENDPOINT_CATEGORIES),
             "endpoint_compositions": list(ENDPOINT_COMPOSITIONS),
             "scalar_widths": list(SCALAR_WIDTHS),

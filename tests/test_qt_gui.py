@@ -191,9 +191,37 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         assert filtered["generate_limit"] == 10_000
         assert filtered["preview_sampling"] == "balanced"
         assert filtered["generation_mode"] == "balanced"
-        assert set(filtered["endpoint_modes"]) == {"P", "AMO", "Aq", "Rl", "AR"}
+        assert set(filtered["endpoint_categories"]) == {"vector", "scalar", "amo"}
+        assert set(filtered["endpoint_compositions"]) == {
+            "vector_only", "vector_scalar", "vector_amo", "vector_scalar_amo"
+        }
+        assert set(filtered["scalar_widths"]) == {"b", "h", "w", "d"}
+        assert set(filtered["amo_ops"]) == {
+            "swap", "add", "xor", "and", "or", "min", "max", "minu", "maxu"
+        }
+        assert set(filtered["amo_widths"]) == {"w", "d"}
+        assert set(filtered["amo_orderings"]) == {"relaxed", "aq", "rl", "aqrl"}
+        assert set(filtered["overlap_layouts"]) == {
+            "same_start", "contained", "low_partial", "high_partial", "disjoint_control"
+        }
+        assert filtered["solver_backend"] == "embedded"
         assert set(filtered["mechanisms"]) == {"po", "fence", "dependency"}
         assert filtered["alignments"] == ["aligned"]
+
+        scalar = next(
+            check for check in ui.vector_category_checks
+            if check.property("axis_value") == "scalar"
+        )
+        scalar.setChecked(False)
+        without_scalar = ui._payload()
+        assert "scalar" not in without_scalar["endpoint_categories"]
+        assert "vector_scalar" not in without_scalar["endpoint_compositions"]
+        assert "vector_scalar_amo" not in without_scalar["endpoint_compositions"]
+        assert not ui.vector_group_by_key["scalar_widths"].isEnabled()
+
+        crosscheck = ui.vector_solver_backend.findData("crosscheck")
+        ui.vector_solver_backend.setCurrentIndex(crosscheck)
+        assert ui._payload()["solver_backend"] == "crosscheck"
 
         all_index = ui.vector_generation_mode.findData("all")
         ui.vector_generation_mode.setCurrentIndex(all_index)

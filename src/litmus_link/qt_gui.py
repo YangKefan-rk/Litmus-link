@@ -410,6 +410,11 @@ class _LitmusLinkQtWindow:
         self.scalar_memory_atomic_overlap_checks: list[Any] = []
         self.vector_checks: Dict[str, list[Any]] = {}
         self.vector_filter_groups: list[Any] = []
+        self.vector_group_by_key: Dict[str, Any] = {}
+        self.vector_category_checks: list[Any] = []
+        self.vector_composition_checks: list[Any] = []
+        self.vector_core_groups: list[Any] = []
+        self.vector_parameter_groups: list[Any] = []
         self.action_buttons: list[Any] = []
         self.preview_items: list[Dict[str, Any]] = []
         self.active_thread = None
@@ -871,11 +876,13 @@ class _LitmusLinkQtWindow:
         layout.setSpacing(10)
 
         form = QtWidgets.QFormLayout()
-        self.vector_complete = QtWidgets.QCheckBox(
-            "Complete relation-cycle and endpoint domain"
-        )
+        self.vector_complete = QtWidgets.QCheckBox("Use the complete legal fusion domain")
         self.vector_complete.setObjectName("VectorComplete")
         self.vector_complete.setChecked(True)
+        self.vector_complete.setToolTip(
+            "Include every supported relation cycle, endpoint category, width, Vector form, "
+            "AMO variant, and aligned overlap layout. Clear it to edit the axes below."
+        )
         self.vector_out = QtWidgets.QLineEdit("out/qt-vector")
         self.vector_out.textChanged.connect(lambda _text: self._update_output_hint())
         self.vector_preview_limit = QtWidgets.QSpinBox()
@@ -895,6 +902,11 @@ class _LitmusLinkQtWindow:
         self.vector_generate_limit = QtWidgets.QSpinBox()
         self.vector_generate_limit.setRange(1, 1_000_000)
         self.vector_generate_limit.setValue(10_000)
+        self.vector_solver_backend = QtWidgets.QComboBox()
+        self.vector_solver_backend.addItem("Embedded RVWMO (offline)", "embedded")
+        self.vector_solver_backend.addItem(
+            "Cross-check with herd7 scalar projection", "crosscheck"
+        )
         form.addRow("Generation scope", self.vector_complete)
         form.addRow("Output directory", self.vector_out)
         form.addRow("Random preview cases", self.vector_preview_limit)
@@ -902,9 +914,29 @@ class _LitmusLinkQtWindow:
         form.addRow("Random seed", self.vector_random_seed)
         form.addRow("Generation mode", self.vector_generation_mode)
         form.addRow("Maximum generated cases", self.vector_generate_limit)
+        form.addRow("Vector solver backend", self.vector_solver_backend)
         layout.addLayout(form)
 
+        scope = QtWidgets.QGroupBox("Fixed Nanhu formal scope")
+        scope.setObjectName("VectorScopeGroup")
+        scope.setProperty("axis_role", "scope")
+        scope_layout = QtWidgets.QHBoxLayout(scope)
+        scope_layout.setContentsMargins(10, 8, 10, 8)
+        for text in (
+            "PBMT=0",
+            "Cacheable main memory",
+            "Naturally aligned",
+            "PMA atomic=true",
+        ):
+            chip = QtWidgets.QLabel(text)
+            chip.setObjectName("ScopeChip")
+            chip.setAlignment(_align_center(self.QtCore))
+            scope_layout.addWidget(chip)
+        scope_layout.addStretch(1)
+        layout.addWidget(scope)
+
         scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("VectorAxesScroll")
         scroll.setWidgetResizable(True)
         self.vector_filter_widget = QtWidgets.QWidget()
         filter_layout = QtWidgets.QVBoxLayout(self.vector_filter_widget)
@@ -913,22 +945,44 @@ class _LitmusLinkQtWindow:
         vector_forms = [
             value for value in self.options["axes"]["vector"] if value != "none"
         ]
-        groups = [
-            ("Skeletons", "skeletons", self.options["axes"]["skeleton"], 5),
-            ("Relation mechanisms", "mechanisms", self.options["vector_native"]["mechanisms"], 3),
-            ("Scalar and atomic endpoints", "endpoint_modes", self.options["vector_native"]["endpoint_modes"], 5),
-            ("Vector memory forms", "forms", vector_forms, 2),
-            ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4),
-            ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4),
-            ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4),
-            ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2),
-            ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4),
-            ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4),
-            ("Element alignment", "alignments", self.options["vector_native"]["alignments"], 2),
+        core_header = QtWidgets.QLabel("Core axes")
+        core_header.setObjectName("AxisSectionHeader")
+        filter_layout.addWidget(core_header)
+        core_groups = [
+            ("Relation skeletons", "skeletons", self.options["axes"]["skeleton"], 5, _axis_label),
+            ("Relation mechanisms", "mechanisms", self.options["vector_native"]["mechanisms"], 3, _axis_label),
+            ("Endpoint categories", "endpoint_categories", ("vector", "scalar", "amo"), 3, _endpoint_category_label),
+            ("Endpoint composition", "endpoint_compositions", self.options["vector_native"]["endpoint_compositions"], 2, _endpoint_composition_label),
+            ("Vector memory forms", "forms", vector_forms, 2, _vector_form_label),
         ]
-        for title, key, values, columns in groups:
+        for title, key, values, columns, labeler in core_groups:
             filter_layout.addWidget(
-                self._build_vector_choice_group(title, key, values, columns)
+                self._build_vector_choice_group(
+                    title, key, values, columns, labeler=labeler, role="core"
+                )
+            )
+        parameter_header = QtWidgets.QLabel("Parameter axes")
+        parameter_header.setObjectName("AxisSectionHeader")
+        filter_layout.addWidget(parameter_header)
+        parameter_groups = [
+            ("Scalar width", "scalar_widths", self.options["vector_native"]["scalar_widths"], 4, _scalar_width_label),
+            ("AMO opcode", "amo_ops", self.options["vector_native"]["amo_ops"], 3, _amo_op_label),
+            ("AMO width", "amo_widths", self.options["vector_native"]["amo_widths"], 2, _amo_width_label),
+            ("AMO ordering", "amo_orderings", self.options["vector_native"]["amo_orderings"], 2, _amo_ordering_label),
+            ("Overlap layout", "overlap_layouts", self.options["vector_native"]["overlap_layouts"], 2, _overlap_layout_label),
+            ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4, _sew_label),
+            ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4, _axis_label),
+            ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4, _index_eew_label),
+            ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2, _mask_label),
+            ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4, _tail_label),
+            ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4, _vl_label),
+            ("Element alignment", "alignments", self.options["vector_native"]["alignments"], 2, _alignment_label),
+        ]
+        for title, key, values, columns, labeler in parameter_groups:
+            filter_layout.addWidget(
+                self._build_vector_choice_group(
+                    title, key, values, columns, labeler=labeler, role="parameter"
+                )
             )
         filter_layout.addStretch(1)
         scroll.setWidget(self.vector_filter_widget)
@@ -943,25 +997,106 @@ class _LitmusLinkQtWindow:
         return tab
 
     def _build_vector_choice_group(
-        self, title: str, key: str, values: Iterable[str], columns: int
+        self,
+        title: str,
+        key: str,
+        values: Iterable[str],
+        columns: int,
+        *,
+        labeler: Any = None,
+        role: str = "parameter",
     ) -> Any:
         QtWidgets = self.QtWidgets
         group = QtWidgets.QGroupBox(title)
         group.setObjectName("VectorFilterGroup")
+        group.setProperty("axis_role", role)
         grid = QtWidgets.QGridLayout(group)
         grid.setContentsMargins(10, 8, 10, 10)
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(6)
         checks: list[Any] = []
         for index, value in enumerate(values):
-            check = QtWidgets.QCheckBox(str(value))
+            value = str(value)
+            check = QtWidgets.QCheckBox(labeler(value) if labeler else value)
             check.setProperty("axis_value", str(value))
+            check.setToolTip(value)
             check.setChecked(True)
             grid.addWidget(check, index // columns, index % columns)
+            check.toggled.connect(
+                lambda checked, control=check: self._update_vector_choice_style(
+                    control, checked
+                )
+            )
             checks.append(check)
         self.vector_checks[key] = checks
         self.vector_filter_groups.append(group)
+        self.vector_group_by_key[key] = group
+        if role == "core":
+            self.vector_core_groups.append(group)
+        else:
+            self.vector_parameter_groups.append(group)
+        if key == "endpoint_categories":
+            self.vector_category_checks = checks
+            for check in checks:
+                if check.property("axis_value") == "vector":
+                    check.setChecked(True)
+                    check.setEnabled(False)
+        elif key == "endpoint_compositions":
+            self.vector_composition_checks = checks
         return group
+
+    def _update_vector_choice_style(self, control: Any, checked: bool) -> None:
+        control.setProperty("choice_state", "on" if checked else "off")
+        self._refresh_widget_style(control)
+        if control in self.vector_category_checks:
+            self._update_vector_endpoint_scope()
+        elif control in self.vector_composition_checks:
+            self._ensure_vector_composition()
+
+    def _update_vector_endpoint_scope(self) -> None:
+        selected = {
+            str(check.property("axis_value"))
+            for check in self.vector_category_checks
+            if check.isChecked()
+        }
+        for key in ("scalar_widths", "amo_ops", "amo_widths", "amo_orderings"):
+            group = self.vector_group_by_key.get(key)
+            if group is not None:
+                active = key.startswith("scalar") and "scalar" in selected or key.startswith("amo") and "amo" in selected
+                group.setProperty("dependency_state", "active" if active else "inactive")
+                group.setEnabled(active and self.vector_filter_widget.isEnabled())
+                for check in self.vector_checks.get(key, []):
+                    check.setEnabled(active and self.vector_filter_widget.isEnabled())
+                self._refresh_widget_style(group)
+        self._ensure_vector_composition()
+
+    def _ensure_vector_composition(self) -> None:
+        selected = {
+            str(check.property("axis_value"))
+            for check in self.vector_category_checks
+            if check.isChecked()
+        }
+        required = {
+            "vector_only": {"vector"},
+            "vector_scalar": {"vector", "scalar"},
+            "vector_amo": {"vector", "amo"},
+            "vector_scalar_amo": {"vector", "scalar", "amo"},
+        }
+        for check in self.vector_composition_checks:
+            name = str(check.property("axis_value"))
+            valid = required.get(name, set()) <= selected
+            check.setEnabled(valid and self.vector_filter_widget.isEnabled())
+            if not valid:
+                check.setChecked(False)
+            check.setProperty(
+                "choice_state", "on" if check.isChecked() else "off"
+            )
+            self._refresh_widget_style(check)
+        if not any(check.isChecked() for check in self.vector_composition_checks):
+            for check in self.vector_composition_checks:
+                if str(check.property("axis_value")) == "vector_only" and check.isEnabled():
+                    check.setChecked(True)
+                    break
 
     def _update_vector_scope(self, complete: bool) -> None:
         if not hasattr(self, "vector_filter_widget"):
@@ -970,6 +1105,7 @@ class _LitmusLinkQtWindow:
         for group in self.vector_filter_groups:
             group.setProperty("group_state", "inactive" if complete else "active")
             self._refresh_widget_style(group)
+        self._update_vector_endpoint_scope()
 
     def _update_vector_generation_mode(self) -> None:
         if not hasattr(self, "vector_generation_mode"):
@@ -1221,6 +1357,7 @@ class _LitmusLinkQtWindow:
                 "preview_sampling": str(self.vector_preview_sampling.currentData()),
                 "generation_mode": generation_mode,
                 "random_seed": self.vector_random_seed.value(),
+                "solver_backend": str(self.vector_solver_backend.currentData()),
                 "compute_verdicts": not self.defer_solver.isChecked(),
                 **{
                     key: self._selected(checks)
@@ -1957,6 +2094,91 @@ def _status_label(status: str) -> str:
     return _STATUS_LABELS.get(status, status.upper())
 
 
+def _axis_label(value: str) -> str:
+    return value
+
+
+def _endpoint_category_label(value: str) -> str:
+    return {"vector": "Vector", "scalar": "Scalar", "amo": "AMO"}.get(value, value)
+
+
+def _endpoint_composition_label(value: str) -> str:
+    return {
+        "vector_only": "V only",
+        "vector_scalar": "V + S",
+        "vector_amo": "V + A",
+        "vector_scalar_amo": "V + S + A",
+    }.get(value, value)
+
+
+def _vector_form_label(value: str) -> str:
+    return {
+        "unit_load": "Unit-stride load",
+        "unit_store": "Unit-stride store",
+        "strided_load": "Strided load",
+        "strided_store": "Strided store",
+        "indexed_unordered_load": "Indexed-unordered load",
+        "indexed_unordered_store": "Indexed-unordered store",
+        "indexed_ordered_load": "Indexed-ordered load",
+        "indexed_ordered_store": "Indexed-ordered store",
+    }.get(value, value)
+
+
+def _scalar_width_label(value: str) -> str:
+    return {"b": "B (8-bit)", "h": "H (16-bit)", "w": "W (32-bit)", "d": "D (64-bit)"}.get(value, value)
+
+
+def _amo_op_label(value: str) -> str:
+    return f"amo{value}"
+
+
+def _amo_width_label(value: str) -> str:
+    return {"w": "W (32-bit)", "d": "D (64-bit)"}.get(value, value)
+
+
+def _amo_ordering_label(value: str) -> str:
+    return {
+        "relaxed": "Relaxed",
+        "aq": ".aq",
+        "rl": ".rl",
+        "aqrl": ".aq.rl",
+    }.get(value, value)
+
+
+def _overlap_layout_label(value: str) -> str:
+    return {
+        "same_start": "Same start",
+        "contained": "Contained overlap",
+        "low_partial": "Low-side overlap",
+        "high_partial": "High-side overlap",
+        "disjoint_control": "Disjoint control",
+    }.get(value, value)
+
+
+def _sew_label(value: str) -> str:
+    return value.upper()
+
+
+def _index_eew_label(value: str) -> str:
+    return value.upper()
+
+
+def _mask_label(value: str) -> str:
+    return {"unmasked": "Unmasked", "masked": "Masked (even elements)"}.get(value, value)
+
+
+def _tail_label(value: str) -> str:
+    return value.replace("_", ",")
+
+
+def _vl_label(value: str) -> str:
+    return "VLMAX" if value == "vlmax" else value.upper()
+
+
+def _alignment_label(value: str) -> str:
+    return {"aligned": "Naturally aligned"}.get(value, value)
+
+
 def _text_relaxations(text: str) -> list[str]:
     """Split GUI relaxation text on newlines/top-level commas.
 
@@ -2100,6 +2322,8 @@ def _stylesheet() -> str:
     QLabel#FlowBadge { background: #0f766e; color: #ffffff; border-radius: 15px; font-weight: 700; }
     QLabel#FlowTitle { color: #111827; font-weight: 700; }
     QLabel#OutputHint { color: #5b6778; }
+    QLabel#AxisSectionHeader { color: #0f4c5c; font-size: 14px; font-weight: 700; padding: 7px 2px 2px 2px; }
+    QLabel#ScopeChip { background: #d1fae5; color: #064e3b; border: 1px solid #6ee7b7; border-radius: 5px; padding: 5px 9px; font-weight: 700; }
     QLabel#FlowArrow { color: #64748b; font-size: 18px; font-weight: 700; }
     QLabel#SectionTitle { color: #111827; font-size: 17px; font-weight: 700; }
     QLabel#DialogFileName { color: #475569; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
@@ -2113,6 +2337,10 @@ def _stylesheet() -> str:
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QGroupBox#VectorFilterGroup[group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#VectorFilterGroup[group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
+    QGroupBox#VectorFilterGroup[axis_role="core"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
+    QGroupBox#VectorFilterGroup[axis_role="parameter"][group_state="active"] { border: 1px solid #2563eb; background: #eff6ff; }
+    QGroupBox#VectorFilterGroup[dependency_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; color: #94a3b8; }
+    QGroupBox#VectorScopeGroup { border: 1px solid #6ee7b7; background: #f0fdf4; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QComboBox#VectorGenerationMode[exhaustive="true"] { border: 2px solid #b45309; background: #fff7ed; color: #9a3412; font-weight: 700; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
