@@ -32,12 +32,14 @@ VECTOR_CYCLE_VARIANTS = [
 
 @dataclass(frozen=True)
 class MemoryAccess:
-    """Byte-addressed footprint of one scalar memory instruction.
+    """Byte-addressed footprint of one architectural memory transaction.
 
     ``byte_level_no_mag`` describes misaligned plain accesses with no whole
     instruction atomicity guarantee. ``mixed_size_atomic`` describes a
     naturally aligned atomic footprint whose overlapping widths still need a
-    mixed-size execution model.
+    mixed-size execution model.  ``transaction_kind`` keeps scalar, Vector
+    element, and AMO transactions distinct without changing how their byte
+    footprints are represented.
     """
 
     base_symbol: str
@@ -47,6 +49,9 @@ class MemoryAccess:
     natural_aligned: bool
     boundary: str
     atomicity_model: str
+    transaction_kind: str = "scalar_plain"
+    parent_instruction: str = ""
+    element_index: int | None = None
 
     def __post_init__(self) -> None:
         if self.size_bytes not in {1, 2, 4, 8}:
@@ -66,6 +71,18 @@ class MemoryAccess:
             raise ValueError("aligned_atomic requires a naturally aligned access")
         if self.atomicity_model == "mixed_size_atomic" and not self.natural_aligned:
             raise ValueError("mixed_size_atomic requires a naturally aligned access")
+        if self.transaction_kind not in {"scalar_plain", "vector_element", "amo_rmw", "byte_split"}:
+            raise ValueError(f"unknown memory transaction kind: {self.transaction_kind}")
+        if self.transaction_kind == "vector_element" and self.element_index is None:
+            raise ValueError("vector_element transactions require element_index")
+        if self.transaction_kind == "vector_element" and not self.parent_instruction:
+            raise ValueError("vector_element transactions require parent_instruction")
+        if self.transaction_kind != "vector_element" and self.element_index is not None:
+            raise ValueError("element_index is valid only for vector_element transactions")
+        if self.transaction_kind == "amo_rmw" and not self.natural_aligned:
+            raise ValueError("amo_rmw transactions must be naturally aligned")
+        if self.element_index is not None and self.element_index < 0:
+            raise ValueError("element_index must be non-negative")
         if self.boundary != _access_boundary(self.offset_bytes, self.size_bytes):
             raise ValueError("memory access boundary does not match its byte range")
 
@@ -76,6 +93,10 @@ class MemoryAccess:
         offset_bytes: int,
         size_bytes: int,
         atomicity_model: str | None = None,
+        *,
+        transaction_kind: str = "scalar_plain",
+        parent_instruction: str = "",
+        element_index: int | None = None,
     ) -> "MemoryAccess":
         aligned = offset_bytes % size_bytes == 0
         return cls(
@@ -90,6 +111,9 @@ class MemoryAccess:
                 if atomicity_model is not None
                 else "aligned_atomic" if aligned else "byte_level_no_mag"
             ),
+            transaction_kind=transaction_kind,
+            parent_instruction=parent_instruction,
+            element_index=element_index,
         )
 
     @classmethod
@@ -102,6 +126,13 @@ class MemoryAccess:
             natural_aligned=bool(data["natural_aligned"]),
             boundary=str(data["boundary"]),
             atomicity_model=str(data["atomicity_model"]),
+            transaction_kind=str(data.get("transaction_kind", "scalar_plain")),
+            parent_instruction=_optional_text(data.get("parent_instruction")),
+            element_index=(
+                int(data["element_index"])
+                if data.get("element_index") is not None
+                else None
+            ),
         )
 
     def byte_location(self, byte_offset: int) -> str:
@@ -120,6 +151,9 @@ class MemoryAccess:
             "atomicity_model": self.atomicity_model,
             "whole_access_atomic": self.atomicity_model in {"aligned_atomic", "mixed_size_atomic"},
             "mag_bytes": None,
+            "transaction_kind": self.transaction_kind,
+            "parent_instruction": self.parent_instruction or None,
+            "element_index": self.element_index,
         }
 
 
@@ -130,6 +164,10 @@ def _access_boundary(offset: int, size: int) -> str:
     if offset // 16 != end // 16:
         return "cross16_same_line"
     return "same16"
+
+
+def _optional_text(value: Any) -> str:
+    return "" if value is None else str(value)
 
 
 @dataclass(frozen=True)
@@ -143,6 +181,25 @@ class LitmusEvent:
     value: str = ""
     role: str = ""
     memory_access: MemoryAccess | None = None
+    read_value: str = ""
+    write_value: str = ""
+    amo_op: str = ""
+    amo_operand: str = ""
+    amo_width_bytes: int | None = None
+    amo_ordering: str = ""
+
+    def __post_init__(self) -> None:
+        amo_fields = (
+            self.amo_op,
+            self.amo_operand,
+            self.amo_width_bytes,
+            self.amo_ordering,
+        )
+        if self.kind != "amo" and any(value not in {"", None} for value in amo_fields):
+            raise ValueError("AMO metadata is valid only for amo events")
+        if self.kind == "amo" and self.memory_access is not None:
+            if self.memory_access.transaction_kind not in {"scalar_plain", "amo_rmw"}:
+                raise ValueError("amo events require an amo_rmw transaction")
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "LitmusEvent":
@@ -161,6 +218,16 @@ class LitmusEvent:
                 if isinstance(access, Mapping)
                 else None
             ),
+            read_value=_optional_text(data.get("read_value")),
+            write_value=_optional_text(data.get("write_value")),
+            amo_op=_optional_text(data.get("amo_op")),
+            amo_operand=_optional_text(data.get("amo_operand")),
+            amo_width_bytes=(
+                int(data["amo_width_bytes"])
+                if data.get("amo_width_bytes") is not None
+                else None
+            ),
+            amo_ordering=_optional_text(data.get("amo_ordering")),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -174,6 +241,12 @@ class LitmusEvent:
             "value": self.value,
             "role": self.role,
             "memory_access": self.memory_access.to_json() if self.memory_access else None,
+            "read_value": self.read_value or None,
+            "write_value": self.write_value or None,
+            "amo_op": self.amo_op or None,
+            "amo_operand": self.amo_operand or None,
+            "amo_width_bytes": self.amo_width_bytes,
+            "amo_ordering": self.amo_ordering or None,
         }
 
 
@@ -184,6 +257,8 @@ class LitmusRelation:
     kind: str
     label: str = ""
     local: bool = False
+    src_facet: str = ""
+    dst_facet: str = ""
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "LitmusRelation":
@@ -193,6 +268,8 @@ class LitmusRelation:
             kind=str(data["kind"]),
             label=str(data.get("label", "")),
             local=bool(data.get("local", False)),
+            src_facet=_optional_text(data.get("src_facet")),
+            dst_facet=_optional_text(data.get("dst_facet")),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -202,6 +279,8 @@ class LitmusRelation:
             "kind": self.kind,
             "label": self.label or self.kind,
             "local": self.local,
+            "src_facet": self.src_facet or None,
+            "dst_facet": self.dst_facet or None,
         }
 
 
@@ -222,6 +301,7 @@ class LitmusCaseIR:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    schema: str = "litmus-link.case-ir.v2"
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "LitmusCaseIR":
@@ -247,6 +327,7 @@ class LitmusCaseIR:
             description=str(data.get("description", "")),
             tags=[str(value) for value in data.get("tags", [])],
             metadata=dict(data.get("metadata", {})),
+            schema=str(data.get("schema", "litmus-link.case-ir.v1")),
         )
 
     def events(self) -> list[LitmusEvent]:
@@ -267,7 +348,7 @@ class LitmusCaseIR:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema": "litmus-link.case-ir.v1",
+            "schema": self.schema,
             "name": self.name,
             "file_name": f"{self.name}.litmus",
             "display_name": self.display_name,

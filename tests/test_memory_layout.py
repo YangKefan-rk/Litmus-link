@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from litmus_link.litmus_ir import MemoryAccess
+from litmus_link.litmus_ir import LitmusCaseIR, LitmusEvent, MemoryAccess
 from litmus_link.memory_layout import all_accesses_overlap, expand_memory_layouts
 from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_edges import edge_by_label
@@ -26,6 +26,64 @@ def test_memory_access_computes_real_byte_ranges_and_boundaries() -> None:
 def test_no_mag_model_rejects_naturally_aligned_access() -> None:
     with pytest.raises(ValueError, match="reserved for misaligned"):
         MemoryAccess("x", 0, 4, (0, 1, 2, 3), True, "same16", "byte_level_no_mag")
+
+
+def test_transaction_ir_enforces_vector_and_amo_invariants() -> None:
+    vector = MemoryAccess.create(
+        "x",
+        4,
+        4,
+        transaction_kind="vector_element",
+        parent_instruction="v0",
+        element_index=1,
+    )
+    assert vector.covered_bytes == (4, 5, 6, 7)
+    assert vector.to_json()["transaction_kind"] == "vector_element"
+    with pytest.raises(ValueError, match="parent_instruction"):
+        MemoryAccess.create(
+            "x", 0, 4, transaction_kind="vector_element", element_index=0
+        )
+    with pytest.raises(ValueError, match="naturally aligned"):
+        MemoryAccess.create(
+            "x", 1, 4, transaction_kind="amo_rmw"
+        )
+
+
+def test_case_ir_v1_remains_readable_and_new_ir_defaults_to_v2() -> None:
+    legacy = {
+        "schema": "litmus-link.case-ir.v1",
+        "name": "legacy",
+        "harts": [[{
+            "event_id": "v0",
+            "hart": 0,
+            "kind": "load",
+            "instruction": "lw x5,0(x8)",
+            "location": "x",
+            "value": "0",
+        }]],
+        "relations": [],
+    }
+    restored = LitmusCaseIR.from_json(legacy)
+    assert restored.schema == "litmus-link.case-ir.v1"
+    assert restored.events()[0].read_value == ""
+
+    new_event = LitmusEvent(
+        "v0",
+        0,
+        "amo",
+        "amoadd.w.aq x5,x6,(x8)",
+        location="x",
+        memory_access=MemoryAccess.create(
+            "x", 0, 4, transaction_kind="amo_rmw"
+        ),
+        read_value="1",
+        write_value="3",
+        amo_op="add",
+        amo_operand="2",
+        amo_width_bytes=4,
+        amo_ordering="aq",
+    )
+    assert new_event.to_json()["write_value"] == "3"
 
 
 def test_layout_expansion_covers_width_boundary_and_mixed_axes() -> None:
