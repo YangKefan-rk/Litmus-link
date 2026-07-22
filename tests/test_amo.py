@@ -49,6 +49,26 @@ def test_amo_mnemonic_round_trip(ordering: str) -> None:
     assert parse_amo_mnemonic(spec.mnemonic) == spec
 
 
+@pytest.mark.parametrize(
+    ("ordering", "mnemonic"),
+    [
+        ("relaxed", "amoadd.w"),
+        ("aq", "amoadd.w.aq"),
+        ("rl", "amoadd.w.rl"),
+        ("aqrl", "amoadd.w.aqrl"),
+    ],
+)
+def test_amo_ordering_uses_isa_mnemonic_suffix(
+    ordering: str, mnemonic: str
+) -> None:
+    assert AmoSpec("add", 4, ordering).mnemonic == mnemonic
+
+
+def test_amo_parser_rejects_non_isa_split_aq_rl_suffix() -> None:
+    with pytest.raises(AmoError, match="unsupported Nanhu AMO"):
+        parse_amo_mnemonic("amoadd.w.aq.rl x1,x2,(x3)")
+
+
 def test_amo_w_read_result_is_sign_extended_on_rv64() -> None:
     assert amo_read_result(4, 0x80000000) == 0xFFFFFFFF80000000
     assert amo_read_result(4, 0x7FFFFFFF) == 0x7FFFFFFF

@@ -198,7 +198,7 @@ def test_native_relaxed_amo_has_no_aq_rl_suffix() -> None:
 
 @pytest.mark.parametrize(
     ("annotation", "suffix", "forbidden_suffix"),
-    [("Aq", ".aq", ".rl"), ("Rl", ".rl", ".aq"), ("AR", ".aq.rl", "")],
+    [("Aq", ".aq", ".rl"), ("Rl", ".rl", ".aq"), ("AR", ".aqrl", "")],
 )
 def test_native_atomic_ordering_bits_are_independent(
     annotation: str, suffix: str, forbidden_suffix: str

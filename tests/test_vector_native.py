@@ -169,7 +169,7 @@ def test_relation_cycle_contains_multiple_vectors_and_real_amo_metadata() -> Non
     case = lower_vector_assignment(VectorAssignment(cycle, choices))
     instructions = [event.instruction for event in case.case_ir.events()]
     assert sum(instruction.startswith(("vle32.v", "vse32.v")) for instruction in instructions) >= 2
-    assert any(instruction.startswith("amoxor.d.aq.rl") for instruction in instructions)
+    assert any(instruction.startswith("amoxor.d.aqrl") for instruction in instructions)
     amo = next(event for event in case.case_ir.events() if event.kind == "amo")
     assert amo.amo_op == "xor"
     assert amo.amo_width_bytes == 8

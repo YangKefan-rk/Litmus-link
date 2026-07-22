@@ -47,7 +47,10 @@ class AmoSpec:
             "relaxed": "",
             "aq": ".aq",
             "rl": ".rl",
-            "aqrl": ".aq.rl",
+            # RISC-V encodes the two ordering bits with the single ``aqrl``
+            # suffix.  ``.aq.rl`` is not an ISA mnemonic accepted by the
+            # assembler.
+            "aqrl": ".aqrl",
         }[self.ordering]
 
     @property
@@ -61,7 +64,7 @@ class AmoSpec:
 
 _AMO_RE = re.compile(
     r"^amo(swap|add|xor|and|or|min|max|minu|maxu)\.([wd])"
-    r"(?:(\.aq\.rl)|(\.aq)|(\.rl))?$"
+    r"(?:(\.aqrl)|(\.aq)|(\.rl))?$"
 )
 
 

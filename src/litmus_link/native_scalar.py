@@ -1350,7 +1350,7 @@ def _store_instruction(
 
 def _amo_suffix(annotation: str) -> str:
     try:
-        return {"AMO": "", "Aq": ".aq", "Rl": ".rl", "AR": ".aq.rl"}[annotation]
+        return {"AMO": "", "Aq": ".aq", "Rl": ".rl", "AR": ".aqrl"}[annotation]
     except KeyError as exc:
         raise NativeGenerationError(f"invalid AMO annotation: {annotation}") from exc
 
