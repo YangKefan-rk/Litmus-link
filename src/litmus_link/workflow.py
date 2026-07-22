@@ -579,7 +579,10 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
     items = list(sample)
     groups: Dict[str, Counter[str]] = {
         "status": Counter(),
+        "solver_status": Counter(),
         "verdict": Counter(),
+        "external_status": Counter(),
+        "solver_backend": Counter(),
         "skeleton": Counter(),
         "category": Counter(),
         "memory_layout": Counter(),
@@ -594,7 +597,6 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         "mask": Counter(),
         "tail": Counter(),
         "vl": Counter(),
-        "endpoint_mode": Counter(),
         "endpoint_category": Counter(),
         "endpoint_composition": Counter(),
         "scalar_width": Counter(),
@@ -611,7 +613,10 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         decision = item.get("decision", {}) or {}
         solver = item.get("solver", {}) or {}
         groups["status"][_count_value(decision.get("status"), "unknown")] += 1
+        groups["solver_status"][_count_value(solver.get("status"), "unchecked")] += 1
         groups["verdict"][_preview_verdict(solver)] += 1
+        groups["external_status"][_solver_external_status(solver)] += 1
+        groups["solver_backend"][_solver_backend_name(solver)] += 1
         for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
             groups[key][_count_value(combination.get(key), "none")] += 1
         params = combination.get("params", {}) or {}
@@ -623,7 +628,6 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         for choice in metadata.get("endpoint_choices", []) or []:
             if not isinstance(choice, dict):
                 continue
-            groups["endpoint_mode"][_count_value(choice.get("annotation"), "P")] += 1
             category = _count_value(choice.get("category"), "unknown")
             groups["endpoint_category"][category] += 1
             choice_params = choice.get("params", {}) or {}
@@ -636,6 +640,11 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if choice.get("category") == "vector":
                 groups["vector_event_form"][_count_value(choice.get("vector_form"), "vector")] += 1
                 groups["alignment"][_count_value(choice_params.get("alignment"), "aligned")] += 1
+                for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
+                    if key in choice_params:
+                        groups[key][
+                            _count_value(choice_params.get(key), "default")
+                        ] += 1
         memory_layout = metadata.get("memory_layout", {}) or {}
         groups["overlap_layout"][_count_value(memory_layout.get("overlap_layout"), "same_start")] += 1
         choices = metadata.get("endpoint_choices", []) or []
@@ -668,11 +677,37 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
 def _preview_verdict(solver: Dict[str, Any]) -> str:
     status = str(solver.get("status", ""))
     verdict = str(solver.get("verdict", ""))
+    if status == "conflict" or verdict == "conflict":
+        return "conflict"
+    if status == "inconclusive":
+        return "inconclusive"
     if status == "verified" and verdict in {"allowed", "observable"}:
-        return "observable"
+        return "allowed"
     if status == "verified" and verdict == "forbidden":
         return "forbidden"
     return verdict or status or "unchecked"
+
+
+def _solver_external_status(solver: Dict[str, Any]) -> str:
+    vector = solver.get("vector")
+    external = vector.get("external") if isinstance(vector, dict) else None
+    if isinstance(external, dict):
+        return _count_value(external.get("status"), "external_unsupported")
+    direct = solver.get("external")
+    if isinstance(direct, dict):
+        return _count_value(direct.get("status"), "external_unsupported")
+    cross_check = _count_value(solver.get("cross_check"), "not_run")
+    return cross_check
+
+
+def _solver_backend_name(solver: Dict[str, Any]) -> str:
+    vector = solver.get("vector")
+    if isinstance(vector, dict):
+        return _count_value(vector.get("backend"), "vector-aware-embedded")
+    return _count_value(
+        solver.get("backend", solver.get("tool")),
+        "none",
+    )
 
 
 def _preview_memory_layout(item: Dict[str, Any]) -> str:

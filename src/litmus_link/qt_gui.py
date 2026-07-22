@@ -1161,7 +1161,7 @@ class _LitmusLinkQtWindow:
         self.preview_filter_count.setObjectName("PreviewFilterCount")
         self.preview_stats_toggle = QtWidgets.QPushButton("Statistics")
         self.preview_stats_toggle.setCheckable(True)
-        self.preview_stats_toggle.setChecked(True)
+        self.preview_stats_toggle.setChecked(False)
         search_row.addWidget(self.preview_search, 1)
         search_row.addWidget(self.preview_filter_count)
         search_row.addWidget(self.preview_stats_toggle)
@@ -1174,6 +1174,7 @@ class _LitmusLinkQtWindow:
 
         browser = QtWidgets.QSplitter(_horizontal(self.QtCore))
         self.preview_stats_panel = QtWidgets.QWidget()
+        self.preview_stats_panel.setMinimumWidth(250)
         stats_layout = QtWidgets.QVBoxLayout(self.preview_stats_panel)
         stats_layout.setContentsMargins(0, 0, 0, 0)
         self.preview_stats = QtWidgets.QTreeWidget()
@@ -1206,7 +1207,7 @@ class _LitmusLinkQtWindow:
         browser.setCollapsible(0, True)
         browser.setStretchFactor(0, 1)
         browser.setStretchFactor(1, 4)
-        browser.setSizes([190, 700])
+        browser.setSizes([260, 700])
 
         self.preview_filter_timer = self.QtCore.QTimer(self.window)
         self.preview_filter_timer.setSingleShot(True)
@@ -1217,6 +1218,7 @@ class _LitmusLinkQtWindow:
         self.preview_skeleton_filter.currentIndexChanged.connect(lambda _index: self._apply_preview_filters())
         self.preview_verdict_filter.currentIndexChanged.connect(lambda _index: self._apply_preview_filters())
         self.preview_stats_toggle.toggled.connect(self.preview_stats_panel.setVisible)
+        self.preview_stats_panel.setVisible(False)
 
         preview_layout.addWidget(self.preview_stats_label)
         preview_layout.addLayout(filter_bar)
@@ -1235,8 +1237,10 @@ class _LitmusLinkQtWindow:
     def _build_action_bar(self) -> Any:
         QtWidgets = self.QtWidgets
         controls = QtWidgets.QHBoxLayout()
-        self.defer_solver = QtWidgets.QCheckBox("Defer solver checks")
-        self.defer_solver.setToolTip("Advanced: skip herd7 verdict calculation during large real-corpus generation.")
+        self.defer_solver = QtWidgets.QCheckBox("Skip outcome solving")
+        self.defer_solver.setToolTip(
+            "Generate source and metadata without running the embedded solver or optional herd7 cross-check."
+        )
         self.defer_solver.setChecked(False)
         controls.addWidget(self.defer_solver)
         self.output_hint = QtWidgets.QLabel("Output: out/qt-scalar")
@@ -1578,7 +1582,10 @@ class _LitmusLinkQtWindow:
             )
         labels = {
             "status": "Generation status",
+            "solver_status": "Solver status",
             "verdict": "Solver verdict",
+            "external_status": "External check",
+            "solver_backend": "Solver backend",
             "skeleton": "Skeleton",
             "category": "Category",
             "memory_layout": "Memory layout",
@@ -1593,7 +1600,13 @@ class _LitmusLinkQtWindow:
             "mask": "Vector mask",
             "tail": "Vector tail policy",
             "vl": "Vector VL",
-            "endpoint_mode": "Endpoint ISA mode",
+            "endpoint_category": "Endpoint instances",
+            "endpoint_composition": "Endpoint composition",
+            "scalar_width": "Scalar width",
+            "amo_opcode": "AMO opcode",
+            "amo_width": "AMO width",
+            "amo_ordering": "AMO ordering",
+            "overlap_layout": "Overlap layout",
             "vector_event_form": "Vector instruction form",
             "alignment": "Vector alignment",
             "relation_mechanism": "Relation mechanism",
@@ -1606,7 +1619,9 @@ class _LitmusLinkQtWindow:
             parent = QtWidgets.QTreeWidgetItem([labels.get(key, key), "", str(total)])
             for value, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0]))):
                 parent.addChild(QtWidgets.QTreeWidgetItem(["", str(value), str(count)]))
-            parent.setExpanded(key in {"status", "verdict", "skeleton"})
+            parent.setExpanded(
+                key in {"status", "solver_status", "verdict", "external_status", "skeleton"}
+            )
             tree.addTopLevelItem(parent)
         for column in range(3):
             tree.resizeColumnToContents(column)
@@ -1663,6 +1678,7 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
             "",
             "Counts:",
             f"  total combinations: {counts.get('total_combinations', counts.get('available_litmus', counts.get('total_cases', '-')))}",
+            f"  raw combinations: {counts.get('raw_combinations', '-')}",
             f"  generated: {counts.get('generated', counts.get('generated_litmus', '-'))}",
             f"  excluded illegal: {counts.get('excluded_illegal', '-')}",
             f"  excluded unsupported: {counts.get('excluded_unsupported', '-')}",
@@ -1670,6 +1686,28 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
             f"  missing: {counts.get('missing', '-')}",
         ]
     )
+    classifications = result.get("classification_counts")
+    groups = classifications.get("groups", {}) if isinstance(classifications, dict) else {}
+    if groups:
+        lines.extend(["", "Preview distribution:"])
+        for key, title in (
+            ("endpoint_composition", "composition"),
+            ("scalar_width", "scalar width"),
+            ("amo_opcode", "AMO opcode"),
+            ("amo_width", "AMO width"),
+            ("amo_ordering", "AMO ordering"),
+            ("sew", "Vector SEW"),
+            ("vector_event_form", "Vector form"),
+            ("overlap_layout", "overlap"),
+            ("verdict", "verdict"),
+            ("external_status", "external check"),
+        ):
+            values = groups.get(key)
+            if isinstance(values, dict) and values:
+                rendered = ", ".join(
+                    f"{name}={count}" for name, count in sorted(values.items())
+                )
+                lines.append(f"  {title}: {rendered}")
     if label == "Generate Files":
         out_path = Path(out_dir)
         schema = str(result.get("schema", ""))
@@ -1686,6 +1724,8 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
                 f"  available litmus: {result.get('available_litmus', result.get('generated_litmus', result.get('generated', 0)))}",
                 f"  generation mode: {result.get('generation_mode', 'configured-domain')}",
                 f"  solver results: {solver_files}",
+                f"  solver verdicts: {_compact_counts(result.get('solver_verdict'))}",
+                f"  external checks: {_compact_counts(result.get('external_status'))}",
                 f"  verdict mode: {result.get('verdict_mode', 'computed')}",
                 f"  diagram mode: {result.get('diagram_mode', 'on_demand')}",
                 f"  generated diagrams: {result.get('generated_diagrams', 0)}",
@@ -1729,6 +1769,12 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     return "\n".join(lines)
 
 
+def _compact_counts(value: Any) -> str:
+    if not isinstance(value, dict) or not value:
+        return "-"
+    return ", ".join(f"{key}={count}" for key, count in sorted(value.items()))
+
+
 def _raw_result_json(result: Dict[str, Any]) -> str:
     """Serialize result metadata without duplicating every preview source."""
     compact = dict(result)
@@ -1740,6 +1786,283 @@ def _raw_result_json(result: Dict[str, Any]) -> str:
             "reason": "Cases remain available in the virtualized Cases tab and per-case inspector.",
         }
     return json.dumps(compact, indent=2, sort_keys=True)
+
+
+def _vector_solver_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    solver = item.get("solver") or {}
+    vector = solver.get("vector") if isinstance(solver, dict) else None
+    return vector if isinstance(vector, dict) else {}
+
+
+def _embedded_solver_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    solver = item.get("solver") or {}
+    vector = _vector_solver_payload(item)
+    embedded = vector.get("embedded") if vector else None
+    if isinstance(embedded, dict):
+        return embedded
+    embedded = solver.get("embedded") if isinstance(solver, dict) else None
+    if isinstance(embedded, dict):
+        return embedded
+    if isinstance(solver, dict) and solver.get("schema") == "litmus-link.embedded-rvwmo.v1":
+        return solver
+    return {}
+
+
+def _solver_external_payload(solver: Dict[str, Any]) -> Dict[str, Any]:
+    vector = solver.get("vector")
+    if isinstance(vector, dict) and isinstance(vector.get("external"), dict):
+        return dict(vector["external"])
+    if isinstance(solver.get("external"), dict):
+        return dict(solver["external"])
+    if isinstance(solver.get("herd7"), dict):
+        return dict(solver["herd7"])
+    return {}
+
+
+def _solver_external_status(solver: Dict[str, Any]) -> str:
+    external = _solver_external_payload(solver)
+    if external:
+        return str(external.get("status", "external_unsupported"))
+    return str(solver.get("cross_check", "not_run") or "not_run")
+
+
+def _format_value(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return f"0x{value:x}"
+    return str(value)
+
+
+def _transaction_detail_text(item: Dict[str, Any]) -> str:
+    embedded = _embedded_solver_payload(item)
+    events = embedded.get("events") if isinstance(embedded, dict) else None
+    lines = ["Architectural memory transactions", ""]
+    if isinstance(events, list):
+        visible = [event for event in events if not bool(event.get("initial"))]
+        for event in visible:
+            footprint = ", ".join(str(value) for value in event.get("footprint", []))
+            access = "RMW" if event.get("amo") else "R" if event.get("read") else "W"
+            hart = event.get("hart")
+            lines.append(
+                f"{event.get('event_id', '?')}  P{hart if hart is not None else '-'}  "
+                f"{access}  {event.get('transaction_kind', 'scalar_plain')}"
+            )
+            lines.append(
+                f"  bytes={event.get('access_size', '?')}  offset={event.get('byte_offset', '-')}  "
+                f"footprint=[{footprint}]"
+            )
+            if event.get("read"):
+                lines.append(f"  read={_format_value(event.get('read_value'))}")
+            if event.get("write"):
+                lines.append(f"  write={_format_value(event.get('write_value'))}")
+            if event.get("amo"):
+                lines.append(
+                    "  AMO "
+                    f"op={event.get('amo_operation')} "
+                    f"ordering={event.get('amo_ordering')} "
+                    f"old={_format_value(event.get('read_value'))} "
+                    f"operand={_format_value(event.get('amo_operand'))} "
+                    f"new={_format_value(event.get('write_value'))}"
+                )
+            lines.append("")
+    else:
+        case_ir = item.get("case_ir") or {}
+        for hart in case_ir.get("harts", []) if isinstance(case_ir, dict) else []:
+            for event in hart:
+                access = event.get("memory_access") if isinstance(event, dict) else None
+                if not isinstance(access, dict):
+                    continue
+                lines.append(
+                    f"{event.get('event_id', '?')}  {access.get('transaction_kind', 'scalar_plain')}  "
+                    f"footprint={access.get('covered_bytes', [])}"
+                )
+
+    vector = _vector_solver_payload(item)
+    vector_ir = vector.get("vector_ir") if isinstance(vector, dict) else None
+    instructions = vector_ir.get("instructions") if isinstance(vector_ir, dict) else None
+    if isinstance(instructions, list) and instructions:
+        lines.extend(["", "Vector element execution", ""])
+        preserved = vector_ir.get("preserved_element_order", [])
+        preserved_by_parent: Dict[str, list[str]] = {}
+        for pair in preserved if isinstance(preserved, list) else []:
+            if isinstance(pair, list) and len(pair) == 2:
+                parent = str(pair[0]).split(".e", 1)[0]
+                preserved_by_parent.setdefault(parent, []).append(
+                    f"{pair[0]} -> {pair[1]}"
+                )
+        for instruction in instructions:
+            active = [
+                element
+                for element in instruction.get("elements", [])
+                if element.get("active")
+            ]
+            offsets = ", ".join(
+                f"e{element.get('index')}@+{element.get('offset_bytes')}"
+                for element in active
+            )
+            parent = str(instruction.get("event_id", "?"))
+            policy = (
+                "ordered siblings"
+                if preserved_by_parent.get(parent)
+                else "unordered siblings"
+            )
+            lines.append(
+                f"{parent}: {instruction.get('form')}  active={len(active)}  {policy}"
+            )
+            lines.append(f"  {offsets or 'no active elements'}")
+            for relation in preserved_by_parent.get(parent, []):
+                lines.append(f"  order: {relation}")
+    return "\n".join(lines).rstrip() or "No transaction metadata is available."
+
+
+def _relation_detail_text(item: Dict[str, Any]) -> str:
+    embedded = _embedded_solver_payload(item)
+    execution = embedded.get("execution") if isinstance(embedded, dict) else None
+    lines = ["Execution relations", ""]
+    if not isinstance(execution, dict):
+        lines.append("No complete execution witness is available.")
+        reason = embedded.get("reason") if isinstance(embedded, dict) else None
+        if reason:
+            lines.append(f"Reason: {reason}")
+        return "\n".join(lines)
+
+    byte_relations = execution.get("byte_relations") or {}
+    for kind in ("rf", "co", "fr"):
+        entries = byte_relations.get(kind, []) if isinstance(byte_relations, dict) else []
+        lines.append(f"{kind} by byte ({len(entries)}):")
+        if entries:
+            lines.extend(
+                f"  {entry.get('src')} -> {entry.get('dst')}  [{entry.get('byte')}]"
+                for entry in entries
+                if isinstance(entry, dict)
+            )
+        else:
+            lines.append("  none")
+        lines.append("")
+    for kind in ("po", "po_loc", "ppo"):
+        entries = execution.get(kind, [])
+        lines.append(f"{kind} transaction edges ({len(entries)}):")
+        lines.extend(
+            f"  {pair[0]} -> {pair[1]}"
+            for pair in entries
+            if isinstance(pair, list) and len(pair) == 2
+        )
+        if not entries:
+            lines.append("  none")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _value_detail_text(item: Dict[str, Any]) -> str:
+    case_ir = item.get("case_ir") or {}
+    metadata = case_ir.get("metadata", {}) if isinstance(case_ir, dict) else {}
+    plan = metadata.get("value_plan") if isinstance(metadata, dict) else None
+    analysis = item.get("analysis") or {}
+    lines = ["Exists reconstruction", "", str(analysis.get("exists", "-")), ""]
+    if not isinstance(plan, dict):
+        lines.append("No byte-provenance value plan is available for this case.")
+        return "\n".join(lines)
+
+    endpoints = plan.get("endpoints", {})
+    lines.append("Endpoint values:")
+    for vertex, value in sorted(
+        endpoints.items(), key=lambda entry: int(entry[0])
+    ):
+        if not isinstance(value, dict):
+            continue
+        line = (
+            f"  E{vertex} {value.get('category')}/{value.get('direction')} "
+            f"{int(value.get('width_bytes', 0) or 0) * 8}-bit"
+        )
+        details = []
+        for key, label in (
+            ("read_memory_value", "memory-read"),
+            ("read_register_value", "register-read"),
+            ("write_value", "write"),
+            ("amo_old", "old"),
+            ("amo_operand", "operand"),
+            ("amo_new", "new"),
+        ):
+            if value.get(key) is not None:
+                details.append(f"{label}={_format_value(value[key])}")
+        lines.append(line + ("  " + "  ".join(details) if details else ""))
+
+    lines.extend(["", "Coherence writer order:"])
+    for location, order in sorted((plan.get("co_orders") or {}).items()):
+        lines.append(f"  {location}: " + " -> ".join(f"E{value}" for value in order))
+    lines.extend(["", "Observed final bytes:"])
+    final = plan.get("final_bytes") or {}
+    for location, offsets in sorted((plan.get("observed_final_bytes") or {}).items()):
+        image = final.get(location, {}) if isinstance(final, dict) else {}
+        rendered = ", ".join(
+            f"{location}[{offset}]={_format_value(image.get(str(offset), image.get(offset)))}"
+            for offset in offsets
+        )
+        lines.append(f"  {rendered}")
+    lines.extend(
+        [
+            "",
+            "Outcome:",
+            f"  {analysis.get('outcome_interpretation', analysis.get('forbidden_outcome', '-'))}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _external_detail_text(item: Dict[str, Any]) -> str:
+    solver = item.get("solver") or {}
+    external = _solver_external_payload(solver)
+    status = _solver_external_status(solver)
+    lines = [f"External check: {status}"]
+    if not external:
+        lines.extend(
+            [
+                "",
+                "No external check was run. Embedded RVWMO remains the primary result.",
+                "Select the Vector cross-check backend to request herd7 scalar projections.",
+            ]
+        )
+        return "\n".join(lines)
+    for key in ("reason", "oracle_kind", "exact", "requested_projections", "generated_projections"):
+        if external.get(key) is not None:
+            lines.append(f"{key.replace('_', ' ').title()}: {external[key]}")
+    projection = external.get("projection")
+    if isinstance(projection, dict):
+        lines.extend(["", "Scalar projection:"])
+        for key in (
+            "status",
+            "oracle_kind",
+            "exact",
+            "storage_mode",
+            "requested_projections",
+            "generated_projections",
+            "reason",
+        ):
+            if projection.get(key) is not None:
+                lines.append(f"  {key.replace('_', ' ')}: {projection[key]}")
+    capabilities = external.get("capabilities")
+    if isinstance(capabilities, dict):
+        lines.extend(
+            [
+                "",
+                f"herd7 available: {capabilities.get('available', False)}",
+                f"herd7 version: {(capabilities.get('tool') or {}).get('version', '-')}",
+                f"mixed-size support: {(capabilities.get('mixed_size') or {}).get('supported', False)}",
+            ]
+        )
+    results = external.get("results", external.get("projections"))
+    if isinstance(results, list):
+        lines.extend(["", f"Projection results ({len(results)}):"])
+        for result in results:
+            if isinstance(result, dict):
+                lines.append(
+                    f"  {result.get('name', '?')}: "
+                    f"{result.get('status', '?')} / {result.get('verdict', '?')}"
+                )
+    return "\n".join(lines)
 
 
 class _LitmusPreviewDialog:
@@ -1825,6 +2148,14 @@ class _LitmusPreviewDialog:
         tabs = QtWidgets.QTabWidget()
         self.summary_detail = self._text_view(self._analysis_text())
         tabs.addTab(self.summary_detail, "Summary")
+        tabs.addTab(
+            self._text_view(_transaction_detail_text(self.item)), "Transactions"
+        )
+        tabs.addTab(
+            self._text_view(_relation_detail_text(self.item)), "Byte Relations"
+        )
+        tabs.addTab(self._text_view(_value_detail_text(self.item)), "Values")
+        tabs.addTab(self._text_view(_external_detail_text(self.item)), "External")
         tabs.addTab(self._text_view(str(self.item.get("litmus", ""))), "Litmus")
         tabs.addTab(self._json_view(self.item.get("solver", {})), "Solver")
         tabs.addTab(self._json_view(self.item.get("case_ir", {})), "IR")
@@ -1933,6 +2264,7 @@ class _LitmusPreviewDialog:
             f"RVWMO class: {decision.get('rvwmo_class', '-')}",
             f"Expected kind: {decision.get('expected_kind', '-')}",
             f"Solver: {solver.get('status', '-')} / {solver.get('verdict', '-')}",
+            f"External check: {_solver_external_status(solver)}",
             f"Diagram: {png or '-'}",
         ]
         reason = decision.get("reason")
@@ -1946,6 +2278,13 @@ class _LitmusPreviewDialog:
             f"Exists: {exists}",
             f"Outcome interpretation: {outcome}",
         ]
+        formal_scope = (
+            (self.item.get("case_ir") or {}).get("metadata", {}).get("formal_scope")
+            if isinstance(self.item.get("case_ir"), dict)
+            else None
+        )
+        if formal_scope:
+            lines.extend(["", f"Formal scope: {formal_scope}"])
         return "\n".join(lines)
 
 
@@ -2071,7 +2410,7 @@ def _configure_preview_header(table: Any, QtWidgets: Any) -> None:
     header.setStretchLastSection(True)
     for column in range(column_count):
         header.setSectionResizeMode(column, resize.Interactive)
-    for column, width in enumerate((44, 66, 68, 86, 190)):
+    for column, width in enumerate((44, 72, 68, 150, 190)):
         table.setColumnWidth(column, width)
     header.setSectionResizeMode(column_count - 1, resize.Stretch)
 
@@ -2081,12 +2420,20 @@ _STATUS_LABELS = {
     "hand_required": "HAND",
     "excluded_illegal": "ILLEGAL",
     "excluded_unsupported": "UNSUPP",
+    "verified": "VERIFIED",
+    "inconclusive": "INCONCLUSIVE",
+    "conflict": "CONFLICT",
+    "external_unsupported": "EXT UNSUPP",
 }
 _STATUS_COLORS = {
     "generated": "#16a34a",
     "hand_required": "#d97706",
     "excluded_illegal": "#dc2626",
     "excluded_unsupported": "#64748b",
+    "verified": "#0f766e",
+    "inconclusive": "#b45309",
+    "conflict": "#dc2626",
+    "external_unsupported": "#64748b",
 }
 
 
@@ -2250,6 +2597,12 @@ def _preview_filter_verdict(item: Dict[str, Any]) -> str:
     solver = item.get("solver") or {}
     status = str(solver.get("status", ""))
     verdict = str(solver.get("verdict", ""))
+    if status == "conflict" or verdict == "conflict":
+        return "conflict"
+    if status == "inconclusive":
+        return "inconclusive"
+    if status == "verified" and verdict in {"allowed", "observable"}:
+        return "allowed"
     if status == "verified" and verdict:
         return verdict
     if status:
@@ -2291,10 +2644,19 @@ def _shape_label(combination: Dict[str, Any]) -> str:
 def _verdict_label(solver: Dict[str, Any] | None, decision: Dict[str, Any]) -> str:
     if solver:
         status = solver.get("status")
+        external = _solver_external_status(solver)
         if status == "verified":
-            return solver.get("verdict", "verified")
+            verdict = solver.get("verdict", "verified")
+            verdict = "allowed" if verdict == "observable" else verdict
+            return (
+                f"{verdict} / ext unsupported"
+                if external == "external_unsupported"
+                else str(verdict)
+            )
         if status == "conflict":
-            return f"conflict:{solver.get('verdict', '?')}"
+            return "conflict"
+        if status == "inconclusive":
+            return "inconclusive"
         if status in {"unchecked", "not_applicable", "unavailable"}:
             return solver.get("verdict") or status
         fusion = solver.get("fusion") or {}

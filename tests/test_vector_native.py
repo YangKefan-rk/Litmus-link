@@ -257,6 +257,16 @@ def test_workflow_preview_limit_counts_final_random_cases() -> None:
     assert preview["report"]["total_combinations"] > 17
     assert all(re.fullmatch(r"LLV-LB-[0-9a-f]{64}", item["case_id"]) for item in preview["sample"])
     assert all(item["name"].startswith("LB+{") and "+E{" in item["name"] for item in preview["sample"])
+    groups = preview["classification_counts"]["groups"]
+    assert groups["endpoint_composition"]
+    assert groups["scalar_width"] == {"w": sum(groups["scalar_width"].values())}
+    assert groups["amo_opcode"] == {"add": sum(groups["amo_opcode"].values())}
+    assert groups["amo_width"] == {"d": sum(groups["amo_width"].values())}
+    assert groups["amo_ordering"] == {"aq": sum(groups["amo_ordering"].values())}
+    assert groups["sew"] == {"e16": sum(groups["sew"].values())}
+    assert groups["overlap_layout"] == {"same_start": 17}
+    assert groups["solver_status"] == {"verified": 17}
+    assert groups["external_status"] == {"not_run": 17}
 
 
 def test_file_hash_covers_endpoint_and_overlap_configuration() -> None:
@@ -406,6 +416,9 @@ def test_exhaustive_generation_writes_every_legal_assignment(tmp_path) -> None: 
         progress_callback=lambda current, total, _message: progress.append((current, total)),
     )
     assert report["generated_litmus"] == domain.total_cases
+    assert sum(report["solver"].values()) == domain.total_cases
+    assert sum(report["solver_verdict"].values()) == domain.total_cases
+    assert sum(report["external_status"].values()) == domain.total_cases
     files = list(out.glob("*.litmus"))
     entries = (out / "@all").read_text(encoding="utf-8").splitlines()
     assert len(files) == len(entries) == len(set(entries)) == domain.total_cases

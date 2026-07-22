@@ -13,8 +13,12 @@ from litmus_link.qt_gui import (
     _LitmusLinkQtWindow,
     _LitmusPreviewDialog,
     _display_role,
+    _external_detail_text,
     _load_qt_modules,
+    _relation_detail_text,
     _short_file_name,
+    _transaction_detail_text,
+    _value_detail_text,
 )
 from litmus_link.workflow import materialize_preview_diagram, preview_payload
 
@@ -296,3 +300,45 @@ def test_preview_dialog_fits_full_png_in_first_view(qt_app, tmp_path: Path) -> N
         dialog.close()
         parent.close()
         app.processEvents()
+
+
+def test_vector_case_detail_explains_transactions_relations_and_values() -> None:
+    preview = preview_payload(
+        {
+            "mode": "vector",
+            "skeletons": ["MP"],
+            "mechanisms": ["po"],
+            "endpoint_categories": ["vector", "scalar", "amo"],
+            "endpoint_compositions": ["vector_scalar_amo"],
+            "scalar_widths": ["h"],
+            "amo_ops": ["add"],
+            "amo_widths": ["d"],
+            "amo_orderings": ["aqrl"],
+            "overlap_layouts": ["high_partial"],
+            "forms": ["unit_load", "unit_store"],
+            "sew": ["e16"],
+            "lmul": ["m1"],
+            "index_eew": ["ei16"],
+            "mask": ["unmasked"],
+            "tail": ["ta_ma"],
+            "vl": ["vl2"],
+            "alignments": ["aligned"],
+            "sample_limit": 1,
+            "random_seed": 3,
+            "solver_backend": "embedded",
+            "compute_verdicts": True,
+        }
+    )
+    item = preview["sample"][0]
+    transactions = _transaction_detail_text(item)
+    relations = _relation_detail_text(item)
+    values = _value_detail_text(item)
+    external = _external_detail_text(item)
+
+    assert "amo_rmw" in transactions
+    assert "old=" in transactions and "operand=" in transactions and "new=" in transactions
+    assert "Vector element execution" in transactions
+    assert "rf by byte" in relations and "co by byte" in relations and "fr by byte" in relations
+    assert "Exists reconstruction" in values
+    assert "Endpoint values" in values and "Observed final bytes" in values
+    assert external.startswith("External check: not_run")

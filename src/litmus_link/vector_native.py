@@ -1330,7 +1330,9 @@ def generate_vector_cases(
     judge = bool(payload.get("compute_verdicts", True))
     solver_backend = _vector_solver_backend(payload)
     generated_count = 0
-    verdicts: dict[str, int] = {}
+    solver_statuses: dict[str, int] = {}
+    solver_verdicts: dict[str, int] = {}
+    external_statuses: dict[str, int] = {}
     seen_file_identities: dict[str, Mapping[str, Any]] = {}
     atfile_tmp = out_dir / "@all.tmp"
     try:
@@ -1358,7 +1360,11 @@ def generate_vector_cases(
                 atfile.write(litmus_path.name + "\n")
                 generated_count = index
                 status = str(solver.get("status", "unknown"))
-                verdicts[status] = verdicts.get(status, 0) + 1
+                solver_statuses[status] = solver_statuses.get(status, 0) + 1
+                verdict = str(solver.get("verdict", "unknown"))
+                solver_verdicts[verdict] = solver_verdicts.get(verdict, 0) + 1
+                external = str(solver.get("cross_check", "not_run") or "not_run")
+                external_statuses[external] = external_statuses.get(external, 0) + 1
                 if progress_callback is not None:
                     progress_callback(
                         index,
@@ -1381,7 +1387,9 @@ def generate_vector_cases(
         "random_seed": seed if generation_mode != VECTOR_GENERATE_ALL else None,
         "sampling": VECTOR_SAMPLING_LABELS[generation_mode],
         "file_name_scheme": "LLV-<family>-<sha256>.litmus",
-        "solver": verdicts,
+        "solver": solver_statuses,
+        "solver_verdict": solver_verdicts,
+        "external_status": external_statuses,
         "solver_backend": solver_backend,
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
