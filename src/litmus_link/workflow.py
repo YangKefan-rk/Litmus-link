@@ -123,6 +123,7 @@ def options_payload() -> Dict[str, Any]:
             "alignments": list(VECTOR_ALIGNMENTS),
             "preview_sampling_modes": list(VECTOR_SAMPLE_MODES),
             "generation_modes": list(VECTOR_GENERATION_MODES),
+            "solver_backends": ["embedded", "crosscheck"],
         },
     }
 

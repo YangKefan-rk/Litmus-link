@@ -197,6 +197,27 @@ def test_all_fusion_compositions_receive_formal_verdict(composition: str) -> Non
     assert verdict.verdict in {"allowed", "forbidden"}
 
 
+def test_vector_crosscheck_backend_runs_external_projection() -> None:
+    cases, audit = sample_vector_cases(
+        _small_payload(
+            scalar_widths=["w"],
+            sew=["e32"],
+            vl=["vl1"],
+            solver_backend="crosscheck",
+            sample_limit=1,
+        ),
+        compute_verdicts=True,
+    )
+    assert audit["solver_backend"] == "crosscheck"
+    assert cases[0].solver["cross_check"] in {
+        "agree",
+        "conflict",
+        "external_unsupported",
+        "advisory_agree",
+        "advisory_disagree",
+    }
+
+
 @pytest.mark.parametrize("layout", ["same_start", "contained", "low_partial", "high_partial"])
 def test_mixed_width_overlap_layouts_are_naturally_aligned_and_formal(layout: str) -> None:
     domain = VectorNativeDomain.from_payload(

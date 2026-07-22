@@ -44,10 +44,17 @@ class SolverResult:
         }
 
 
-def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResult:
+def solve_generated_case(
+    case: GeneratedCase,
+    herd: str = "herd7",
+    *,
+    vector_external_check: bool = False,
+) -> SolverResult:
     case_ir = case.case_ir
     if case.decision.expected_kind == "rvwmo-vector":
-        return _solve_vector_generated_case(case)
+        return _solve_vector_generated_case(
+            case, external_check=vector_external_check
+        )
     if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc"}:
         # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
         # made. For fusion (vector/CMO/PBMT/TLB) cases we still attach the
@@ -152,7 +159,9 @@ def solve_generated_case(case: GeneratedCase, herd: str = "herd7") -> SolverResu
     )
 
 
-def _solve_vector_generated_case(case: GeneratedCase) -> SolverResult:
+def _solve_vector_generated_case(
+    case: GeneratedCase, *, external_check: bool = False
+) -> SolverResult:
     from .vector_solver import solve_vector_case
 
     if case.case_ir is None:
@@ -166,7 +175,10 @@ def _solve_vector_generated_case(case: GeneratedCase) -> SolverResult:
             cross_check="not_applicable",
         )
 
-    result = solve_vector_case(case.case_ir)
+    result = solve_vector_case(
+        case.case_ir,
+        external_check=external_check,
+    )
     payload = result.to_json()
     edges: list[dict[str, Any]] = []
     execution = result.embedded.execution if result.embedded is not None else None
@@ -184,14 +196,32 @@ def _solve_vector_generated_case(case: GeneratedCase) -> SolverResult:
                     }
                 )
     verdict = "allowed" if result.verdict == "observable" else result.verdict
+    external_status = (
+        str(result.external.get("status", "not_run"))
+        if result.external is not None
+        else "not_run"
+    )
+    cross_check = (
+        "external_unsupported"
+        if external_status == "external_unsupported"
+        else external_status
+    )
     return SolverResult(
         status=result.status,
         verdict=verdict,
         allowed=result.allowed,
-        model="riscv.cat+rvv-elements",
-        tool="litmus-link-vector-rvwmo",
+        model=(
+            "riscv.cat+rvv-elements+herd-scalar-projection"
+            if external_status in {"agree", "conflict"}
+            else "riscv.cat+rvv-elements"
+        ),
+        tool=(
+            "litmus-link-vector-rvwmo+herd7"
+            if external_status in {"agree", "conflict"}
+            else "litmus-link-vector-rvwmo"
+        ),
         reason=result.reason,
-        cross_check="no_external_vector_model",
+        cross_check=cross_check,
         edges=edges,
         vector=payload,
     )

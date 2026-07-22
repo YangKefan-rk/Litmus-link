@@ -59,6 +59,7 @@ def test_toolchain_info_has_stable_shape() -> None:
     info = toolchain_info()
     assert set(info["tools"]) == {"diy7", "diycross7", "herd7"}
     assert info["model"]["path"].endswith("riscv.cat")
+    assert info["riscv_capabilities"]["schema"] == "litmus-link.herd-capabilities.v1"
 
 
 def test_herd_judge_passes_mixed_unaligned_variants(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

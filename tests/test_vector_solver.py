@@ -78,7 +78,7 @@ def test_supported_forms_use_vector_aware_solver(form: str) -> None:
     assert split_fence.allowed is False
     assert base.tool == "litmus-link-vector-rvwmo"
     assert base.model == "riscv.cat+rvv-elements"
-    assert base.cross_check == "no_external_vector_model"
+    assert base.cross_check == "not_run"
     assert base.vector["schema"] == "litmus-link.vector-solver.v1"
 
 

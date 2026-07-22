@@ -322,6 +322,7 @@ class VectorSolverVerdict:
     reason: str
     expansion: VectorExpansion | None
     embedded: EmbeddedVerdict | None
+    external: Mapping[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -329,13 +330,22 @@ class VectorSolverVerdict:
             "status": self.status,
             "verdict": self.verdict,
             "allowed": self.allowed,
-            "backend": "vector-aware-embedded",
-            "tool": "litmus-link-vector-rvwmo",
+            "backend": (
+                "vector-aware-embedded+herd-scalar-projection"
+                if self.external is not None
+                else "vector-aware-embedded"
+            ),
+            "tool": (
+                "litmus-link-vector-rvwmo+herd7-reference"
+                if self.external is not None
+                else "litmus-link-vector-rvwmo"
+            ),
             "model": "riscv.cat+rvv-elements",
             "model_revision": "rvv-element-order-v1",
             "reason": self.reason,
             "vector_ir": self.expansion.to_json() if self.expansion else None,
             "embedded": self.embedded.to_json() if self.embedded else None,
+            "external": dict(self.external) if self.external is not None else None,
         }
 
 
@@ -480,6 +490,7 @@ def solve_vector_case(
     *,
     max_candidates: int = 100_000,
     timeout_seconds: float = 10.0,
+    external_check: bool = False,
 ) -> VectorSolverVerdict:
     try:
         expansion = expand_vector_case(case)
@@ -491,6 +502,7 @@ def solve_vector_case(
             reason=str(exc),
             expansion=None,
             embedded=None,
+            external=None,
         )
 
     embedded = solve_rvwmo(
@@ -499,20 +511,39 @@ def solve_vector_case(
         timeout_seconds=timeout_seconds,
         ordering=expansion.ordering,
     )
-    if embedded.status == "verified":
+    if external_check:
+        from .herd_reference import crosscheck_vector_projection
+
+        external = crosscheck_vector_projection(case, expansion, embedded)
+    else:
+        external = None
+    if external is not None and external.get("status") == "conflict":
+        status = "conflict"
+        verdict = "conflict"
+        allowed = None
+        reason = str(external.get("reason", "Embedded/herd projection conflict"))
+    elif embedded.status == "verified":
+        status = embedded.status
+        verdict = embedded.verdict
+        allowed = embedded.allowed
         reason = (
             "Active RVV elements were solved as one instruction-level event set under RVWMO; "
-            "mask/vl/address generation and ordered-indexed element PPO are explicit in vector_ir."
+            "mask/vl/address generation and ordered-indexed element PPO are explicit in vector_ir. "
+            f"External reference status: {external.get('status', 'not_run') if external is not None else 'not_run'}."
         )
     else:
+        status = embedded.status
+        verdict = embedded.verdict
+        allowed = embedded.allowed
         reason = embedded.reason
     return VectorSolverVerdict(
-        status=embedded.status,
-        verdict=embedded.verdict,
-        allowed=embedded.allowed,
+        status=status,
+        verdict=verdict,
+        allowed=allowed,
         reason=reason,
         expansion=expansion,
         embedded=embedded,
+        external=external,
     )
 
 

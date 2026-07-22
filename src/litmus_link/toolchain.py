@@ -102,7 +102,7 @@ def tool_version(executable: str) -> str:
 
 def toolchain_info() -> dict:
     tools = {"diy7": DIY, "diycross7": DIYCROSS, "herd7": HERD}
-    return {
+    info = {
         "available": tools_available(),
         "missing": missing_tools(),
         "tools": {
@@ -112,6 +112,11 @@ def toolchain_info() -> dict:
         "model": {"path": str(RISCV_CAT), "available": RISCV_CAT.exists()},
         "libdir": str(HERDTOOLS_LIB),
     }
+    # Import lazily: herd_reference uses this module to execute its probes.
+    from .herd_reference import probe_herd_capabilities
+
+    info["riscv_capabilities"] = probe_herd_capabilities().to_json()
+    return info
 
 
 @dataclass(frozen=True)

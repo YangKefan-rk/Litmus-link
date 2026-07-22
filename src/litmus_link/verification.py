@@ -67,6 +67,14 @@ def verify_litmus_file(
     external = None
     case_ir = _load_case_ir(litmus_path)
     vector_case = case_ir is not None and is_vector_case(case_ir)
+    vector_result = None
+    if vector_case:
+        vector_result = solve_vector_case(
+            case_ir,
+            max_candidates=max_candidates,
+            timeout_seconds=float(timeout),
+            external_check=selected in {"herd7", "crosscheck"},
+        )
     if selected in {"embedded", "crosscheck"}:
         if case_ir is None:
             embedded = {
@@ -79,12 +87,8 @@ def verify_litmus_file(
             }
         else:
             embedded = (
-                solve_vector_case(
-                    case_ir,
-                    max_candidates=max_candidates,
-                    timeout_seconds=float(timeout),
-                ).to_json()
-                if vector_case
+                vector_result.to_json()
+                if vector_result is not None
                 else solve_rvwmo(
                     case_ir,
                     max_candidates=max_candidates,
@@ -93,40 +97,55 @@ def verify_litmus_file(
             )
     if selected in {"herd7", "crosscheck"}:
         external = (
-            {
-                "schema": "litmus-link.herd7-verification.v1",
-                "status": "not_applicable",
-                "verdict": "unmodeled",
-                "allowed": None,
-                "backend": "herd7",
-                "model": "riscv.cat",
-                "reason": "Stock herd7/riscv.cat does not parse or model RVV memory instructions.",
-            }
-            if vector_case
+            dict(vector_result.external)
+            if vector_result is not None and vector_result.external is not None
             else _herd_result(litmus_path, timeout=timeout)
         )
     if selected == "embedded":
         return embedded or _missing_result("embedded")
     if selected == "herd7":
+        if vector_case and external is not None:
+            return _vector_external_result(external)
         return external or _missing_result("herd7")
     assert embedded is not None and external is not None
     if vector_case:
+        external_status = str(external.get("status", "external_unsupported"))
         return {
             "schema": "litmus-link.verification.v1",
             "status": embedded.get("status", "not_applicable"),
             "verdict": embedded.get("verdict", "unmodeled"),
             "allowed": embedded.get("allowed"),
-            "backend": "vector-aware-embedded",
-            "reason": "Vector-aware embedded result returned; no stock herd7 RVV model exists for cross-check.",
-            "cross_check": "no_external_vector_model",
+            "backend": "vector-aware-crosscheck",
+            "reason": embedded.get("reason", "Vector-aware RVWMO result."),
+            "cross_check": external_status,
             "embedded": embedded,
             "herd7": external,
         }
-    agree = (
-        embedded.get("status") == "verified"
-        and external.get("status") == "verified"
-        and embedded.get("allowed") == external.get("allowed")
-    )
+    if embedded.get("status") != "verified":
+        return {
+            "schema": "litmus-link.verification.v1",
+            "status": embedded.get("status", "inconclusive"),
+            "verdict": embedded.get("verdict", "unknown"),
+            "allowed": embedded.get("allowed"),
+            "backend": "crosscheck",
+            "cross_check": "embedded_inconclusive",
+            "reason": "Embedded RVWMO did not produce a verified verdict; no conflict is claimed.",
+            "embedded": embedded,
+            "herd7": external,
+        }
+    if external.get("status") != "verified":
+        return {
+            "schema": "litmus-link.verification.v1",
+            "status": "verified",
+            "verdict": embedded["verdict"],
+            "allowed": embedded["allowed"],
+            "backend": "crosscheck",
+            "cross_check": f"external_{external.get('status', 'unknown')}",
+            "reason": "Embedded RVWMO result retained because the external reference is unavailable.",
+            "embedded": embedded,
+            "herd7": external,
+        }
+    agree = embedded.get("allowed") == external.get("allowed")
     if agree:
         return {
             "schema": "litmus-link.verification.v1",
@@ -178,6 +197,22 @@ def _herd_result(path: Path, *, timeout: int) -> dict:
         "states": verdict.states,
         "condition": verdict.condition,
         "raw_output": verdict.raw,
+    }
+
+
+def _vector_external_result(external: dict) -> dict:
+    status = str(external.get("status", "external_unsupported"))
+    if status == "external_unsupported" or external.get("allowed") is None:
+        return external
+    return {
+        **external,
+        "status": "verified",
+        "backend": "herd7-scalar-projection",
+        "cross_check": status,
+        "reason": (
+            "herd7 evaluated scalar projection(s); this result does not imply "
+            "that stock herd7 parses RVV instructions."
+        ),
     }
 
 

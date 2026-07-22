@@ -284,7 +284,10 @@ Verification is split by semantic scope:
   candidate limit returns `inconclusive`. Misaligned cases use the explicitly
   labeled `riscv.cat+byte_level_no_mag` extension and byte-addressed events.
 - **External comparison** uses `herd7 + riscv.cat`. Select `crosscheck` to
-  require both implementations to return the same verified `allowed` value.
+  compare both implementations. Startup probes check actual scalar, W/D AMO,
+  and `-variant mixed` semantics; an unsupported parser/model capability is
+  reported as `external_unsupported`, not as a solver conflict. Only two
+  completed, opposite verdicts produce `conflict`.
   The embedded backend currently consumes Litmus-link `case_ir` metadata;
   arbitrary upstream `.litmus` files without that metadata must use the
   `herd7` backend.
@@ -305,9 +308,13 @@ Verification is split by semantic scope:
   contains 677,520 combinations and 2,032,560 files after the three ordering
   variants are expanded. The Qt `Vector Litmus` workflow supersedes that
   one-endpoint profile with multi-endpoint relation-cycle generation.
-- **Vector is not cross-checked through a scalar twin.** Stock
-  `herd7/riscv.cat` does not parse/model RVV memory instructions, so a Vector
-  `herd7` request reports `not_applicable`. FOF/fault trimming, segment partial
+- **Vector external checking uses scalar element projections.** Stock
+  `herd7/riscv.cat` never receives RVV syntax. `VL=1` projections and bounded
+  unordered-element permutations are exact differential oracles; multi-element
+  ordered-indexed projections are advisory because ordinary scalar `po` is
+  stronger than isolated Vector sibling order. Unsupported mixed-size or AMO
+  capabilities retain the embedded result and report `external_unsupported`.
+  FOF/fault trimming, segment partial
   completion, nonzero `vstart`/restart, whole-register transfer, complex
   indexed aliases, PBMT/PMA, and Vector+CMO/TLB interactions remain outside the
   formal solver and cannot produce a verified forbidden claim.

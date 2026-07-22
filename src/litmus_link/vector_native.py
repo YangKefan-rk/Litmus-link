@@ -1263,6 +1263,7 @@ def sample_vector_cases(
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[GeneratedCase], dict[str, Any]]:
     domain = VectorNativeDomain.from_payload(payload)
+    solver_backend = _vector_solver_backend(payload)
     limit = int(payload.get("sample_limit", 1000))
     seed = int(payload.get("random_seed", 1))
     sampling = str(payload.get("preview_sampling", VECTOR_SAMPLE_BALANCED))
@@ -1277,7 +1278,10 @@ def sample_vector_cases(
     for index, assignment in enumerate(assignments, start=1):
         case = lower_vector_assignment(assignment)
         if compute_verdicts:
-            solver = solve_generated_case(case).to_json()
+            solver = solve_generated_case(
+                case,
+                vector_external_check=solver_backend == "crosscheck",
+            ).to_json()
         else:
             solver = _unchecked_solver()
         cases.append(replace(case, solver=solver))
@@ -1291,6 +1295,7 @@ def sample_vector_cases(
             "sampled_cases": len(cases),
             "sampling_mode": sampling,
             "sampling": VECTOR_SAMPLING_LABELS[sampling],
+            "solver_backend": solver_backend,
         }
     )
     return cases, audit
@@ -1323,6 +1328,7 @@ def generate_vector_cases(
         target = len(sampled)
     out_dir.mkdir(parents=True, exist_ok=True)
     judge = bool(payload.get("compute_verdicts", True))
+    solver_backend = _vector_solver_backend(payload)
     generated_count = 0
     verdicts: dict[str, int] = {}
     seen_file_identities: dict[str, Mapping[str, Any]] = {}
@@ -1331,7 +1337,14 @@ def generate_vector_cases(
         with atfile_tmp.open("w", encoding="utf-8") as atfile:
             for index, assignment in enumerate(assignments, start=1):
                 case = lower_vector_assignment(assignment)
-                solver = solve_generated_case(case).to_json() if judge else _unchecked_solver()
+                solver = (
+                    solve_generated_case(
+                        case,
+                        vector_external_check=solver_backend == "crosscheck",
+                    ).to_json()
+                    if judge
+                    else _unchecked_solver()
+                )
                 case = replace(case, solver=solver)
                 _claim_vector_file_identity(out_dir, case, seen_file_identities)
                 litmus_path = out_dir / case.file_name
@@ -1369,6 +1382,7 @@ def generate_vector_cases(
         "sampling": VECTOR_SAMPLING_LABELS[generation_mode],
         "file_name_scheme": "LLV-<family>-<sha256>.litmus",
         "solver": verdicts,
+        "solver_backend": solver_backend,
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
         "audit": audit,
@@ -1770,3 +1784,12 @@ def _unchecked_solver() -> dict[str, Any]:
         "raw_output": "",
         "command": [],
     }
+
+
+def _vector_solver_backend(payload: Mapping[str, Any]) -> str:
+    backend = str(payload.get("solver_backend", "embedded"))
+    if backend not in {"embedded", "crosscheck"}:
+        raise ValueError(
+            "Vector solver_backend must be 'embedded' or 'crosscheck'"
+        )
+    return backend

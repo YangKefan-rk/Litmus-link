@@ -33,6 +33,7 @@ from .native_diy import DiyConfig, enumerate_diy_cycles
 from .native_edges import EXTERNAL, LOCAL, READ, SAME, WRITE, NativeEdge, edge_by_label, edge_catalog, edges_for_shape
 from .rvwmo_solver import solve_rvwmo
 from .toolchain import RISCV_CAT, ToolchainError, herd_judge
+from .herd_reference import capability_for_scalar_case
 
 
 class NativeGenerationError(RuntimeError):
@@ -1153,6 +1154,37 @@ def _judge_native(
             timeout_seconds=float(timeout),
         ).to_json()
         external = _judge_native_herd7(case, timeout=timeout)
+        if embedded.get("status") != "verified":
+            return {
+                "schema": "litmus-link.native-solver.v2",
+                "status": embedded.get("status", "inconclusive"),
+                "tool": "litmus-link-rvwmo",
+                "model": "riscv.cat",
+                "backend": "crosscheck",
+                "cross_check": "embedded_inconclusive",
+                "allowed": embedded.get("allowed"),
+                "verdict": embedded.get("verdict", "unknown"),
+                "reason": "Embedded RVWMO did not produce a verified verdict; herd7 cannot turn it into a conflict.",
+                "embedded": embedded,
+                "herd7": external,
+            }
+        if external.get("status") != "verified":
+            return {
+                "schema": "litmus-link.native-solver.v2",
+                "status": "verified",
+                "tool": "litmus-link-rvwmo",
+                "model": "riscv.cat",
+                "backend": "crosscheck",
+                "cross_check": f"external_{external.get('status', 'unknown')}",
+                "allowed": embedded.get("allowed"),
+                "verdict": embedded.get("verdict", "unknown"),
+                "reason": (
+                    "Embedded RVWMO result retained; external herd7 result "
+                    f"is unavailable: {external.get('reason', 'unknown reason')}"
+                ),
+                "embedded": embedded,
+                "herd7": external,
+            }
         agree = (
             embedded.get("status") == "verified"
             and external.get("status") == "verified"
@@ -1187,19 +1219,45 @@ def _judge_native(
 
 
 def _judge_native_herd7(case: NativeLoweredCase, *, timeout: int) -> dict:
+    mixed = any(
+        event.memory_access is not None
+        and event.memory_access.atomicity_model == "byte_level_no_mag"
+        for event in case.case_ir.events()
+    )
+    capability = capability_for_scalar_case(
+        case.case_ir,
+        mixed_size=mixed,
+    )
+    if not capability.supported:
+        return {
+            "schema": "litmus-link.native-solver.v2",
+            "status": "external_unsupported",
+            "tool": "herd7",
+            "model": "riscv.cat",
+            "model_path": str(RISCV_CAT),
+            "variants": ["mixed", "unaligned"] if mixed else [],
+            "allowed": None,
+            "verdict": "unknown",
+            "reason": capability.reason,
+        }
     try:
-        mixed = any(
-            event.memory_access is not None
-            and event.memory_access.atomicity_model == "byte_level_no_mag"
-            for event in case.case_ir.events()
-        )
         verdict = herd_judge(
             case.litmus,
             timeout=timeout,
             variants=("mixed", "unaligned") if mixed else (),
         )
     except ToolchainError as exc:
-        raise NativeGenerationError(f"herd7 cross-check failed for {case.name}: {exc}") from exc
+        return {
+            "schema": "litmus-link.native-solver.v2",
+            "status": "external_unsupported",
+            "tool": "herd7",
+            "model": "riscv.cat",
+            "model_path": str(RISCV_CAT),
+            "variants": ["mixed", "unaligned"] if mixed else [],
+            "allowed": None,
+            "verdict": "unknown",
+            "reason": str(exc),
+        }
     status = "verified" if verdict.outcome in {"observable", "forbidden"} else "unknown"
     return {
         "schema": "litmus-link.native-solver.v1",

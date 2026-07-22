@@ -72,11 +72,11 @@ def test_verify_path_dispatches_vector_metadata_to_vector_solver(tmp_path: Path)
     assert result["vector_ir"]["config"]["effective_vl"] == 4
 
     external = verify_path(litmus, backend="herd7")
-    assert external["counts"] == {"not_applicable": 1}
+    assert external["counts"] == {"external_unsupported": 1}
     crosscheck = verify_path(litmus, backend="crosscheck")
     cross_result = crosscheck["results"][0]["result"]
     assert cross_result["status"] == "verified"
-    assert cross_result["cross_check"] == "no_external_vector_model"
+    assert cross_result["cross_check"] == "external_unsupported"
 
 
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")
