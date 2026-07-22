@@ -170,22 +170,24 @@ def test_cli() -> None:
         check(main(["audit", "--rule-file", str(rule_file), "--out", str(Path(tmp) / "audit")]) == 0, "CLI rule-file audit failed")
         check(main(["audit", "--profile", "stress-large", "--summary-only", "--out", str(Path(tmp) / "audit-large")]) == 0, "CLI summary-only audit failed")
         options = options_payload()
-        check("stress-large" in options["profiles"], "GUI options should include stress-large")
-        preview = preview_payload({"mode": "rule", "rule": {"name": "gui-test", "axes": {"vector": ["unit_load"]}, "param_axes": {"sew": ["e32"]}, "limit": 10}})
-        check(preview["report"]["total_combinations"] == 1, "GUI preview count mismatch")
+        check(set(options) == {"axes", "param_axes", "native_scalar", "vector_native"}, "GUI options should expose only scalar/vector workflows")
+        preview = preview_payload(
+            {
+                "mode": "scalar",
+                "engine": "native_templates",
+                "skeletons": ["MP"],
+                "mechanisms": ["po"],
+                "annotations": ["P"],
+                "include_same": False,
+                "sample_limit": 1,
+                "judge": False,
+            }
+        )
+        check(preview["report"]["total_combinations"] >= 1, "GUI preview count mismatch")
         check(preview["sample"][0]["litmus"].startswith("RISCV "), "GUI preview should include rendered litmus")
         check(bool(preview["sample"][0]["analysis"]["cycle"]), "GUI preview should include cycle analysis")
         check("solver" in preview["sample"][0], "GUI preview should include solver result")
         check(preview["sample"][0].get("diagram", {}).get("status") in {"deferred", "ready"}, "GUI preview should include a deferred diagram descriptor")
-        mp_preview = preview_payload({"mode": "rule", "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10}, "sample_limit": 6})
-        from litmus_link.corpus_riscv import corpus_available as _corpus_available
-        if _corpus_available():
-            check(mp_preview["report"]["generated_litmus"] > 500, "MP cacheable should expand to the full real corpus family")
-            check(len([item for item in mp_preview["sample"] if item.get("litmus")]) == 6, "MP preview should sample the corpus family")
-            check(all(item["solver"]["model"] == "rvwmo-herd7" for item in mp_preview["sample"] if item.get("litmus")), "MP corpus preview should carry herd7 verdicts")
-        else:
-            check(mp_preview["report"]["generated_litmus"] >= 6, "MP cacheable should expand to multiple litmus variants")
-            check(len([item for item in mp_preview["sample"] if item.get("litmus")]) >= 6, "MP preview should include expanded variants")
         check(main(["qt-gui", "--check"]) == 0, "Qt GUI check should not require Qt")
         check("PyQt6" in qt_binding_status(), "Qt GUI status should include PyQt6")
         check(main(["generate", "--out", str(Path(tmp) / "missing-source")]) == 2, "CLI should require profile or rule file")

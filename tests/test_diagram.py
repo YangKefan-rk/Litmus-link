@@ -70,3 +70,16 @@ def test_relation_routing_is_clean(builder) -> None:
             overlap = _close_count(routed[i]["points"], routed[j]["points"])
             assert overlap <= 5, f"{routed[i]['label']} overlaps {routed[j]['label']} ({overlap} pts)"
 
+    draw = ImageDraw.Draw(Image.new("RGB", (D.WIDTH, D.HEIGHT)))
+    placements = D._layout_relation_chips(draw, D._fonts(), routed, boxes)
+    chip_boxes = [
+        D._chip_bounds(draw, D._fonts(), center, relation["label"])
+        for relation, center in placements
+    ]
+    for index, chip in enumerate(chip_boxes):
+        assert not any(
+            D._boxes_intersect(chip, event_box, margin=5)
+            for event_box in boxes.values()
+        )
+        for other in chip_boxes[index + 1 :]:
+            assert not D._boxes_intersect(chip, other, margin=7)

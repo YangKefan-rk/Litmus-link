@@ -29,7 +29,8 @@ from .litmus_ir import (
     _vector_setup,
 )
 from .models import Combination, Decision, GENERATED, GeneratedCase
-from .native_cycles import NativeCycle, location_ids
+from .naming import vector_native_case_identity
+from .native_cycles import NativeCycle
 from .native_edges import READ, WRITE
 from .native_scalar import (
     DEFAULT_NATIVE_MECHANISMS,
@@ -60,6 +61,22 @@ VECTOR_ALIGNMENTS = (
     "misalign_cross16",
     "misalign_cross64",
 )
+
+VECTOR_SAMPLE_BALANCED = "balanced"
+VECTOR_SAMPLE_DOMAIN_WEIGHTED = "domain_weighted"
+VECTOR_SAMPLE_MODES = (
+    VECTOR_SAMPLE_BALANCED,
+    VECTOR_SAMPLE_DOMAIN_WEIGHTED,
+)
+
+VECTOR_GENERATE_ALL = "all"
+VECTOR_GENERATION_MODES = (*VECTOR_SAMPLE_MODES, VECTOR_GENERATE_ALL)
+
+VECTOR_SAMPLING_LABELS = {
+    VECTOR_SAMPLE_BALANCED: "balanced-skeleton-coverage-random-without-replacement",
+    VECTOR_SAMPLE_DOMAIN_WEIGHTED: "domain-weighted-random-without-replacement",
+    VECTOR_GENERATE_ALL: "exhaustive-deterministic-enumeration",
+}
 
 
 @dataclass(frozen=True)
@@ -233,7 +250,63 @@ class VectorNativeDomain:
     def total_cases(self) -> int:
         return sum(self.count_for_cycle(cycle) for cycle in self.cycles)
 
-    def random_assignments(self, limit: int, seed: int) -> list[VectorAssignment]:
+    def random_assignments(
+        self,
+        limit: int,
+        seed: int,
+        strategy: str = VECTOR_SAMPLE_BALANCED,
+    ) -> list[VectorAssignment]:
+        if strategy == VECTOR_SAMPLE_BALANCED:
+            return self._balanced_assignments(limit, seed)
+        if strategy == VECTOR_SAMPLE_DOMAIN_WEIGHTED:
+            return self._domain_weighted_assignments(limit, seed)
+        raise ValueError(
+            f"unknown Vector sampling strategy: {strategy}; "
+            f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
+        )
+
+    def _balanced_assignments(self, limit: int, seed: int) -> list[VectorAssignment]:
+        if limit < 1 or self.total_cases < 1:
+            return []
+        target = min(limit, self.total_cases)
+        family_cycles: dict[str, tuple[NativeCycle, ...]] = {
+            family: tuple(cycle for cycle in self.cycles if cycle.family == family)
+            for family in dict.fromkeys(cycle.family for cycle in self.cycles)
+        }
+        family_totals = {
+            family: sum(self.count_for_cycle(cycle) for cycle in cycles)
+            for family, cycles in family_cycles.items()
+        }
+        family_order = list(family_cycles)
+        random.Random(seed).shuffle(family_order)
+        quotas = _balanced_quotas(family_order, family_totals, target)
+
+        sampled: dict[str, list[VectorAssignment]] = {}
+        for family in family_order:
+            quota = quotas[family]
+            if quota < 1:
+                sampled[family] = []
+                continue
+            family_domain = replace(self, cycles=family_cycles[family])
+            family_seed = _derived_seed(seed, family)
+            sampled[family] = family_domain._coverage_weighted_assignments(
+                quota, family_seed
+            )
+
+        # Interleave families so the GUI never shows a long block from one
+        # skeleton even though each family is sampled independently.
+        assignments: list[VectorAssignment] = []
+        max_family_size = max((len(values) for values in sampled.values()), default=0)
+        for index in range(max_family_size):
+            for family in family_order:
+                values = sampled[family]
+                if index < len(values):
+                    assignments.append(values[index])
+        return assignments
+
+    def _domain_weighted_assignments(
+        self, limit: int, seed: int
+    ) -> list[VectorAssignment]:
         if limit < 1:
             return []
         total = self.total_cases
@@ -249,6 +322,106 @@ class VectorNativeDomain:
 
         rng = random.Random(seed)
         selected: dict[tuple[Any, ...], VectorAssignment] = {}
+        alignment_domains = {
+            (alignment, direction): tuple(
+                choice
+                for choice in self.choices_for(direction)
+                if _choice_allowed_alignment(choice, alignment)
+            )
+            for alignment in self.alignments
+            for direction in (READ, WRITE)
+        }
+        alignment_weights: dict[tuple[str, ...], tuple[list[int], list[int]]] = {}
+
+        def random_assignment(cycle: NativeCycle) -> VectorAssignment:
+            directions = tuple(edge.src for edge in cycle.edges)
+            cached = alignment_weights.get(directions)
+            if cached is None:
+                per_alignment = [
+                    _assignment_count_for_domains(
+                        [alignment_domains[(alignment, direction)] for direction in directions]
+                    )
+                    for alignment in self.alignments
+                ]
+                alignment_cumulative: list[int] = []
+                alignment_running = 0
+                for count in per_alignment:
+                    alignment_running += count
+                    alignment_cumulative.append(alignment_running)
+                cached = (per_alignment, alignment_cumulative)
+                alignment_weights[directions] = cached
+            per_alignment, alignment_cumulative = cached
+            alignment_total = sum(per_alignment)
+            alignment_index = bisect.bisect_right(
+                alignment_cumulative, rng.randrange(alignment_total)
+            )
+            alignment = self.alignments[alignment_index]
+            domains = [alignment_domains[(alignment, direction)] for direction in directions]
+            while True:
+                choices = tuple(rng.choice(domain) for domain in domains)
+                if any(choice.is_vector for choice in choices):
+                    return VectorAssignment(cycle, choices, alignment)
+
+        attempts = 0
+        max_attempts = max(target * 40, 1000)
+        while len(selected) < target and attempts < max_attempts:
+            attempts += 1
+            cycle_index = bisect.bisect_right(cumulative, rng.randrange(total))
+            assignment = random_assignment(self.cycles[cycle_index])
+            selected.setdefault(assignment.key, assignment)
+
+        if len(selected) < target:
+            for assignment in self.assignments():
+                selected.setdefault(assignment.key, assignment)
+                if len(selected) >= target:
+                    break
+        return list(selected.values())
+
+    def _coverage_weighted_assignments(
+        self, limit: int, seed: int
+    ) -> list[VectorAssignment]:
+        if limit < 1:
+            return []
+        total = self.total_cases
+        if total < 1:
+            return []
+        target = min(limit, total)
+        weights = [self.count_for_cycle(cycle) for cycle in self.cycles]
+        cumulative: list[int] = []
+        running = 0
+        for weight in weights:
+            running += weight
+            cumulative.append(running)
+
+        rng = random.Random(seed)
+        selected: dict[tuple[Any, ...], VectorAssignment] = {}
+        alignment_domains = {
+            (alignment, direction): tuple(
+                choice
+                for choice in self.choices_for(direction)
+                if _choice_allowed_alignment(choice, alignment)
+            )
+            for alignment in self.alignments
+            for direction in (READ, WRITE)
+        }
+        vector_domains = {
+            (alignment, direction): tuple(
+                choice
+                for choice in alignment_domains[(alignment, direction)]
+                if choice.is_vector
+            )
+            for alignment in self.alignments
+            for direction in (READ, WRITE)
+        }
+        nonvector_domains = {
+            (alignment, direction): tuple(
+                choice
+                for choice in alignment_domains[(alignment, direction)]
+                if not choice.is_vector
+            )
+            for alignment in self.alignments
+            for direction in (READ, WRITE)
+        }
 
         def add_stratum(
             *,
@@ -300,34 +473,24 @@ class VectorNativeDomain:
                     candidates = [
                         vertex
                         for vertex in available_vertices
-                        if any(
-                            choice.is_vector
-                            and _choice_allowed_alignment(choice, selected_alignment)
-                            for choice in self.choices_for(directions[vertex])
-                        )
+                        if vector_domains[(selected_alignment, directions[vertex])]
                     ]
                     if needed < 0 or len(candidates) < needed:
                         continue
                     for vertex in rng.sample(candidates, needed):
-                        vector_domain = [
-                            choice
-                            for choice in self.choices_for(directions[vertex])
-                            if choice.is_vector
-                            and _choice_allowed_alignment(choice, selected_alignment)
+                        vector_domain = vector_domains[
+                            (selected_alignment, directions[vertex])
                         ]
                         assignment[vertex] = rng.choice(vector_domain)
                         available_vertices.remove(vertex)
 
                 for vertex in available_vertices:
-                    domain = self.choices_for(directions[vertex])
-                    if selected_alignment != "aligned":
-                        domain = tuple(
-                            choice
-                            for choice in domain
-                            if _choice_allowed_alignment(choice, selected_alignment)
-                        )
+                    domain = (
+                        nonvector_domains[(selected_alignment, directions[vertex])]
+                        if exact_vector_count is not None
+                        else alignment_domains[(selected_alignment, directions[vertex])]
+                    )
                     if exact_vector_count is not None:
-                        domain = tuple(choice for choice in domain if not choice.is_vector)
                         if not domain:
                             ok = False
                             break
@@ -386,14 +549,7 @@ class VectorNativeDomain:
             alignment = rng.choice(self.alignments)
             while True:
                 choices = tuple(
-                    rng.choice(
-                        tuple(
-                            choice
-                            for choice in self.choices_for(direction)
-                            if alignment == "aligned"
-                            or _choice_allowed_alignment(choice, alignment)
-                        )
-                    )
+                    rng.choice(alignment_domains[(alignment, direction)])
                     for direction in directions
                 )
                 if any(choice.is_vector for choice in choices):
@@ -410,16 +566,29 @@ class VectorNativeDomain:
 
     def assignments(self) -> Iterator[VectorAssignment]:
         for cycle in self.cycles:
-            domains = [self.choices_for(edge.src) for edge in cycle.edges]
-            for choices in product(*domains):
-                if not any(choice.is_vector for choice in choices):
-                    continue
-                for alignment in self.alignments:
-                    if any(not _choice_allowed_alignment(choice, alignment) for choice in choices):
+            directions = tuple(edge.src for edge in cycle.edges)
+            for alignment in self.alignments:
+                domains = [
+                    tuple(
+                        choice
+                        for choice in self.choices_for(direction)
+                        if _choice_allowed_alignment(choice, alignment)
+                    )
+                    for direction in directions
+                ]
+                for choices in product(*domains):
+                    if not any(choice.is_vector for choice in choices):
                         continue
                     yield VectorAssignment(cycle, tuple(choices), alignment)
 
     def audit(self) -> dict[str, Any]:
+        family_cycles: dict[str, int] = {}
+        family_cases: dict[str, int] = {}
+        for cycle in self.cycles:
+            family_cycles[cycle.family] = family_cycles.get(cycle.family, 0) + 1
+            family_cases[cycle.family] = (
+                family_cases.get(cycle.family, 0) + self.count_for_cycle(cycle)
+            )
         return {
             "schema": "litmus-link.vector-native-audit.v1",
             "relation_cycles": len(self.cycles),
@@ -427,8 +596,57 @@ class VectorNativeDomain:
             "write_endpoint_choices": len(self.write_choices),
             "alignments": list(self.alignments),
             "total_cases": self.total_cases,
+            "family_relation_cycles": dict(sorted(family_cycles.items())),
+            "family_cases": dict(sorted(family_cases.items())),
             "relation_audit": dict(self.relation_audit),
         }
+
+
+def _assignment_count_for_domains(
+    domains: Sequence[Sequence[EndpointChoice]],
+) -> int:
+    total = 1
+    nonvector = 1
+    for domain in domains:
+        total *= len(domain)
+        nonvector *= sum(not choice.is_vector for choice in domain)
+    return total - nonvector
+
+
+def _derived_seed(seed: int, family: str) -> int:
+    family_value = sum(
+        (index + 1) * ord(character) for index, character in enumerate(family)
+    )
+    return (seed * 1_000_003 + family_value) & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _balanced_quotas(
+    family_order: Sequence[str],
+    family_totals: Mapping[str, int],
+    target: int,
+) -> dict[str, int]:
+    quotas = {family: 0 for family in family_order}
+    active = [family for family in family_order if family_totals.get(family, 0) > 0]
+    remaining = target
+    while remaining > 0 and active:
+        share, extra = divmod(remaining, len(active))
+        requested = max(share, 1)
+        progressed = 0
+        next_active: list[str] = []
+        for index, family in enumerate(active):
+            room = family_totals[family] - quotas[family]
+            take = min(room, requested + int(share > 0 and index < extra))
+            quotas[family] += take
+            remaining -= take
+            progressed += take
+            if quotas[family] < family_totals[family]:
+                next_active.append(family)
+            if remaining == 0:
+                break
+        if progressed == 0:
+            break
+        active = next_active
+    return quotas
 
 
 def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
@@ -578,9 +796,17 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         )
     else:
         exists = case.exists
-    cycle_labels = _decorated_cycle_labels(assignment)
+    cycle_labels = tuple(edge.label for edge in assignment.cycle.edges)
     cycle_text = " ".join(cycle_labels)
-    name = _vector_cycle_name(assignment, cycle_labels)
+    endpoint_choices = [choice.to_json() for choice in assignment.choices]
+    identity = vector_native_case_identity(
+        assignment.cycle.family or "Cycle",
+        assignment.cycle.to_json(),
+        cycle_labels,
+        endpoint_choices,
+        assignment.alignment,
+    )
+    name = str(identity["machine_name"])
     relations = [
         replace(relation, label=cycle_labels[index])
         for index, relation in enumerate(case.relations)
@@ -591,8 +817,9 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
     metadata.update(
         {
             "vectors": vector_metadata,
-            "endpoint_choices": [choice.to_json() for choice in assignment.choices],
+            "endpoint_choices": endpoint_choices,
             "source_cycle": assignment.cycle.to_json(),
+            "file_identity": identity,
             "memory_layout": {
                 "alignment": assignment.alignment,
                 "base_offset_bytes": base_offset,
@@ -604,7 +831,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
     case = replace(
         transformed,
         name=name,
-        display_name=name,
+        display_name=str(identity["display_name"]),
         combination_name=name,
         variant="vector-native-cycle",
         cycle=cycle_text,
@@ -653,7 +880,13 @@ def sample_vector_cases(
     domain = VectorNativeDomain.from_payload(payload)
     limit = int(payload.get("sample_limit", 1000))
     seed = int(payload.get("random_seed", 1))
-    assignments = domain.random_assignments(limit, seed)
+    sampling = str(payload.get("preview_sampling", VECTOR_SAMPLE_BALANCED))
+    if sampling not in VECTOR_SAMPLE_MODES:
+        raise ValueError(
+            f"unknown Vector preview sampling mode: {sampling}; "
+            f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
+        )
+    assignments = domain.random_assignments(limit, seed, sampling)
     cases: list[GeneratedCase] = []
     total = max(len(assignments), 1)
     for index, assignment in enumerate(assignments, start=1):
@@ -671,7 +904,8 @@ def sample_vector_cases(
             "sample_seed": seed,
             "sample_requested": limit,
             "sampled_cases": len(cases),
-            "sampling": "coverage-stratified-random-without-replacement-by-assignment-key",
+            "sampling_mode": sampling,
+            "sampling": VECTOR_SAMPLING_LABELS[sampling],
         }
     )
     return cases, audit
@@ -684,45 +918,71 @@ def generate_vector_cases(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     domain = VectorNativeDomain.from_payload(payload)
-    requested = int(payload.get("generate_limit", 10000))
-    if requested < 1:
-        raise ValueError("generate_limit must be positive; the complete relation/endpoint domain is audit-only")
+    generation_mode = str(payload.get("generation_mode", VECTOR_SAMPLE_BALANCED))
+    if generation_mode not in VECTOR_GENERATION_MODES:
+        raise ValueError(
+            f"unknown Vector generation mode: {generation_mode}; "
+            f"expected one of {', '.join(VECTOR_GENERATION_MODES)}"
+        )
     seed = int(payload.get("random_seed", 1))
-    sampled = domain.random_assignments(requested, seed)
-    assignments: Iterable[VectorAssignment] = sampled
-    target = len(sampled)
+    if generation_mode == VECTOR_GENERATE_ALL:
+        requested: int | None = None
+        assignments: Iterable[VectorAssignment] = domain.assignments()
+        target = domain.total_cases
+    else:
+        requested = int(payload.get("generate_limit", 10000))
+        if requested < 1:
+            raise ValueError("generate_limit must be positive for sampled generation")
+        sampled = domain.random_assignments(requested, seed, generation_mode)
+        assignments = sampled
+        target = len(sampled)
     out_dir.mkdir(parents=True, exist_ok=True)
     judge = bool(payload.get("compute_verdicts", True))
-    filenames: list[str] = []
+    generated_count = 0
     verdicts: dict[str, int] = {}
-    for index, assignment in enumerate(assignments, start=1):
-        case = lower_vector_assignment(assignment)
-        solver = solve_generated_case(case).to_json() if judge else _unchecked_solver()
-        case = replace(case, solver=solver)
-        litmus_path = out_dir / f"{case.name}.litmus"
-        litmus_path.write_text(case.litmus, encoding="utf-8")
-        (out_dir / f"{case.name}.meta.json").write_text(
-            json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (out_dir / f"{case.name}.solver.json").write_text(
-            json.dumps(solver, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        filenames.append(litmus_path.name)
-        status = str(solver.get("status", "unknown"))
-        verdicts[status] = verdicts.get(status, 0) + 1
-        if progress_callback is not None:
-            progress_callback(index, max(target, 1), f"Generated {index:,}/{target:,}: {case.name}")
-    (out_dir / "@all").write_text("\n".join(filenames) + ("\n" if filenames else ""), encoding="utf-8")
+    seen_file_identities: dict[str, Mapping[str, Any]] = {}
+    atfile_tmp = out_dir / "@all.tmp"
+    try:
+        with atfile_tmp.open("w", encoding="utf-8") as atfile:
+            for index, assignment in enumerate(assignments, start=1):
+                case = lower_vector_assignment(assignment)
+                solver = solve_generated_case(case).to_json() if judge else _unchecked_solver()
+                case = replace(case, solver=solver)
+                _claim_vector_file_identity(out_dir, case, seen_file_identities)
+                litmus_path = out_dir / case.file_name
+                litmus_path.write_text(case.litmus, encoding="utf-8")
+                (out_dir / f"{case.name}.meta.json").write_text(
+                    json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                (out_dir / f"{case.name}.solver.json").write_text(
+                    json.dumps(solver, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                atfile.write(litmus_path.name + "\n")
+                generated_count = index
+                status = str(solver.get("status", "unknown"))
+                verdicts[status] = verdicts.get(status, 0) + 1
+                if progress_callback is not None:
+                    progress_callback(
+                        index,
+                        max(target, 1),
+                        f"Generated {index:,}/{target:,}: {case.file_name}",
+                    )
+    except Exception:
+        atfile_tmp.unlink(missing_ok=True)
+        raise
+    atfile_tmp.replace(out_dir / "@all")
     audit = domain.audit()
     report = {
         "schema": "litmus-link.vector-native-generation.v1",
         "profile": "vector-native",
         "available_litmus": domain.total_cases,
-        "generated_litmus": len(filenames),
+        "generated_litmus": generated_count,
+        "generation_mode": generation_mode,
         "generation_limit": requested,
-        "generation_limited": len(filenames) < domain.total_cases,
-        "random_seed": seed,
-        "sampling": "coverage-stratified-random-without-replacement",
+        "generation_limited": generated_count < domain.total_cases,
+        "random_seed": seed if generation_mode != VECTOR_GENERATE_ALL else None,
+        "sampling": VECTOR_SAMPLING_LABELS[generation_mode],
+        "file_name_scheme": "LLV-<family>-<sha256>.litmus",
         "solver": verdicts,
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
@@ -731,6 +991,60 @@ def generate_vector_cases(
     (out_dir / "audit-report.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "generation-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
+
+
+def _claim_vector_file_identity(
+    out_dir: Path,
+    case: GeneratedCase,
+    seen: dict[str, Mapping[str, Any]],
+) -> None:
+    if case.case_ir is None:
+        raise ValueError("Vector case is missing case IR for file identity validation")
+    identity = case.case_ir.metadata.get("file_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError(f"Vector case {case.name} is missing canonical file identity")
+    canonical = identity.get("canonical")
+    if not isinstance(canonical, Mapping):
+        raise ValueError(f"Vector case {case.name} has an invalid canonical file identity")
+    expected_file_name = str(identity.get("file_name", ""))
+    if expected_file_name != case.file_name:
+        raise ValueError(
+            f"Vector case {case.name} file identity names {expected_file_name!r}, "
+            f"expected {case.file_name!r}"
+        )
+    if case.name in seen:
+        raise ValueError(
+            f"duplicate Vector file identity {case.name}; generation would overwrite a case"
+        )
+    seen[case.name] = canonical
+
+    litmus_path = out_dir / case.file_name
+    meta_path = out_dir / f"{case.name}.meta.json"
+    solver_path = out_dir / f"{case.name}.solver.json"
+    existing = [path for path in (litmus_path, meta_path, solver_path) if path.exists()]
+    if not existing:
+        return
+    if not litmus_path.exists() or not meta_path.exists():
+        names = ", ".join(path.name for path in existing)
+        raise FileExistsError(
+            f"refusing to overwrite incomplete Vector artifacts for {case.name}: {names}"
+        )
+    try:
+        existing_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FileExistsError(
+            f"refusing to overwrite unreadable Vector metadata {meta_path}"
+        ) from exc
+    old_identity = (
+        ((existing_meta.get("case_ir") or {}).get("metadata") or {}).get(
+            "file_identity"
+        )
+    )
+    old_canonical = old_identity.get("canonical") if isinstance(old_identity, Mapping) else None
+    if old_canonical != canonical:
+        raise FileExistsError(
+            f"Vector file ID collision at {litmus_path}; existing case has a different identity"
+        )
 
 
 def _vector_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
@@ -868,78 +1182,6 @@ def _replace_registers(instruction: str, replacements: Mapping[str, str]) -> str
         lambda match: replacements.get(match.group(0), match.group(0)),
         instruction,
     )
-
-
-def _endpoint_code(choice: EndpointChoice, alignment: str = "aligned") -> str:
-    if not choice.is_vector:
-        code = choice.annotation
-        if alignment != "aligned":
-            code += _alignment_code(alignment)
-        return code
-    params = choice.params or {}
-    sew = str(params.get("sew", "e32"))[1:]
-    index = str(params.get("index_eew", ""))[2:]
-    forms = {
-        "unit_load": f"Vle{sew}",
-        "unit_store": f"Vse{sew}",
-        "strided_load": f"Vlse{sew}",
-        "strided_store": f"Vsse{sew}",
-        "indexed_ordered_load": f"Vlo{index}e{sew}",
-        "indexed_unordered_load": f"Vlu{index}e{sew}",
-        "indexed_ordered_store": f"Vso{index}e{sew}",
-        "indexed_unordered_store": f"Vsu{index}e{sew}",
-    }
-    code = forms[choice.vector_form]
-    code += str(params.get("lmul", "m1")).upper()
-    code += str(params.get("vl", "vlmax")).upper()
-    if params.get("mask") == "masked":
-        code += "M"
-    if alignment != "aligned":
-        code += _alignment_code(alignment)
-    return code
-
-
-def _alignment_code(alignment: str) -> str:
-    return {
-        "misalign_same16": "U16",
-        "misalign_cross16": "X16",
-        "misalign_cross64": "X64",
-    }[alignment]
-
-
-def _decorated_cycle_labels(assignment: VectorAssignment) -> tuple[str, ...]:
-    locations = location_ids(assignment.cycle.edges)
-    vector_locations = {
-        locations[index]
-        for index, choice in enumerate(assignment.choices)
-        if choice.is_vector
-    }
-
-    def code(index: int) -> str:
-        alignment = (
-            assignment.alignment
-            if locations[index] in vector_locations
-            else "aligned"
-        )
-        return _endpoint_code(assignment.choices[index], alignment)
-
-    labels: list[str] = []
-    for index, edge in enumerate(assignment.cycle.edges):
-        source = code(index)
-        target = code((index + 1) % len(assignment.choices))
-        suffix = "" if source == "P" and target == "P" else source + target
-        labels.append(edge.label + suffix)
-    return tuple(labels)
-
-
-def _vector_cycle_name(assignment: VectorAssignment, labels: Sequence[str]) -> str:
-    raw = "+".join([assignment.cycle.family or "Cycle", *labels])
-    if len(raw) <= 220:
-        return raw
-    import hashlib
-
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-    return raw[: 220 - len(digest) - 4].rstrip("+._-") + "+ID." + digest
 
 
 def _formal_scope(case: LitmusCaseIR, assignment: VectorAssignment) -> tuple[bool, str]:

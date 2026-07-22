@@ -14,6 +14,7 @@ from .litmus_ir import LitmusCaseIR
 
 WIDTH = 1600
 HEIGHT = 1100
+DIAGRAM_RENDER_VERSION = 2
 FONT_REG = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
 FONT_BOLD = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 FONT_MONO = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
@@ -86,6 +87,8 @@ def diagram_summary(case_ir: LitmusCaseIR, solver: dict[str, Any] | None, png_pa
     return {
         "schema": "litmus-link.diagram.v1",
         "name": case_ir.name,
+        "display_name": case_ir.display_name,
+        "file_name": f"{case_ir.name}.litmus",
         "png": str(png_path) if png_path else "",
         "cycle": case_ir.cycle,
         "exists": case_ir.exists,
@@ -126,7 +129,13 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
 def _draw_header(draw: ImageDraw.ImageDraw, fonts: dict[str, ImageFont.FreeTypeFont], case_ir: LitmusCaseIR, solver: dict[str, Any] | None) -> None:
     _round(draw, (40, 30, 1560, 135), COLORS["panel"], COLORS["border"], 14)
-    draw.text((65, 52), case_ir.display_name, fill=COLORS["text"], font=fonts["title"])
+    _fit_single_line(
+        draw,
+        case_ir.display_name,
+        (65, 48, 1205, 90),
+        fonts["title"],
+        COLORS["text"],
+    )
     draw.text((65, 96), case_ir.description or case_ir.name, fill=COLORS["muted"], font=fonts["body"])
     verdict = (solver or {}).get("verdict", "unchecked")
     badge = _solver_badge(solver)
@@ -210,9 +219,16 @@ def _draw_relations(
     boxes: dict[str, tuple[int, int, int, int]],
     columns: list[tuple[int, int]],
 ) -> None:
-    for routed in _route_relations(case_ir, boxes, columns):
-        color, accent = _relation_style(routed["kind"])
-        _draw_curve(draw, fonts, routed["points"], color, accent, routed["label"], routed["slot"])
+    routed_relations = _route_relations(case_ir, boxes, columns)
+    # Draw paths first so every chip remains legible above all relation lines.
+    for routed in routed_relations:
+        color, _accent = _relation_style(routed["kind"])
+        _draw_curve(draw, routed["points"], color)
+    for routed, center in _layout_relation_chips(
+        draw, fonts, routed_relations, boxes
+    ):
+        _color, accent = _relation_style(routed["kind"])
+        _chip(draw, fonts, center, routed["label"], accent)
 
 
 def _route_relations(
@@ -499,18 +515,108 @@ def _path_point_at_fraction(points: list[tuple[float, float]], fraction: float) 
 
 def _draw_curve(
     draw: ImageDraw.ImageDraw,
-    fonts: dict[str, ImageFont.FreeTypeFont],
     points: list[tuple[float, float]],
     color: tuple[int, int, int],
-    accent: tuple[int, int, int],
-    label: str,
-    slot: int,
 ) -> None:
     draw.line(points, fill=color, width=4, joint="curve")
     _arrowhead(draw, points[-2], points[-1], color, size=14)
-    chip_fraction = [0.5, 0.4, 0.6, 0.34, 0.66][slot % 5]
-    cx, cy = _path_point_at_fraction(points, chip_fraction)
-    _chip(draw, fonts, (cx, cy), label, accent)
+
+
+def _layout_relation_chips(
+    draw: ImageDraw.ImageDraw,
+    fonts: dict[str, ImageFont.FreeTypeFont],
+    routed_relations: list[dict[str, Any]],
+    event_boxes: dict[str, tuple[int, int, int, int]],
+) -> list[tuple[dict[str, Any], tuple[float, float]]]:
+    """Place relation labels without overlapping each other or event boxes."""
+    placements: list[tuple[dict[str, Any], tuple[float, float]]] = []
+    occupied: list[tuple[float, float, float, float]] = []
+    preferred = (0.65, 0.25, 0.75, 0.35, 0.58, 0.18, 0.82, 0.42)
+    fallback_fractions = (0.20, 0.80, 0.30, 0.70, 0.40, 0.60, 0.50)
+    normal_offsets = (0, 18, -18, 36, -36, 54, -54)
+
+    for routed in routed_relations:
+        slot = int(routed.get("slot", 0))
+        fractions = _unique_floats(
+            (preferred[slot % len(preferred)], *fallback_fractions)
+        )
+        chosen_center: tuple[float, float] | None = None
+        chosen_box: tuple[float, float, float, float] | None = None
+        for fraction in fractions:
+            point = _path_point_at_fraction(routed["points"], fraction)
+            normal = _path_normal_at_fraction(routed["points"], fraction)
+            for offset in normal_offsets:
+                center = (
+                    point[0] + normal[0] * offset,
+                    point[1] + normal[1] * offset,
+                )
+                box = _chip_bounds(draw, fonts, center, routed["label"])
+                if not _inside_relation_band(box):
+                    continue
+                if any(_boxes_intersect(box, other, margin=7) for other in occupied):
+                    continue
+                if any(
+                    _boxes_intersect(box, event_box, margin=5)
+                    for event_box in event_boxes.values()
+                ):
+                    continue
+                chosen_center = center
+                chosen_box = box
+                break
+            if chosen_center is not None:
+                break
+        if chosen_center is None or chosen_box is None:
+            # Dense or malformed diagrams still render deterministically. The
+            # preferred point is the least surprising last-resort placement.
+            chosen_center = _path_point_at_fraction(routed["points"], fractions[0])
+            chosen_box = _chip_bounds(draw, fonts, chosen_center, routed["label"])
+        placements.append((routed, chosen_center))
+        occupied.append(chosen_box)
+    return placements
+
+
+def _unique_floats(values: tuple[float, ...]) -> tuple[float, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+def _path_normal_at_fraction(
+    points: list[tuple[float, float]], fraction: float
+) -> tuple[float, float]:
+    before = _path_point_at_fraction(points, max(0.0, fraction - 0.015))
+    after = _path_point_at_fraction(points, min(1.0, fraction + 0.015))
+    dx = after[0] - before[0]
+    dy = after[1] - before[1]
+    length = math.hypot(dx, dy) or 1.0
+    return (-dy / length, dx / length)
+
+
+def _chip_bounds(
+    draw: ImageDraw.ImageDraw,
+    fonts: dict[str, ImageFont.FreeTypeFont],
+    center: tuple[float, float],
+    label: str,
+) -> tuple[float, float, float, float]:
+    tw, th = _text_size(draw, label, fonts["small_b"])
+    cx, cy = center
+    return (cx - tw / 2 - 9, cy - th / 2 - 5, cx + tw / 2 + 9, cy + th / 2 + 5)
+
+
+def _inside_relation_band(box: tuple[float, float, float, float]) -> bool:
+    return box[0] >= 45 and box[2] <= WIDTH - 45 and box[1] >= 140 and box[3] <= 758
+
+
+def _boxes_intersect(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    *,
+    margin: float = 0,
+) -> bool:
+    return not (
+        first[2] + margin <= second[0]
+        or second[2] + margin <= first[0]
+        or first[3] + margin <= second[1]
+        or second[3] + margin <= first[1]
+    )
 
 
 def _chip(
@@ -521,10 +627,9 @@ def _chip(
     accent: tuple[int, int, int],
 ) -> None:
     font = fonts["small_b"]
-    tw, th = _text_size(draw, label, font)
-    pad_x, pad_y = 9, 5
     cx, cy = center
-    box = (cx - tw / 2 - pad_x, cy - th / 2 - pad_y, cx + tw / 2 + pad_x, cy + th / 2 + pad_y)
+    tw, th = _text_size(draw, label, font)
+    box = _chip_bounds(draw, fonts, center, label)
     draw.rounded_rectangle(box, radius=7, fill=COLORS["panel"], outline=accent, width=2)
     draw.text((cx - tw / 2, cy - th / 2 - 1), label, fill=accent, font=font)
 
@@ -553,6 +658,33 @@ def _fit_text(draw: ImageDraw.ImageDraw, text: str, box: tuple[int, int, int, in
     for line in lines[:2]:
         draw.text((box[0], y), line, fill=fill, font=font)
         y += 18
+
+
+def _fit_single_line(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    box: tuple[int, int, int, int],
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int],
+) -> None:
+    max_width = box[2] - box[0]
+    fitted = font
+    size = int(getattr(font, "size", 34))
+    while size > 14 and _text_size(draw, text, fitted)[0] > max_width:
+        size -= 1
+        fitted = font.font_variant(size=size)
+    rendered = text
+    if _text_size(draw, rendered, fitted)[0] > max_width:
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = text[:middle] + "..."
+            if _text_size(draw, candidate, fitted)[0] <= max_width:
+                low = middle
+            else:
+                high = middle - 1
+        rendered = text[:low] + "..."
+    draw.text((box[0], box[1]), rendered, fill=fill, font=fitted)
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:

@@ -181,9 +181,21 @@ def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> N
 
 
 def test_preview_payload_includes_litmus_and_analysis() -> None:
-    preview = preview_payload({"mode": "profile", "profile": "smoke", "sample_limit": 4})
+    preview = preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_templates",
+            "skeletons": ["MP"],
+            "mechanisms": ["po"],
+            "annotations": ["P"],
+            "include_same": False,
+            "sample_limit": 4,
+            "judge": True,
+            "solver_backend": "embedded",
+        }
+    )
     generated = [item for item in preview["sample"] if item.get("litmus")]
-    assert len(generated) > 4
+    assert len(generated) == 1
     first = generated[0]
     assert first["litmus"].startswith("RISCV ")
     assert first["case_ir"]["relations"]
@@ -213,40 +225,21 @@ def test_preview_payload_does_not_eagerly_call_diagram_renderer(monkeypatch) -> 
         raise AssertionError("preview must not render PNG diagrams")
 
     monkeypatch.setattr(workflow, "render_diagram", fail_if_called)
-    preview = workflow.preview_payload({"mode": "profile", "profile": "smoke", "sample_limit": 1})
+    preview = workflow.preview_payload(
+        {
+            "mode": "scalar",
+            "engine": "native_templates",
+            "skeletons": ["MP"],
+            "mechanisms": ["po"],
+            "annotations": ["P"],
+            "include_same": False,
+            "sample_limit": 1,
+            "judge": False,
+        }
+    )
     generated = [item for item in preview["sample"] if item.get("litmus")]
     assert generated
     assert all(item["diagram"]["status"] in {"deferred", "ready"} for item in generated)
-
-
-def test_mp_cacheable_expands_to_corpus_family() -> None:
-    from litmus_link.corpus_riscv import corpus_available
-
-    sample_limit = 6
-    preview = preview_payload(
-        {
-            "mode": "rule",
-            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
-            "sample_limit": sample_limit,
-        }
-    )
-    assert preview["report"]["total_combinations"] == 1
-    generated = [item for item in preview["sample"] if item.get("litmus")]
-    if corpus_available():
-        # Real RVWMO corpus: MP+cacheable expands to its full tool-generated
-        # family (hundreds of tests), each judged per-outcome by herd7 -- not
-        # the old fake 6-variant sweep.
-        assert preview["report"]["generated_litmus"] > 500
-        assert len(generated) == sample_limit
-        assert all(item["litmus"].startswith("RISCV ") for item in generated)
-        assert all(item["solver"]["model"] == "rvwmo-herd7" for item in generated)
-    else:
-        # Fallback when the corpus/tools are absent: the in-process scalar
-        # variant sweep still expands one combination into >= 6 variants.
-        assert preview["report"]["generated_litmus"] >= 6
-        assert len(generated) >= 6
-        variants = {item["case_ir"]["variant"] for item in generated}
-        assert {"base", "fence_rw_rw", "addr_dep"}.issubset(variants)
 
 
 def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:

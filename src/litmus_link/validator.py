@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import List
 
@@ -73,6 +75,14 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
         )
     if litmus_path.stem != str(meta.get("name", "")):
         errors.append(f"{litmus_path}: filename does not match metadata name")
+    if meta.get("file_name") and meta.get("file_name") != litmus_path.name:
+        errors.append(f"{litmus_path}: metadata file_name does not match actual filename")
+    if case_ir and case_ir.get("name") != meta.get("name"):
+        errors.append(f"{meta_path}: case IR name does not match metadata name")
+    if case_ir and meta.get("display_name") != case_ir.get("display_name"):
+        errors.append(f"{meta_path}: display_name does not match case IR")
+    if case_ir.get("variant") == "vector-native-cycle":
+        errors.extend(_validate_vector_file_identity(litmus_path, meta_path, case_ir))
     if meta.get("legality_status") != GENERATED:
         errors.append(f"{meta_path}: generated corpus contains non-generated status")
     if decision.status != GENERATED:
@@ -80,6 +90,46 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     for key in ["axes", "requires", "rvwmo_class", "expected_kind", "generated_from"]:
         if key not in meta:
             errors.append(f"{meta_path}: missing key {key}")
+    return errors
+
+
+def _validate_vector_file_identity(
+    litmus_path: Path,
+    meta_path: Path,
+    case_ir: dict,
+) -> List[str]:
+    errors: List[str] = []
+    name = str(case_ir.get("name", ""))
+    if not re.fullmatch(r"LLV-[A-Za-z0-9_.-]+-[0-9a-f]{64}", name):
+        errors.append(f"{meta_path}: invalid Vector LLV file identity {name!r}")
+        return errors
+    metadata = case_ir.get("metadata")
+    identity = metadata.get("file_identity") if isinstance(metadata, dict) else None
+    canonical = identity.get("canonical") if isinstance(identity, dict) else None
+    if not isinstance(canonical, dict):
+        errors.append(f"{meta_path}: missing canonical Vector file identity")
+        return errors
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    family = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        ".",
+        str(canonical.get("family", "Cycle")),
+    ).strip("._-") or "x"
+    expected_name = f"LLV-{family}-{digest}"
+    if name != expected_name:
+        errors.append(
+            f"{meta_path}: Vector file identity hash does not match canonical case"
+        )
+    if identity.get("sha256") != digest:
+        errors.append(f"{meta_path}: Vector file identity sha256 is inconsistent")
+    if identity.get("file_name") != litmus_path.name:
+        errors.append(f"{meta_path}: Vector file identity names the wrong file")
     return errors
 
 

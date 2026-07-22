@@ -42,7 +42,7 @@ The code is compatible with Python 3.10 for local bring-up. Python 3.11+ is reco
 - `litmus-link audit --profile <name>` or `litmus-link audit --rule-file <json>` expands the domain without writing tests and reports generated, excluded, HAND-required, and missing combinations.
 - `litmus-link audit --summary-only` skips large detail JSON files and writes only `audit-report.json` plus coverage markdown.
 - `litmus-link list profiles|axes|rules|features|hand` prints available profiles, generation axes, legality rules, feature descriptions, or HAND categories.
-- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Preview and corpus generation defer PNG rendering until a case is opened; solver checks can be deferred separately for large corpus dumps.
+- `litmus-link qt-gui` starts an optional PyQt/PySide desktop UI when a Qt binding is installed. Its two workflows are `Scalar Litmus` and `Vector Litmus`; preview and generation defer PNG rendering until a case is opened.
 - `litmus-link import-upstream --src <repo> --kind riscv|ifetch|aarch64-vmsa --out <dir>` writes a compact index of upstream tests without copying the corpus.
 - `litmus-link native templates` exhausts the configured variants of named scalar skeletons without invoking diy7/diycross7 or reading an existing corpus.
 - `litmus-link native enumerate` enumerates every canonical cycle in a user-bounded native relation grammar.
@@ -201,7 +201,7 @@ litmus-link qt-gui --check
 
 The Qt window opens on the machine where the command runs. On a server, use X forwarding or a remote desktop session. The GUI does not open a network socket.
 
-The Qt window opens on `Scalar Litmus`, backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. The `Vector Litmus` page uses the same relation-cycle engine: every cycle endpoint independently selects scalar `P`, scalar `AMO/Aq/Rl/AR`, or a compatible RVV load/store. `Random preview cases` is a reproducible, coverage-stratified sample from the full finite domain, keyed by `Random seed`; it is not the first N Cartesian-product rows. The complete domain is counted and audited, but its potentially astronomical corpus is never generated accidentally: `Generate Files` writes the configured random sample. The browser uses a virtual table model, supports text/family/status/verdict filters, and does not allocate widgets or PNG images per case. `Preview Cases` is the fast unchecked path; `Verify Preview` runs the embedded model where it is applicable. Actions run in the background and update determinate progress whenever the generator has a finite work count.
+The Qt application intentionally contains only two configuration pages: `Scalar Litmus` and `Vector Litmus`. `Scalar Litmus` is backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. `Vector Litmus` uses the same relation-cycle engine: every cycle endpoint independently selects scalar `P`, scalar `AMO/Aq/Rl/AR`, or a compatible RVV load/store. `Random preview cases` is a reproducible sample from the full finite domain, keyed by `Random seed`; it is not the first N Cartesian-product rows. `Balanced skeleton coverage` assigns near-equal quotas to selected skeleton families before covering endpoint, Vector-form, alignment, and relation-mechanism strata. `Domain-weighted random` instead preserves the natural cardinality of the complete case space. Generation independently offers balanced sampling, domain-weighted sampling, or `All legal combinations`. Exhaustive mode streams every legal assignment under the current filters, ignores the sampled-generation limit, and requires an explicit warning confirmation because a broad configuration can contain an astronomical number of files. The browser uses a virtual table model, supports text/family/status/verdict filters, and does not allocate widgets or PNG images per case. `Preview Cases` is the fast unchecked path; `Verify Preview` runs the embedded model where it is applicable. Double-clicking a case renders its PNG on demand and scales the complete diagram to the detail window. Actions run in the background and update determinate progress whenever the generator has a finite work count.
 
 ## Naming
 
@@ -209,15 +209,18 @@ Generated names follow the upstream litmus convention of putting the relation
 family first and appending semantic modifiers with `+`. Scalar examples are
 `MP`, `MP+addr`, and `MP+fence.rw.rw`. Native relation names retain edge
 direction where it is needed to distinguish thread roles, for example
-`MP+po.RR+po.WW`. Relation-cycle Vector names decorate every cycle edge with
-the ISA form of its source and target endpoint, so instruction placement and
-dependency/fence topology remain visible. For example,
-`LB+DpAddrdWVle32M1VL1Vse32M1VL1+RfeVse32M1VL1AR+PodRWARVle32M1VL1+RfeVle32M1VL1Vle32M1VL1`
-contains an address-dependency edge, an `AR` scalar AMO, and three Vector
-endpoints in one relation ring. Vector misalignment is encoded directly on the
-endpoint: `U16`, `X16`, and `X64` mean unaligned within 16 B, crossing 16 B,
-and crossing 64 B respectively. Existing one-endpoint `vector_mem` profile
-names are retained only for compatibility with older rule files.
+`MP+po.RR+po.WW`. Relation-cycle Vector cases separate their human-readable
+name from their file identity. The display form is
+`Family+{relation>ring}+V{event:instruction,...}`; for example,
+`MP+{PodWW>Rfe>PodRR>Fre}+V{E0:VSE16,E3:VLOXEI32/E16}`. Cycle labels therefore
+remain short relation tokens, while the event map shows exactly which cycle
+vertices use Vector memory instructions. Vector misalignment appends `U16`,
+`X16`, or `X64` to the affected event. Files use
+`LLV-<family>-<full SHA-256>.litmus`; the digest covers the canonical cycle,
+every endpoint choice, all Vector parameters, and alignment. Metadata retains
+both identities and generation aborts rather than allowing two canonical cases
+to overwrite the same file. Existing one-endpoint `vector_mem` profile names
+are retained only for compatibility with older rule files.
 
 Default generation axes such as `cacheable`, `no_tlb`, and `no_cmo` are not
 part of a case name. Non-default architectural features such as `PBMT.NC`,

@@ -119,12 +119,26 @@ class GeneratedCase:
     def name(self) -> str:
         return self.case_ir.name if self.case_ir is not None else self.combination.name
 
+    @property
+    def display_name(self) -> str:
+        return (
+            self.case_ir.display_name
+            if self.case_ir is not None
+            else self.combination.name
+        )
+
+    @property
+    def file_name(self) -> str:
+        return f"{self.name}.litmus"
+
     def meta(self) -> Dict[str, Any]:
         from .descriptions import describe_combination
 
         meta = {
             "schema": "litmus-link.meta.v1",
             "name": self.name,
+            "display_name": self.display_name,
+            "file_name": self.file_name,
             "combination": self.combination.to_json(),
             "axes": self.combination.axes(),
             "test_description": describe_combination(self.combination),

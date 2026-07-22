@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -86,6 +87,7 @@ def _make_worker_class(QtCore: Any) -> Any:
             self.request_count = 0
             self._last_percent = -1
             self._last_message = ""
+            self._last_progress_emit = 0.0
 
         def _stage(self, message: str) -> None:
             self.progress.emit({"current": 0, "total": 0, "message": message})
@@ -94,12 +96,17 @@ def _make_worker_class(QtCore: Any) -> Any:
             current = max(int(current), 0)
             total = max(int(total), 0)
             percent = min(100, int(current * 100 / total)) if total else -1
-            if total and percent == self._last_percent and message == self._last_message and current < total:
-                return
-            if total and percent == self._last_percent and current < total:
+            now = time.monotonic()
+            if (
+                total
+                and percent == self._last_percent
+                and current < total
+                and now - self._last_progress_emit < 0.5
+            ):
                 return
             self._last_percent = percent
             self._last_message = message
+            self._last_progress_emit = now
             self.progress.emit({"current": current, "total": total, "message": message})
 
         @_slot(QtCore, str, str, object)
@@ -108,6 +115,7 @@ def _make_worker_class(QtCore: Any) -> Any:
                 self.request_count += 1
                 self._last_percent = -1
                 self._last_message = ""
+                self._last_progress_emit = 0.0
                 self.started.emit(label)
                 self._stage("Preparing request payload")
                 if action == "preview":
@@ -163,7 +171,7 @@ def _make_preview_model_class(QtCore: Any, QtGui: Any) -> Any:
     dictionaries as the source of truth and formats only rows Qt asks to draw.
     """
     class PreviewCaseModel(QtCore.QAbstractTableModel):
-        HEADERS = ["#", "Status", "Family", "Verdict", "Case"]
+        HEADERS = ["#", "Status", "Family", "Verdict", "File name", "Case"]
 
         def __init__(self) -> None:
             super().__init__()
@@ -196,7 +204,11 @@ def _make_preview_model_class(QtCore: Any, QtGui: Any) -> Any:
             if role == _display_role(QtCore):
                 return values[index.column()]
             if role == _tooltip_role(QtCore):
-                return values[5] or values[4]
+                if index.column() == 4:
+                    return str(item.get("file_name") or "No generated file")
+                if index.column() == 5:
+                    return f"{values[5]}\nCycle: {values[6]}"
+                return values[6] or values[5]
             if role == _foreground_role(QtCore) and index.column() == 1:
                 status = str((item.get("decision") or {}).get("status", ""))
                 return QtGui.QColor(_status_color(status))
@@ -285,19 +297,102 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
     return UiReceiver
 
 
-class _LitmusLinkQtWindow:
-    PRIMARY_AXES = ["skeleton", "attribute", "vector", "cmo", "tlb"]
-    NONE_VALUES = {"vector": "none", "cmo": "no_cmo", "tlb": "no_tlb"}
-    PARAM_AXES = ["sew", "lmul", "index_eew", "mask", "tail", "footprint", "vl", "sync", "vm", "shootdown", "pte", "alias", "dep", "width", "outcome", "stress"]
-    PARAM_GROUPS = {
-        "Vector": ["sew", "lmul", "index_eew", "mask", "tail", "vl"],
-        "Memory Footprint": ["footprint", "alias"],
-        "CMO Sync": ["sync"],
-        "Virtual Memory": ["vm", "shootdown", "pte"],
-        "RVWMO Shape": ["dep", "width", "outcome"],
-        "Stress": ["stress"],
-    }
+def _make_responsive_flow_panel_class(QtWidgets: Any, QtCore: Any) -> Any:
+    class ResponsiveFlowPanel(QtWidgets.QFrame):
+        """Switch between a horizontal workflow and a compact 2x2 layout."""
 
+        # The configuration/results splitter gives the window a relatively
+        # wide minimum size.  Switch before the four cards start compressing,
+        # based on the flow panel's own width rather than an idealized phone
+        # viewport.
+        BREAKPOINT = 1280
+
+        def __init__(self, step_factory: Any, arrow_factory: Any) -> None:
+            super().__init__()
+            self.setObjectName("FlowPanel")
+            self.layout_mode = "wide"
+            self.stack = QtWidgets.QStackedLayout(self)
+            self.stack.setContentsMargins(0, 0, 0, 0)
+            self.wide_page, self.wide_cards = self._build_wide_page(
+                step_factory, arrow_factory
+            )
+            self.compact_page, self.compact_cards = self._build_compact_page(
+                step_factory, arrow_factory
+            )
+            self.stack.addWidget(self.wide_page)
+            self.stack.addWidget(self.compact_page)
+            self._set_compact(False)
+
+        def _build_wide_page(self, step_factory: Any, arrow_factory: Any) -> tuple[Any, list[Any]]:
+            page = QtWidgets.QWidget()
+            layout = QtWidgets.QHBoxLayout(page)
+            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setSpacing(6)
+            cards: list[Any] = []
+            for index, (number, title) in enumerate(_FLOW_STEPS):
+                card = step_factory(number, title)
+                cards.append(card)
+                layout.addWidget(card, 1)
+                if index < len(_FLOW_STEPS) - 1:
+                    layout.addWidget(arrow_factory("right"))
+            return page, cards
+
+        def _build_compact_page(self, step_factory: Any, arrow_factory: Any) -> tuple[Any, list[Any]]:
+            page = QtWidgets.QWidget()
+            layout = QtWidgets.QGridLayout(page)
+            layout.setContentsMargins(12, 10, 12, 10)
+            layout.setHorizontalSpacing(8)
+            layout.setVerticalSpacing(6)
+            cards = [step_factory(number, title) for number, title in _FLOW_STEPS]
+            layout.addWidget(cards[0], 0, 0)
+            layout.addWidget(arrow_factory("right"), 0, 1)
+            layout.addWidget(cards[1], 0, 2)
+            layout.addWidget(arrow_factory("down"), 1, 2)
+            layout.addWidget(cards[3], 2, 0)
+            layout.addWidget(arrow_factory("left"), 2, 1)
+            layout.addWidget(cards[2], 2, 2)
+            layout.setColumnStretch(0, 1)
+            layout.setColumnStretch(2, 1)
+            layout.setRowStretch(0, 1)
+            layout.setRowStretch(2, 1)
+            return page, cards
+
+        def resizeEvent(self, event: Any) -> None:
+            compact = event.size().width() < self.BREAKPOINT
+            self._set_compact(compact)
+            super().resizeEvent(event)
+
+        def _set_compact(self, compact: bool) -> None:
+            self.layout_mode = "compact" if compact else "wide"
+            self.stack.setCurrentIndex(1 if compact else 0)
+            self.setFixedHeight(158 if compact else 76)
+            self.updateGeometry()
+
+    return ResponsiveFlowPanel
+
+
+def _make_fit_scroll_area_class(QtWidgets: Any) -> Any:
+    class FitScrollArea(QtWidgets.QScrollArea):
+        def __init__(self, resize_callback: Any) -> None:
+            super().__init__()
+            self._resize_callback = resize_callback
+
+        def resizeEvent(self, event: Any) -> None:
+            super().resizeEvent(event)
+            self._resize_callback()
+
+    return FitScrollArea
+
+
+_FLOW_STEPS = (
+    ("1", "Select Scope"),
+    ("2", "Audit Rules"),
+    ("3", "Generate Litmus"),
+    ("4", "Inspect Output"),
+)
+
+
+class _LitmusLinkQtWindow:
     def __init__(self, QtWidgets: Any, QtCore: Any, QtGui: Any, binding: str) -> None:
         self.QtWidgets = QtWidgets
         self.QtCore = QtCore
@@ -306,8 +401,6 @@ class _LitmusLinkQtWindow:
         self.options = options_payload()
         self.window = QtWidgets.QWidget()
         self.window.setWindowTitle(f"Litmus-link Qt Generator ({binding})")
-        self.primary_checks: Dict[str, list[Any]] = {}
-        self.param_checks: Dict[str, list[Any]] = {}
         self.scalar_skeleton_checks: list[Any] = []
         self.scalar_mechanism_checks: list[Any] = []
         self.scalar_annotation_checks: list[Any] = []
@@ -318,8 +411,6 @@ class _LitmusLinkQtWindow:
         self.vector_checks: Dict[str, list[Any]] = {}
         self.vector_filter_groups: list[Any] = []
         self.action_buttons: list[Any] = []
-        self.axis_group_widgets: Dict[str, Any] = {}
-        self.param_group_widgets: Dict[str, Any] = {}
         self.preview_items: list[Dict[str, Any]] = []
         self.active_thread = None
         self.active_worker = None
@@ -328,7 +419,6 @@ class _LitmusLinkQtWindow:
         self.elapsed_timer.timeout.connect(self._update_elapsed)
         self.started_at = 0.0
         self.active_label = ""
-        self.suspend_rule_sync = False
         self.worker_class = _make_worker_class(QtCore)
         self.action_bus_class = _make_action_bus_class(QtCore)
         self.preview_model_class = _make_preview_model_class(QtCore, QtGui)
@@ -371,13 +461,12 @@ class _LitmusLinkQtWindow:
         splitter.addWidget(self._build_config_panel())
         splitter.addWidget(self._build_result_panel())
         splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 5)
-        splitter.setSizes([560, 820])
+        splitter.setStretchFactor(1, 6)
+        splitter.setSizes([620, 780])
         root.addWidget(splitter, 1)
 
         root.addLayout(self._build_action_bar())
         root.addWidget(self._build_status_bar())
-        self._sync_rule_preview()
         self._update_output_hint()
 
     def _build_header(self) -> Any:
@@ -389,7 +478,7 @@ class _LitmusLinkQtWindow:
         title = QtWidgets.QLabel("Litmus-link Qt Generator")
         title.setObjectName("Title")
         subtitle = QtWidgets.QLabel(
-            "Exhaustively generate scalar RVWMO cycles with Litmus-link's native engine, then configure Vector, CMO, PBMT/NC, and TLB extensions."
+            "Generate scalar RVWMO relation cycles or Vector-memory variants, verify outcomes, and inspect each case on demand."
         )
         subtitle.setObjectName("Subtitle")
         layout.addWidget(title)
@@ -397,27 +486,23 @@ class _LitmusLinkQtWindow:
         return header
 
     def _build_flow_panel(self) -> Any:
-        QtWidgets = self.QtWidgets
-        frame = QtWidgets.QFrame()
-        frame.setObjectName("FlowPanel")
-        layout = QtWidgets.QHBoxLayout(frame)
-        layout.setContentsMargins(12, 10, 12, 10)
-        steps = [
-            ("1", "Select Scope"),
-            ("2", "Audit Rules"),
-            ("3", "Generate Litmus"),
-            ("4", "Inspect Output"),
-        ]
-        for index, (number, title) in enumerate(steps):
-            layout.addWidget(self._flow_step(number, title), 1)
-            if index < len(steps) - 1:
-                arrow = QtWidgets.QLabel()
-                arrow.setObjectName("FlowArrow")
-                arrow.setAlignment(_align_center(self.QtCore))
-                arrow.setPixmap(_standard_arrow_icon(QtWidgets, self.window).pixmap(22, 22))
-                arrow.setFixedWidth(30)
-                layout.addWidget(arrow)
-        return frame
+        panel_class = _make_responsive_flow_panel_class(
+            self.QtWidgets, self.QtCore
+        )
+        self.flow_panel = panel_class(self._flow_step, self._flow_arrow)
+        return self.flow_panel
+
+    def _flow_arrow(self, direction: str) -> Any:
+        arrow = self.QtWidgets.QLabel()
+        arrow.setObjectName("FlowArrow")
+        arrow.setAlignment(_align_center(self.QtCore))
+        arrow.setPixmap(
+            _standard_arrow_icon(
+                self.QtWidgets, self.window, direction
+            ).pixmap(20, 20)
+        )
+        arrow.setFixedSize(28, 28)
+        return arrow
 
     def _flow_step(self, number: str, title: str) -> Any:
         QtWidgets = self.QtWidgets
@@ -441,7 +526,7 @@ class _LitmusLinkQtWindow:
         QtWidgets = self.QtWidgets
         panel = QtWidgets.QFrame()
         panel.setObjectName("Panel")
-        panel.setMaximumWidth(820)
+        panel.setMaximumWidth(680)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
@@ -453,24 +538,24 @@ class _LitmusLinkQtWindow:
         self.mode_tabs = QtWidgets.QTabWidget()
         self.scalar_tab = self._build_scalar_tab()
         self.vector_tab = self._build_vector_tab()
-        self.profile_tab = self._build_profile_tab()
-        self.custom_tab = self._build_custom_tab()
         self.mode_tabs.addTab(self.scalar_tab, "Scalar Litmus")
         self.mode_tabs.addTab(self.vector_tab, "Vector Litmus")
-        self.mode_tabs.addTab(self.profile_tab, "Profile Mode")
-        self.mode_tabs.addTab(self.custom_tab, "Custom Rule Mode")
         self.mode_tabs.currentChanged.connect(lambda _index: self._update_output_hint())
         layout.addWidget(self.mode_tabs, 1)
         return panel
 
     def _build_scalar_tab(self) -> Any:
         QtWidgets = self.QtWidgets
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
+        tab = QtWidgets.QScrollArea()
+        tab.setObjectName("ScalarConfigScroll")
+        tab.setWidgetResizable(True)
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(8, 12, 8, 8)
         layout.setSpacing(10)
 
         form = QtWidgets.QFormLayout()
+        _configure_responsive_form(form, QtWidgets)
         self.scalar_engine = QtWidgets.QComboBox()
         self.scalar_engine.addItem("Litmus-link native - exhaustive named families", "native_templates")
         self.scalar_engine.addItem("Litmus-link native - enumerate all relation cycles", "native_cycles")
@@ -485,27 +570,22 @@ class _LitmusLinkQtWindow:
         self.scalar_all_cases.setChecked(True)
         self.scalar_all_cases.toggled.connect(lambda checked: self.scalar_limit.setEnabled(not checked))
         self.scalar_limit.setEnabled(False)
-        generation_scope = QtWidgets.QHBoxLayout()
-        generation_scope.addWidget(self.scalar_all_cases)
-        generation_scope.addWidget(QtWidgets.QLabel("Otherwise cap files at"))
-        generation_scope.addWidget(self.scalar_limit)
         self.scalar_preview_limit = QtWidgets.QSpinBox()
         self.scalar_preview_limit.setRange(1, 250000)
         self.scalar_preview_limit.setValue(2000)
-        verification_row = QtWidgets.QHBoxLayout()
         self.scalar_judge = QtWidgets.QCheckBox("Verify generated outcomes")
         self.scalar_judge.setChecked(True)
         self.scalar_solver_backend = QtWidgets.QComboBox()
         self.scalar_solver_backend.addItem("Embedded RVWMO (offline)", "embedded")
         self.scalar_solver_backend.addItem("External herd7 + riscv.cat", "herd7")
         self.scalar_solver_backend.addItem("Cross-check embedded and herd7", "crosscheck")
-        verification_row.addWidget(self.scalar_judge)
-        verification_row.addWidget(self.scalar_solver_backend, 1)
         form.addRow("Generation engine", self.scalar_engine)
         form.addRow("Output directory", self.scalar_out)
-        form.addRow("Generation scope", generation_scope)
+        form.addRow("Generation scope", self.scalar_all_cases)
+        form.addRow("File cap", self.scalar_limit)
         form.addRow("Maximum preview rows", self.scalar_preview_limit)
-        form.addRow("Outcome verification", verification_row)
+        form.addRow("Outcome verification", self.scalar_judge)
+        form.addRow("Solver backend", self.scalar_solver_backend)
         layout.addLayout(form)
 
         self.scalar_cross_group = QtWidgets.QGroupBox("Native relation domain")
@@ -564,24 +644,24 @@ class _LitmusLinkQtWindow:
         self.scalar_memory_group.setObjectName("AxisGroup")
         self.scalar_memory_group.setProperty("axis_role", "parameter")
         memory_layout = QtWidgets.QFormLayout(self.scalar_memory_group)
+        _configure_responsive_form(memory_layout, QtWidgets)
         self.scalar_memory_enable = QtWidgets.QCheckBox("Enable extended scalar layouts")
         self.scalar_memory_enable.toggled.connect(self._update_scalar_memory_layout)
         self.scalar_memory_include_aligned = QtWidgets.QCheckBox("Include aligned baseline")
         self.scalar_memory_include_aligned.setChecked(True)
 
-        mode_row = QtWidgets.QHBoxLayout()
-        for label, value in (
+        mode_grid = QtWidgets.QGridLayout()
+        for index, (label, value) in enumerate((
             ("Misaligned", "misaligned"),
             ("Mixed-size misaligned", "mixed"),
             ("Fixed-width atomic", "atomic"),
             ("Mixed-size aligned atomic", "atomic_mixed"),
-        ):
+        )):
             check = QtWidgets.QCheckBox(label)
             check.setProperty("axis_value", value)
             check.setChecked(value in {"misaligned", "mixed"})
             self.scalar_memory_mode_checks.append(check)
-            mode_row.addWidget(check)
-        mode_row.addStretch(1)
+            mode_grid.addWidget(check, index // 2, index % 2)
 
         width_row = QtWidgets.QHBoxLayout()
         for width in self.options["native_scalar"]["memory_layout"]["width_bits"]:
@@ -617,6 +697,7 @@ class _LitmusLinkQtWindow:
 
         atomicity = QtWidgets.QLabel("misaligned: byte_level_no_mag; atomic: aligned / mixed-size atomic")
         atomicity.setObjectName("OutputHint")
+        atomicity.setWordWrap(True)
         for control in (
             self.scalar_memory_include_aligned,
             *self.scalar_memory_mode_checks,
@@ -631,7 +712,7 @@ class _LitmusLinkQtWindow:
             )
         memory_layout.addRow("Mode", self.scalar_memory_enable)
         memory_layout.addRow("Corpus", self.scalar_memory_include_aligned)
-        memory_layout.addRow("Layouts", mode_row)
+        memory_layout.addRow("Layouts", mode_grid)
         memory_layout.addRow("Widths", width_row)
         memory_layout.addRow("Boundaries", boundary_row)
         memory_layout.addRow("Atomic overlap", atomic_overlap_row)
@@ -729,6 +810,7 @@ class _LitmusLinkQtWindow:
         layout.addStretch(1)
         self._update_scalar_memory_layout(False)
         self._update_scalar_engine()
+        tab.setWidget(content)
         return tab
 
     def _update_scalar_memory_layout(self, enabled: bool) -> None:
@@ -799,16 +881,26 @@ class _LitmusLinkQtWindow:
         self.vector_preview_limit = QtWidgets.QSpinBox()
         self.vector_preview_limit.setRange(1, 100000)
         self.vector_preview_limit.setValue(1000)
+        self.vector_preview_sampling = QtWidgets.QComboBox()
+        self.vector_preview_sampling.addItem("Balanced skeleton coverage", "balanced")
+        self.vector_preview_sampling.addItem("Domain-weighted random", "domain_weighted")
         self.vector_random_seed = QtWidgets.QSpinBox()
         self.vector_random_seed.setRange(0, 2_147_483_647)
         self.vector_random_seed.setValue(1)
+        self.vector_generation_mode = QtWidgets.QComboBox()
+        self.vector_generation_mode.setObjectName("VectorGenerationMode")
+        self.vector_generation_mode.addItem("Balanced coverage sample", "balanced")
+        self.vector_generation_mode.addItem("Domain-weighted sample", "domain_weighted")
+        self.vector_generation_mode.addItem("All legal combinations", "all")
         self.vector_generate_limit = QtWidgets.QSpinBox()
         self.vector_generate_limit.setRange(1, 1_000_000)
         self.vector_generate_limit.setValue(10_000)
         form.addRow("Generation scope", self.vector_complete)
         form.addRow("Output directory", self.vector_out)
         form.addRow("Random preview cases", self.vector_preview_limit)
+        form.addRow("Preview distribution", self.vector_preview_sampling)
         form.addRow("Random seed", self.vector_random_seed)
+        form.addRow("Generation mode", self.vector_generation_mode)
         form.addRow("Maximum generated cases", self.vector_generate_limit)
         layout.addLayout(form)
 
@@ -843,7 +935,11 @@ class _LitmusLinkQtWindow:
         layout.addWidget(scroll, 1)
 
         self.vector_complete.toggled.connect(self._update_vector_scope)
+        self.vector_generation_mode.currentIndexChanged.connect(
+            lambda _index: self._update_vector_generation_mode()
+        )
         self._update_vector_scope(True)
+        self._update_vector_generation_mode()
         return tab
 
     def _build_vector_choice_group(
@@ -875,191 +971,13 @@ class _LitmusLinkQtWindow:
             group.setProperty("group_state", "inactive" if complete else "active")
             self._refresh_widget_style(group)
 
-    def _build_profile_tab(self) -> Any:
-        QtWidgets = self.QtWidgets
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(10)
-
-        form = QtWidgets.QFormLayout()
-        self.profile_combo = QtWidgets.QComboBox()
-        for name, description in self.options["profiles"].items():
-            self.profile_combo.addItem(f"{name} - {description}", name)
-        self.profile_combo.currentIndexChanged.connect(lambda _index: self._update_output_hint())
-        self.profile_out = QtWidgets.QLineEdit("out/qt-profile")
-        self.profile_out.textChanged.connect(lambda _text: self._update_output_hint())
-        self.profile_preview_limit = QtWidgets.QSpinBox()
-        self.profile_preview_limit.setRange(1, 250000)
-        self.profile_preview_limit.setValue(2000)
-        form.addRow("Profile", self.profile_combo)
-        form.addRow("Output directory", self.profile_out)
-        form.addRow("Maximum preview rows", self.profile_preview_limit)
-        layout.addLayout(form)
-        layout.addStretch(1)
-        return tab
-
-    def _build_custom_tab(self) -> Any:
-        QtWidgets = self.QtWidgets
-        tab = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(tab)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(10)
-
-        form = QtWidgets.QFormLayout()
-        self.rule_name = QtWidgets.QLineEdit("qt-custom")
-        self.rule_limit = QtWidgets.QLineEdit("10000")
-        self.rule_out = QtWidgets.QLineEdit("out/qt-custom")
-        self.custom_preview_limit = QtWidgets.QSpinBox()
-        self.custom_preview_limit.setRange(1, 250000)
-        self.custom_preview_limit.setValue(2000)
-        for line in [self.rule_name, self.rule_limit, self.rule_out]:
-            line.textChanged.connect(lambda _text: self._sync_rule_preview())
-        self.rule_out.textChanged.connect(lambda _text: self._update_output_hint())
-        form.addRow("Rule name", self.rule_name)
-        form.addRow("Combination limit", self.rule_limit)
-        form.addRow("Output directory", self.rule_out)
-        form.addRow("Maximum preview rows", self.custom_preview_limit)
-        layout.addLayout(form)
-
-        self.axis_tabs = QtWidgets.QTabWidget()
-        self.axis_tabs.setObjectName("AxisTabs")
-        self.axis_tabs.addTab(self._build_axis_page(self.PRIMARY_AXES, self.options["axes"], checked_first=True), "Core Axes")
-        for group_name, axes in self.PARAM_GROUPS.items():
-            self.axis_tabs.addTab(self._build_parameter_page(group_name, axes), _parameter_tab_title(group_name))
-        layout.addWidget(self.axis_tabs, 1)
-
-        advanced = QtWidgets.QGroupBox("Advanced rule preview")
-        advanced_layout = QtWidgets.QVBoxLayout(advanced)
-        advanced_layout.setContentsMargins(10, 10, 10, 10)
-        self.refresh_rule_button = QtWidgets.QPushButton("Refresh Rule Preview")
-        self.refresh_rule_button.clicked.connect(self._sync_rule_preview)
-        advanced_layout.addWidget(self.refresh_rule_button)
-        layout.addWidget(advanced)
-
-        return tab
-
-    def _build_parameter_page(self, group_name: str, axes: Iterable[str]) -> Any:
-        QtWidgets = self.QtWidgets
-        page = QtWidgets.QWidget()
-        page_layout = QtWidgets.QVBoxLayout(page)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QtWidgets.QWidget()
-        scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 8, 0)
-        scroll_layout.setSpacing(8)
-
-        if group_name == "Vector":
-            self.vector_matrix_button = QtWidgets.QPushButton("Use Complete Vector Profile")
-            self.vector_matrix_button.setObjectName("VectorMatrixButton")
-            self.vector_matrix_button.setToolTip(
-                "Switch to the relation-cycle Vector generator covering multi-endpoint scalar, AMO, and RVV configurations."
-            )
-            self.vector_matrix_button.clicked.connect(self._select_supported_vector_matrix)
-            scroll_layout.addWidget(self.vector_matrix_button)
-
-        group = QtWidgets.QGroupBox(group_name)
-        group.setObjectName("AxisGroup")
-        group.setProperty("axis_role", "parameter")
-        group.setProperty("group_state", "inactive")
-        group_layout = QtWidgets.QVBoxLayout(group)
-        group_layout.setContentsMargins(10, 8, 10, 10)
-        for axis in axes:
-            checks = self._add_check_group(group_layout, axis, PARAM_AXIS_VALUES.get(axis, []), checked_first=False, role="parameter")
-            self.param_checks[axis] = checks
-        self.param_group_widgets[group_name] = group
-        scroll_layout.addWidget(group)
-
-        scroll_layout.addStretch(1)
-        scroll.setWidget(scroll_content)
-        page_layout.addWidget(scroll)
-        return page
-
-    def _select_supported_vector_matrix(self) -> None:
-        """Open the dedicated Vector page with its complete legal domain."""
-        self.vector_complete.setChecked(True)
-        self.mode_tabs.setCurrentWidget(self.vector_tab)
-        self.status_label.setText(
-            "Complete relation-cycle Vector domain selected; Preview uses a reproducible random sample"
-        )
-
-    def _build_axis_page(self, axes: Iterable[str], values_by_axis: Dict[str, Iterable[str]], checked_first: bool) -> Any:
-        QtWidgets = self.QtWidgets
-        page = QtWidgets.QWidget()
-        page_layout = QtWidgets.QVBoxLayout(page)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QtWidgets.QWidget()
-        scroll_layout = QtWidgets.QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 8, 0)
-        scroll_layout.setSpacing(8)
-
-        for axis in axes:
-            checks = self._add_check_group(scroll_layout, axis, values_by_axis.get(axis, []), checked_first=checked_first, role="core")
-            if axis in self.PRIMARY_AXES:
-                self.primary_checks[axis] = checks
-            else:
-                self.param_checks[axis] = checks
-
-        scroll_layout.addStretch(1)
-        scroll.setWidget(scroll_content)
-        page_layout.addWidget(scroll)
-        return page
-
-    def _add_check_group(self, layout: Any, title: str, values: Iterable[str], checked_first: bool, role: str) -> list[Any]:
-        QtWidgets = self.QtWidgets
-        group = QtWidgets.QGroupBox(title)
-        group.setObjectName("AxisGroup")
-        group.setProperty("axis_role", role)
-        group.setProperty("group_state", "base")
-        group.setCheckable(False)
-        self.axis_group_widgets[title] = group
-        grid = QtWidgets.QGridLayout(group)
-        grid.setContentsMargins(10, 8, 10, 10)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(6)
-        checks = []
-        for index, value in enumerate(values):
-            check = QtWidgets.QCheckBox(str(value))
-            check.setProperty("axis_value", str(value))
-            if checked_first and index == 0:
-                check.setChecked(True)
-            check.stateChanged.connect(lambda _state, check=check, axis=title, self=self: self._handle_check_changed(axis, check))
-            grid.addWidget(check, index // 3, index % 3)
-            checks.append(check)
-        layout.addWidget(group)
-        return checks
-
-    def _handle_check_changed(self, axis: str, check: Any) -> None:
-        if self.suspend_rule_sync:
+    def _update_vector_generation_mode(self) -> None:
+        if not hasattr(self, "vector_generation_mode"):
             return
-        none_value = self.NONE_VALUES.get(axis)
-        if none_value is not None:
-            self.suspend_rule_sync = True
-            try:
-                checks = self.primary_checks.get(axis, [])
-                value = str(check.property("axis_value"))
-                if check.isChecked() and value == none_value:
-                    for other in checks:
-                        if other is not check:
-                            other.setChecked(False)
-                elif check.isChecked():
-                    for other in checks:
-                        if str(other.property("axis_value")) == none_value:
-                            other.setChecked(False)
-                elif not self._selected(checks):
-                    for other in checks:
-                        if str(other.property("axis_value")) == none_value:
-                            other.setChecked(True)
-                            break
-            finally:
-                self.suspend_rule_sync = False
-        self._sync_rule_preview()
+        exhaustive = str(self.vector_generation_mode.currentData()) == "all"
+        self.vector_generate_limit.setEnabled(not exhaustive)
+        self.vector_generation_mode.setProperty("exhaustive", exhaustive)
+        self._refresh_widget_style(self.vector_generation_mode)
 
     def _build_result_panel(self) -> Any:
         QtWidgets = self.QtWidgets
@@ -1076,7 +994,10 @@ class _LitmusLinkQtWindow:
         self.result_tabs = QtWidgets.QTabWidget()
         self.summary_view = QtWidgets.QPlainTextEdit()
         self.summary_view.setReadOnly(True)
-        self.summary_view.setPlainText("Choose scalar generation, a profile, or a custom rule, then run Preview Cases, Run Audit, or Generate Files.")
+        self.summary_view.setPlainText(
+            "Choose Scalar Litmus or Vector Litmus, then run Preview Cases, "
+            "Run Audit, or Generate Files."
+        )
         self.preview_page = QtWidgets.QWidget()
         preview_layout = QtWidgets.QVBoxLayout(self.preview_page)
         preview_layout.setContentsMargins(0, 0, 0, 0)
@@ -1084,8 +1005,12 @@ class _LitmusLinkQtWindow:
         self.preview_stats_label = QtWidgets.QLabel("Preview classification: no sample loaded")
         self.preview_stats_label.setObjectName("PreviewStatsLabel")
 
-        filter_bar = QtWidgets.QHBoxLayout()
-        filter_bar.setSpacing(8)
+        filter_bar = QtWidgets.QVBoxLayout()
+        filter_bar.setSpacing(6)
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.setSpacing(8)
+        choice_row = QtWidgets.QHBoxLayout()
+        choice_row.setSpacing(8)
         self.preview_search = QtWidgets.QLineEdit()
         self.preview_search.setObjectName("PreviewSearch")
         self.preview_search.setPlaceholderText("Search case, cycle, family, or verdict")
@@ -1101,12 +1026,15 @@ class _LitmusLinkQtWindow:
         self.preview_stats_toggle = QtWidgets.QPushButton("Statistics")
         self.preview_stats_toggle.setCheckable(True)
         self.preview_stats_toggle.setChecked(True)
-        filter_bar.addWidget(self.preview_search, 1)
-        filter_bar.addWidget(self.preview_skeleton_filter)
-        filter_bar.addWidget(self.preview_status_filter)
-        filter_bar.addWidget(self.preview_verdict_filter)
-        filter_bar.addWidget(self.preview_filter_count)
-        filter_bar.addWidget(self.preview_stats_toggle)
+        search_row.addWidget(self.preview_search, 1)
+        search_row.addWidget(self.preview_filter_count)
+        search_row.addWidget(self.preview_stats_toggle)
+        choice_row.addWidget(self.preview_skeleton_filter)
+        choice_row.addWidget(self.preview_status_filter)
+        choice_row.addWidget(self.preview_verdict_filter)
+        choice_row.addStretch(1)
+        filter_bar.addLayout(search_row)
+        filter_bar.addLayout(choice_row)
 
         browser = QtWidgets.QSplitter(_horizontal(self.QtCore))
         self.preview_stats_panel = QtWidgets.QWidget()
@@ -1142,7 +1070,7 @@ class _LitmusLinkQtWindow:
         browser.setCollapsible(0, True)
         browser.setStretchFactor(0, 1)
         browser.setStretchFactor(1, 4)
-        browser.setSizes([260, 760])
+        browser.setSizes([190, 700])
 
         self.preview_filter_timer = self.QtCore.QTimer(self.window)
         self.preview_filter_timer.setSingleShot(True)
@@ -1159,15 +1087,11 @@ class _LitmusLinkQtWindow:
         preview_layout.addWidget(browser, 1)
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.rule_json = QtWidgets.QPlainTextEdit()
-        self.rule_json.setMinimumHeight(160)
-        self.rule_json.textChanged.connect(self._mark_rule_manual_edit)
         self.raw_json = QtWidgets.QPlainTextEdit()
         self.raw_json.setReadOnly(True)
         self.result_tabs.addTab(self.summary_view, "Overview")
         self.result_tabs.addTab(self.preview_page, "Cases")
         self.result_tabs.addTab(self.log_view, "Log")
-        self.result_tabs.addTab(self.rule_json, "Rule JSON")
         self.result_tabs.addTab(self.raw_json, "Raw JSON")
         layout.addWidget(self.result_tabs, 1)
         return panel
@@ -1175,14 +1099,11 @@ class _LitmusLinkQtWindow:
     def _build_action_bar(self) -> Any:
         QtWidgets = self.QtWidgets
         controls = QtWidgets.QHBoxLayout()
-        self.summary_only = QtWidgets.QCheckBox("Summary-only audit")
-        self.summary_only.setChecked(True)
-        controls.addWidget(self.summary_only)
         self.defer_solver = QtWidgets.QCheckBox("Defer solver checks")
         self.defer_solver.setToolTip("Advanced: skip herd7 verdict calculation during large real-corpus generation.")
         self.defer_solver.setChecked(False)
         controls.addWidget(self.defer_solver)
-        self.output_hint = QtWidgets.QLabel("Output: out/qt-profile")
+        self.output_hint = QtWidgets.QLabel("Output: out/qt-scalar")
         self.output_hint.setObjectName("OutputHint")
         controls.addWidget(self.output_hint, 1)
         self.preview_button = QtWidgets.QPushButton("Preview Cases")
@@ -1218,78 +1139,6 @@ class _LitmusLinkQtWindow:
     def _selected(self, checks: Iterable[Any]) -> list[str]:
         return [str(check.property("axis_value")) for check in checks if check.isChecked()]
 
-    def _build_rule(self) -> Dict[str, Any]:
-        axes = {name: values for name, checks in self.primary_checks.items() if (values := self._selected(checks))}
-        param_axes = {name: values for name, checks in self.param_checks.items() if (values := self._selected(checks))}
-        try:
-            limit = int(self.rule_limit.text() or "10000")
-        except ValueError:
-            limit = 10000
-        return {"name": self.rule_name.text() or "qt-custom", "axes": axes, "param_axes": param_axes, "limit": limit}
-
-    def _sync_rule_preview(self) -> None:
-        if self.suspend_rule_sync or not hasattr(self, "rule_json"):
-            return
-        self.suspend_rule_sync = True
-        try:
-            self._apply_none_switches()
-            self.rule_json.setPlainText(json.dumps(self._build_rule(), indent=2, sort_keys=True))
-        finally:
-            self.suspend_rule_sync = False
-        self._update_output_hint()
-
-    def _apply_none_switches(self) -> None:
-        vector_enabled = bool(self._selected_non_none("vector", "none"))
-        cmo_enabled = bool(self._selected_non_none("cmo", "no_cmo"))
-        tlb_enabled = bool(self._selected_non_none("tlb", "no_tlb"))
-        memory_enabled = bool(self._selected_non_none("attribute", "cacheable")) or vector_enabled or cmo_enabled or tlb_enabled
-        self._set_core_axis_visual("vector", vector_enabled)
-        self._set_core_axis_visual("cmo", cmo_enabled)
-        self._set_core_axis_visual("tlb", tlb_enabled)
-        self._set_core_axis_visual("attribute", memory_enabled)
-        self._set_core_axis_visual("skeleton", True)
-        groups = {
-            "Vector": vector_enabled,
-            "Memory Footprint": memory_enabled,
-            "CMO Sync": cmo_enabled,
-            "Virtual Memory": tlb_enabled,
-            "RVWMO Shape": True,
-            "Stress": True,
-        }
-        for group_name, enabled in groups.items():
-            group = self.param_group_widgets.get(group_name)
-            if group is None:
-                continue
-            self._set_group_state(group, "active" if enabled else "inactive")
-            if not enabled:
-                for axis in self.PARAM_GROUPS[group_name]:
-                    for check in self.param_checks.get(axis, []):
-                        check.setChecked(False)
-                        check.setEnabled(False)
-            else:
-                for axis in self.PARAM_GROUPS[group_name]:
-                    for check in self.param_checks.get(axis, []):
-                        check.setEnabled(True)
-        self._refresh_choice_states()
-
-    def _selected_non_none(self, axis: str, none_value: str) -> list[str]:
-        return [value for value in self._selected(self.primary_checks.get(axis, [])) if value != none_value]
-
-    def _set_core_axis_visual(self, axis: str, enabled: bool) -> None:
-        group = self.axis_group_widgets.get(axis)
-        if group is not None:
-            self._set_group_state(group, "active" if enabled else "inactive")
-
-    def _refresh_choice_states(self) -> None:
-        for axis, checks in {**self.primary_checks, **self.param_checks}.items():
-            none_value = self.NONE_VALUES.get(axis)
-            for check in checks:
-                value = str(check.property("axis_value"))
-                selected_none = none_value is not None and value == none_value and check.isChecked()
-                state = "off" if selected_none else "on" if check.isChecked() else "base"
-                check.setProperty("choice_state", state)
-                self._refresh_widget_style(check)
-
     def _set_group_state(self, group: Any, state: str) -> None:
         group.setProperty("group_state", state)
         self._refresh_widget_style(group)
@@ -1298,10 +1147,6 @@ class _LitmusLinkQtWindow:
         widget.style().unpolish(widget)
         widget.style().polish(widget)
         widget.update()
-
-    def _mark_rule_manual_edit(self) -> None:
-        if not self.suspend_rule_sync:
-            self.status_label.setText("Rule JSON edited manually")
 
     def _payload(self) -> Dict[str, Any]:
         sample_limit = self._preview_sample_limit()
@@ -1316,7 +1161,6 @@ class _LitmusLinkQtWindow:
                 "sample_limit": sample_limit,
                 "judge": self.scalar_judge.isChecked(),
                 "solver_backend": str(self.scalar_solver_backend.currentData()),
-                "summary_only": self.summary_only.isChecked(),
             }
             payload["mechanisms"] = self._selected(self.scalar_mechanism_checks)
             payload["annotations"] = self._selected(self.scalar_annotation_checks)
@@ -1364,38 +1208,26 @@ class _LitmusLinkQtWindow:
                     }
             return payload
         if current is self.vector_tab:
+            generation_mode = str(self.vector_generation_mode.currentData())
             return {
                 "mode": "vector",
                 "name": "vector-native-complete" if self.vector_complete.isChecked() else "vector-native-custom",
                 "complete": self.vector_complete.isChecked(),
                 "out": self.vector_out.text() or "out/qt-vector",
                 "sample_limit": sample_limit,
-                "generate_limit": self.vector_generate_limit.value(),
+                "generate_limit": (
+                    None if generation_mode == "all" else self.vector_generate_limit.value()
+                ),
+                "preview_sampling": str(self.vector_preview_sampling.currentData()),
+                "generation_mode": generation_mode,
                 "random_seed": self.vector_random_seed.value(),
-                "compute_verdicts": True,
-                "summary_only": self.summary_only.isChecked(),
+                "compute_verdicts": not self.defer_solver.isChecked(),
                 **{
                     key: self._selected(checks)
                     for key, checks in self.vector_checks.items()
                 },
             }
-        if current is self.profile_tab:
-            return {
-                "mode": "profile",
-                "profile": self.profile_combo.currentData(),
-                "out": self.profile_out.text() or "out/qt-profile",
-                "summary_only": self.summary_only.isChecked(),
-                "sample_limit": sample_limit,
-            }
-        return {
-            "mode": "rule",
-            "rule": json.loads(self.rule_json.toPlainText()),
-            "out": self.rule_out.text() or "out/qt-custom",
-            "summary_only": self.summary_only.isChecked(),
-            "sample_limit": sample_limit,
-            "compute_verdicts": not self.defer_solver.isChecked(),
-            "diagrams": False,
-        }
+        raise ValueError("Qt GUI supports only scalar and vector modes")
 
     def _preview_sample_limit(self) -> int:
         current = self.mode_tabs.currentWidget()
@@ -1403,9 +1235,7 @@ class _LitmusLinkQtWindow:
             return self.scalar_preview_limit.value()
         if current is self.vector_tab:
             return self.vector_preview_limit.value()
-        if current is self.profile_tab:
-            return self.profile_preview_limit.value()
-        return self.custom_preview_limit.value()
+        raise ValueError("Qt GUI supports only scalar and vector modes")
 
     def _run_action(self, action: str, label: str) -> None:
         if self.active_thread is not None:
@@ -1416,10 +1246,34 @@ class _LitmusLinkQtWindow:
         except Exception as exc:
             self._show_error("Invalid configuration", str(exc))
             return
+        if (
+            action == "generate"
+            and payload.get("mode") == "vector"
+            and payload.get("generation_mode") == "all"
+            and not self._confirm_exhaustive_generation()
+        ):
+            self._append_log("Exhaustive generation cancelled")
+            return
 
         self.active_thread = self.action_thread
         self.active_worker = self.action_worker
         self.action_bus.request.emit(action, label, payload)
+
+    def _confirm_exhaustive_generation(self) -> bool:
+        message_box = self.QtWidgets.QMessageBox
+        buttons = getattr(message_box, "StandardButton", message_box)
+        yes = getattr(buttons, "Yes")
+        cancel = getattr(buttons, "Cancel")
+        answer = message_box.warning(
+            self.window,
+            "Generate all legal combinations",
+            "This will generate every legal case in the current Vector configuration. "
+            "A broad configuration can contain an impractically large number of files. "
+            "Run Audit or narrow the filters before continuing.",
+            yes | cancel,
+            cancel,
+        )
+        return answer == yes
 
     def _handle_started(self, label: str) -> None:
         self.started_at = time.monotonic()
@@ -1434,7 +1288,6 @@ class _LitmusLinkQtWindow:
         self._append_log(f"Started: {label}")
         for button in self.action_buttons:
             button.setEnabled(False)
-        self.refresh_rule_button.setEnabled(False)
         self.elapsed_timer.start(250)
         self.result_tabs.setCurrentWidget(self.log_view)
 
@@ -1496,7 +1349,6 @@ class _LitmusLinkQtWindow:
         self.active_worker = None
         for button in self.action_buttons:
             button.setEnabled(True)
-        self.refresh_rule_button.setEnabled(True)
 
     def _append_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -1629,7 +1481,17 @@ class _LitmusLinkQtWindow:
         if index is None or index < 0 or index >= len(self.preview_items):
             return
         dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.QtGui, self.preview_items[index], self.window)
-        dialog.resize(1180, 860)
+        screen = self.window.screen()
+        if screen is None:
+            screen = self.QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            dialog.resize(
+                max(640, min(1320, int(available.width() * 0.9))),
+                max(560, min(980, int(available.height() * 0.9))),
+            )
+        else:
+            dialog.resize(1180, 860)
         self.preview_dialog_open = True
         try:
             _exec_dialog(dialog)
@@ -1642,15 +1504,13 @@ class _LitmusLinkQtWindow:
             return self.scalar_out.text() or "out/qt-scalar"
         if current is self.vector_tab:
             return self.vector_out.text() or "out/qt-vector"
-        if current is self.profile_tab:
-            return self.profile_out.text() or "out/qt-profile"
-        return self.rule_out.text() or "out/qt-custom"
+        raise ValueError("Qt GUI supports only scalar and vector modes")
 
     def _update_output_hint(self) -> None:
         if hasattr(self, "output_hint"):
             self.output_hint.setText(f"Output: {self._current_out_dir()}")
         if hasattr(self, "defer_solver") and hasattr(self, "mode_tabs"):
-            self.defer_solver.setVisible(self.mode_tabs.currentWidget() is self.custom_tab)
+            self.defer_solver.setVisible(self.mode_tabs.currentWidget() is self.vector_tab)
 
 
 def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
@@ -1665,7 +1525,7 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
             f"Output directory: {out_dir}",
             "",
             "Counts:",
-            f"  total combinations: {counts.get('total_combinations', counts.get('available_litmus', '-'))}",
+            f"  total combinations: {counts.get('total_combinations', counts.get('available_litmus', counts.get('total_cases', '-')))}",
             f"  generated: {counts.get('generated', counts.get('generated_litmus', '-'))}",
             f"  excluded illegal: {counts.get('excluded_illegal', '-')}",
             f"  excluded unsupported: {counts.get('excluded_unsupported', '-')}",
@@ -1675,6 +1535,7 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     )
     if label == "Generate Files":
         out_path = Path(out_dir)
+        schema = str(result.get("schema", ""))
         solver = result.get("solver") if isinstance(result.get("solver"), dict) else result.get("verdicts", {})
         solver_files = sum(int(solver.get(key, 0)) for key in ["verified", "conflict", "not_applicable", "unchecked", "unknown"])
         generation_errors = int(result.get("generation_errors", 0) or 0)
@@ -1686,15 +1547,21 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
                 f"  generated combinations: {result.get('generated', result.get('generated_litmus', 0))}",
                 f"  litmus files: {result.get('generated_litmus', result.get('generated', 0))}",
                 f"  available litmus: {result.get('available_litmus', result.get('generated_litmus', result.get('generated', 0)))}",
+                f"  generation mode: {result.get('generation_mode', 'configured-domain')}",
                 f"  solver results: {solver_files}",
                 f"  verdict mode: {result.get('verdict_mode', 'computed')}",
                 f"  diagram mode: {result.get('diagram_mode', 'on_demand')}",
                 f"  generated diagrams: {result.get('generated_diagrams', 0)}",
                 f"  @all: {out_path / '@all'}",
-                f"  generation report: {out_path / 'generation-report.json'}" if str(result.get("schema", "")).startswith("litmus-link.scalar-") else f"  audit report: {out_path / 'audit-report.json'}",
             ]
         )
-        if not str(result.get("schema", "")).startswith("litmus-link.scalar-"):
+        if schema == "litmus-link.vector-native-generation.v1":
+            lines.append(f"  generation report: {out_path / 'generation-report.json'}")
+            lines.append(f"  audit report: {out_path / 'audit-report.json'}")
+        elif schema.startswith("litmus-link.scalar-"):
+            lines.append(f"  generation report: {out_path / 'generation-report.json'}")
+        elif not schema.startswith("litmus-link.scalar-"):
+            lines.append(f"  audit report: {out_path / 'audit-report.json'}")
             lines.append(f"  excluded cases: {out_path / 'excluded.json'}")
         if result.get("generation_limited"):
             lines.append(f"  generation limit: truncated to {generation_limit} litmus files")
@@ -1720,7 +1587,8 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
             ]
         )
         for item in result.get("sample", [])[:5]:
-            lines.append(f"  {item.get('name', '<unnamed>')}")
+            file_name = item.get("file_name") or "no file"
+            lines.append(f"  {item.get('name', '<unnamed>')}  [{file_name}]")
     return "\n".join(lines)
 
 
@@ -1744,9 +1612,11 @@ class _LitmusPreviewDialog:
         self.QtGui = QtGui
         self.item = item
         self.diagram_rendering = False
+        self.diagram_pixmap = None
         self.dialog = QtWidgets.QDialog(parent)
         self.dialog.setWindowTitle(str(item.get("name", "Litmus preview")))
         self._build_ui()
+        self.QtCore.QTimer.singleShot(0, self._fit_diagram)
         self.QtCore.QTimer.singleShot(25, self._start_diagram_render)
 
     def __getattr__(self, name: str) -> Any:
@@ -1762,11 +1632,19 @@ class _LitmusPreviewDialog:
         title.setObjectName("DialogTitle")
         title.setWordWrap(True)
         layout.addWidget(title)
+        file_name = QtWidgets.QLabel(
+            f"File: {self.item.get('file_name') or '-'}"
+        )
+        file_name.setObjectName("DialogFileName")
+        file_name.setTextInteractionFlags(_text_selectable(self.QtCore))
+        layout.addWidget(file_name)
 
         splitter = QtWidgets.QSplitter(_vertical(self.QtCore))
         splitter.addWidget(self._build_diagram_view())
         splitter.addWidget(self._build_detail_tabs())
-        splitter.setSizes([560, 260])
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([650, 250])
         layout.addWidget(splitter, 1)
 
         close = QtWidgets.QPushButton("Close")
@@ -1782,23 +1660,27 @@ class _LitmusPreviewDialog:
         png = Path(str(diagram.get("png", ""))) if diagram.get("png") else None
         self.diagram_label = QtWidgets.QLabel()
         self.diagram_label.setAlignment(_align_center(self.QtCore))
+        self.diagram_label.setMinimumSize(0, 0)
+        size_policy = getattr(QtWidgets.QSizePolicy, "Policy", QtWidgets.QSizePolicy)
+        self.diagram_label.setSizePolicy(size_policy.Ignored, size_policy.Ignored)
         self.diagram_status = QtWidgets.QLabel("Diagram will be rendered when this window opens.")
         self.diagram_status.setAlignment(_align_center(self.QtCore))
         self.diagram_progress = QtWidgets.QProgressBar()
         self.diagram_progress.setRange(0, 0)
         self.diagram_progress.setTextVisible(False)
+        scroll_class = _make_fit_scroll_area_class(QtWidgets)
+        self.diagram_scroll = scroll_class(self._fit_diagram)
+        self.diagram_scroll.setWidgetResizable(True)
+        self.diagram_scroll.setWidget(self.diagram_label)
         if png and png.exists():
             if self._show_diagram_png(png):
                 self.diagram_status.setText("Loaded cached diagram")
                 self.diagram_progress.hide()
         else:
             self.diagram_label.setText("Rendering diagram on demand...")
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.diagram_label)
         layout.addWidget(self.diagram_status)
         layout.addWidget(self.diagram_progress)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(self.diagram_scroll, 1)
         return container
 
     def _build_detail_tabs(self) -> Any:
@@ -1854,6 +1736,7 @@ class _LitmusPreviewDialog:
         self.diagram_detail.setPlainText(json.dumps(result, indent=2, sort_keys=True))
 
     def _diagram_failed(self, message: str) -> None:
+        self.diagram_pixmap = None
         self.diagram_label.clear()
         self.diagram_label.setText(f"Diagram generation failed:\n{message}")
         self.diagram_status.setText("Diagram unavailable")
@@ -1864,10 +1747,25 @@ class _LitmusPreviewDialog:
         if pixmap.isNull():
             self._diagram_failed(f"cannot load diagram PNG: {png}")
             return False
+        self.diagram_pixmap = pixmap
         self.diagram_label.clear()
-        self.diagram_label.setPixmap(pixmap)
-        self.diagram_label.setMinimumSize(pixmap.size())
+        self._fit_diagram()
+        self.QtCore.QTimer.singleShot(0, self._fit_diagram)
         return True
+
+    def _fit_diagram(self) -> None:
+        if self.diagram_pixmap is None or not hasattr(self, "diagram_scroll"):
+            return
+        viewport = self.diagram_scroll.viewport().size()
+        width = max(viewport.width() - 12, 1)
+        height = max(viewport.height() - 12, 1)
+        scaled = self.diagram_pixmap.scaled(
+            width,
+            height,
+            _keep_aspect_ratio(self.QtCore),
+            _smooth_transformation(self.QtCore),
+        )
+        self.diagram_label.setPixmap(scaled)
 
     def _text_view(self, text: str) -> Any:
         view = self.QtWidgets.QPlainTextEdit()
@@ -1892,6 +1790,8 @@ class _LitmusPreviewDialog:
         axes = self.item.get("name", combination.get("name", ""))
         lines = [
             f"Case: {axes}",
+            f"File name: {self.item.get('file_name') or '-'}",
+            f"Case ID: {self.item.get('case_id') or '-'}",
             f"Status: {decision.get('status', '-')}",
             f"RVWMO class: {decision.get('rvwmo_class', '-')}",
             f"Expected kind: {decision.get('expected_kind', '-')}",
@@ -1912,16 +1812,6 @@ class _LitmusPreviewDialog:
         return "\n".join(lines)
 
 
-def _parameter_tab_title(group_name: str) -> str:
-    titles = {
-        "Memory Footprint": "Memory",
-        "CMO Sync": "CMO Params",
-        "Virtual Memory": "VM Params",
-        "RVWMO Shape": "RVWMO",
-    }
-    return titles.get(group_name, group_name)
-
-
 def _horizontal(QtCore: Any) -> Any:
     orientation = getattr(QtCore, "Qt").Orientation if hasattr(getattr(QtCore, "Qt"), "Orientation") else getattr(QtCore, "Qt")
     return orientation.Horizontal
@@ -1937,6 +1827,24 @@ def _align_center(QtCore: Any) -> Any:
     if hasattr(qt, "AlignmentFlag"):
         return qt.AlignmentFlag.AlignCenter
     return qt.AlignCenter
+
+
+def _text_selectable(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    flags = getattr(qt, "TextInteractionFlag", qt)
+    return flags.TextSelectableByMouse
+
+
+def _keep_aspect_ratio(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    modes = getattr(qt, "AspectRatioMode", qt)
+    return modes.KeepAspectRatio
+
+
+def _smooth_transformation(QtCore: Any) -> Any:
+    qt = getattr(QtCore, "Qt")
+    modes = getattr(qt, "TransformationMode", qt)
+    return modes.SmoothTransformation
 
 
 def _user_role(QtCore: Any) -> Any:
@@ -1971,10 +1879,19 @@ def _horizontal_orientation(QtCore: Any) -> Any:
     return _horizontal(QtCore)
 
 
-def _standard_arrow_icon(QtWidgets: Any, widget: Any) -> Any:
+def _standard_arrow_icon(QtWidgets: Any, widget: Any, direction: str = "right") -> Any:
     style = getattr(QtWidgets, "QStyle")
     standard = style.StandardPixmap if hasattr(style, "StandardPixmap") else style
-    return widget.style().standardIcon(standard.SP_ArrowRight)
+    names = {
+        "right": "SP_ArrowRight",
+        "left": "SP_ArrowLeft",
+        "down": "SP_ArrowDown",
+    }
+    try:
+        arrow = getattr(standard, names[direction])
+    except (AttributeError, KeyError) as exc:
+        raise ValueError(f"unsupported flow-arrow direction: {direction}") from exc
+    return widget.style().standardIcon(arrow)
 
 
 def _exec_dialog(dialog: Any) -> int:
@@ -2000,6 +1917,14 @@ def _single_selection(QtWidgets: Any) -> Any:
     return mode.SingleSelection
 
 
+def _configure_responsive_form(form: Any, QtWidgets: Any) -> None:
+    form_layout = QtWidgets.QFormLayout
+    wrap_policy = getattr(form_layout, "RowWrapPolicy", form_layout)
+    growth_policy = getattr(form_layout, "FieldGrowthPolicy", form_layout)
+    form.setRowWrapPolicy(wrap_policy.WrapLongRows)
+    form.setFieldGrowthPolicy(growth_policy.AllNonFixedFieldsGrow)
+
+
 def _configure_preview_header(table: Any, QtWidgets: Any) -> None:
     header = table.horizontalHeader()
     resize = getattr(QtWidgets.QHeaderView, "ResizeMode", QtWidgets.QHeaderView)
@@ -2009,7 +1934,7 @@ def _configure_preview_header(table: Any, QtWidgets: Any) -> None:
     header.setStretchLastSection(True)
     for column in range(column_count):
         header.setSectionResizeMode(column, resize.Interactive)
-    for column, width in enumerate((58, 84, 90, 105)):
+    for column, width in enumerate((44, 66, 68, 86, 190)):
         table.setColumnWidth(column, width)
     header.setSectionResizeMode(column_count - 1, resize.Stretch)
 
@@ -2079,14 +2004,24 @@ def _preview_table_values(item: Dict[str, Any], source_index: int) -> list[str]:
     skeleton = str(combination.get("skeleton", case_ir.get("skeleton", "?")))
     cycle = str(case_ir.get("cycle", (item.get("analysis") or {}).get("cycle", "")))
     name = str(case_ir.get("display_name", item.get("name", f"case-{source_index + 1}")))
+    file_name = str(item.get("file_name", ""))
     return [
         str(source_index + 1),
         _status_label(status),
         skeleton,
         _verdict_label(item.get("solver"), decision),
+        _short_file_name(file_name) if file_name else "-",
         name,
         cycle,
     ]
+
+
+def _short_file_name(file_name: str) -> str:
+    match = re.fullmatch(r"(LLV-[A-Za-z0-9_.-]+-)([0-9a-f]{64})(\.litmus)", file_name)
+    if not match:
+        return file_name
+    prefix, digest, suffix = match.groups()
+    return f"{prefix}{digest[:10]}...{digest[-8:]}{suffix}"
 
 
 def _preview_filter_verdict(item: Dict[str, Any]) -> str:
@@ -2167,22 +2102,19 @@ def _stylesheet() -> str:
     QLabel#OutputHint { color: #5b6778; }
     QLabel#FlowArrow { color: #64748b; font-size: 18px; font-weight: 700; }
     QLabel#SectionTitle { color: #111827; font-size: 17px; font-weight: 700; }
+    QLabel#DialogFileName { color: #475569; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
     QTabWidget::pane { border: 1px solid #cfd9e6; border-radius: 7px; background: #ffffff; }
     QTabBar::tab { background: #e7edf5; color: #475569; padding: 8px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
     QTabBar::tab:selected { background: #ffffff; color: #0f766e; font-weight: 700; border-top: 3px solid #0f766e; }
-    QTabWidget#AxisTabs QTabBar::tab:first { background: #e0f2fe; color: #075985; font-weight: 700; }
-    QTabWidget#AxisTabs QTabBar::tab:first:selected { background: #ffffff; color: #075985; border-top: 3px solid #0284c7; }
     QGroupBox { border: 1px solid #d9e2ec; border-radius: 6px; margin-top: 10px; padding-top: 10px; font-weight: 700; background: #ffffff; }
     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-    QGroupBox#AxisGroup[axis_role="core"] { border: 2px solid #91c5f8; background: #f0f8ff; }
-    QGroupBox#AxisGroup[axis_role="core"][group_state="active"] { border: 2px solid #0284c7; background: #e0f2fe; }
-    QGroupBox#AxisGroup[axis_role="core"][group_state="inactive"] { border: 1px solid #cbd5e1; background: #f8fafc; }
     QGroupBox#AxisGroup[axis_role="parameter"] { border: 1px solid #d7dee8; background: #ffffff; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QGroupBox#VectorFilterGroup[group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#VectorFilterGroup[group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
+    QComboBox#VectorGenerationMode[exhaustive="true"] { border: 2px solid #b45309; background: #fff7ed; color: #9a3412; font-weight: 700; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
     QTableView#PreviewTable { background: #ffffff; alternate-background-color: #f8fafc; border: 1px solid #cfd9e6; border-radius: 7px; gridline-color: #edf2f7; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; selection-background-color: #dbeafe; selection-color: #0c4a6e; }
     QLineEdit#PreviewSearch { min-width: 260px; }

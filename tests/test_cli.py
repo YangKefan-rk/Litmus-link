@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 from litmus_link.cli import main
-from litmus_link.workflow import generate_payload, options_payload, preview_payload
+from litmus_link.workflow import audit_payload, generate_payload, options_payload, preview_payload
 from litmus_link.qt_gui import _summary_text, qt_binding_status
 from litmus_link.toolchain import tools_available
 from litmus_link.validator import validate_path
@@ -143,10 +143,11 @@ def test_cli_summary_only_audit(tmp_path: Path) -> None:
     assert not (out / "covered.json").exists()
 
 
-def test_gui_options_and_preview() -> None:
+def test_gui_options_expose_only_scalar_and_vector_workflows() -> None:
     options = options_payload()
-    assert "stress-large" in options["profiles"]
-    assert "sew" in options["param_axes"]
+    assert set(options) == {"axes", "param_axes", "native_scalar", "vector_native"}
+    assert set(options["axes"]) == {"skeleton", "vector"}
+    assert set(options["param_axes"]) == {"sew", "lmul", "index_eew", "mask", "tail", "vl"}
     assert set(options["axes"]["vector"]) == {
         "none",
         "unit_load",
@@ -161,72 +162,14 @@ def test_gui_options_and_preview() -> None:
     assert "elem_order" not in options["param_axes"]
     assert options["param_axes"]["vl"] == ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
     assert options["param_axes"]["index_eew"] == ["ei8", "ei16", "ei32", "ei64"]
-    preview = preview_payload(
-        {
-            "mode": "rule",
-            "rule": {
-                "name": "gui-test",
-                "axes": {"vector": ["unit_load"], "attribute": ["cacheable"]},
-                "param_axes": {"sew": ["e32"], "footprint": ["same_line"]},
-                "limit": 10,
-            },
-        }
-    )
-    assert preview["report"]["total_combinations"] == 1
-    assert preview["sample"][0]["combination"]["params"]["sew"] == "e32"
-    assert preview["sample"][0]["solver"]["tool"] == "litmus-link-vector-rvwmo"
-    assert preview["sample"][0]["solver"]["vector"]["schema"] == "litmus-link.vector-solver.v1"
-
-
-def test_gui_supported_vector_matrix_expands_and_generates_every_form_mask_and_vl(tmp_path: Path) -> None:
-    options = options_payload()
-    forms = [value for value in options["axes"]["vector"] if value != "none"]
-    payload = {
-        "mode": "rule",
-        "rule": {
-            "name": "gui-vector-supported-matrix",
-            "axes": {
-                "skeleton": ["MP"],
-                "attribute": ["cacheable"],
-                "vector": forms,
-                "cmo": ["no_cmo"],
-                "tlb": ["no_tlb"],
-            },
-            "param_axes": {
-                "sew": ["e32"],
-                "lmul": ["m1"],
-                "mask": ["unmasked", "masked"],
-                "tail": ["ta_ma"],
-                "footprint": ["same_line"],
-                "vl": ["vl1", "vl2", "vl4", "vlmax"],
-            },
-            "limit": 192,
-        },
-        "sample_limit": 192,
-    }
-    preview = preview_payload(payload)
-    assert preview["report"]["total_combinations"] == 64
-    assert preview["report"]["generated"] == 64
-    assert preview["report"]["generated_litmus"] == 192
-    assert len(preview["sample"]) == 192
-    domain = preview["domain_classification_counts"]
-    assert domain["generated_cases"] == 192
-    assert domain["preview_displayed_cases"] == 192
-    assert set(domain["groups"]["vector"]) == set(forms)
-    observed = {
-        (
-            item["combination"]["vector"],
-            item["combination"]["params"]["mask"],
-            item["combination"]["params"]["vl"],
-        )
-        for item in preview["sample"]
-    }
-    assert len(observed) == 64
-    assert all(item["solver"]["tool"] == "litmus-link-vector-rvwmo" for item in preview["sample"])
-    generated = generate_payload({**payload, "out": str(tmp_path / "vector-matrix")})
-    assert generated["generated_litmus"] == 192
-    assert generated["generation_limited"] is False
-    assert generated["solver"] == {"verified": 192, "conflict": 0, "not_applicable": 0}
+    with pytest.raises(ValueError, match="only scalar and vector"):
+        preview_payload({"mode": "profile", "profile": "smoke"})
+    with pytest.raises(ValueError, match="only scalar and vector"):
+        preview_payload({"mode": "rule", "rule": {"name": "obsolete"}})
+    with pytest.raises(ValueError, match="only scalar and vector"):
+        audit_payload({"mode": "profile", "profile": "smoke"})
+    with pytest.raises(ValueError, match="only scalar and vector"):
+        generate_payload({"mode": "rule", "rule": {"name": "obsolete"}})
 
 
 def test_dedicated_vector_mode_uses_relation_cycles_and_random_final_cases(tmp_path: Path) -> None:
@@ -263,7 +206,8 @@ def test_dedicated_vector_mode_uses_relation_cycles_and_random_final_cases(tmp_p
     generated = generate_payload(payload)
     assert generated["generated_litmus"] == 3
     assert sum(generated["solver"].values()) == 3
-    assert generated["sampling"] == "coverage-stratified-random-without-replacement"
+    assert generated["generation_mode"] == "balanced"
+    assert generated["sampling"] == "balanced-skeleton-coverage-random-without-replacement"
 
 
 @pytest.mark.skipif(not tools_available(), reason="herdtools7 toolchain not installed")
@@ -498,71 +442,6 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
     assert "solver results: 7" in summary
     assert "out/qt-custom/@all" in summary
     assert "out/qt-custom/audit-report.json" in summary
-
-
-def test_gui_generate_corpus_computes_solver_and_defers_diagrams_by_default(tmp_path: Path) -> None:
-    from litmus_link.corpus_riscv import corpus_available
-
-    if not corpus_available():
-        return
-    out = tmp_path / "gui-mp"
-    report = generate_payload(
-        {
-            "mode": "rule",
-            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
-            "out": str(out),
-            "generate_limit": 2,
-        }
-    )
-    assert report["verdict_mode"] == "computed"
-    assert report["generated_litmus"] == 2
-    assert len(list(out.glob("*.litmus"))) == 2
-    assert len(list(out.glob("*.solver.json"))) == 2
-    assert len(list(out.glob("*.diagram.png"))) == 0
-    assert report["diagram_mode"] == "on_demand"
-    assert report["generated_diagrams"] == 0
-
-
-def test_gui_generate_corpus_can_explicitly_write_diagrams(tmp_path: Path) -> None:
-    from litmus_link.corpus_riscv import corpus_available
-
-    if not corpus_available():
-        return
-    out = tmp_path / "gui-mp-diagrams"
-    report = generate_payload(
-        {
-            "mode": "rule",
-            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 10},
-            "out": str(out),
-            "generate_limit": 2,
-            "diagrams": True,
-        }
-    )
-    assert len(list(out.glob("*.diagram.png"))) == 2
-    assert report["diagram_mode"] == "eager"
-    assert report["generated_diagrams"] == 2
-
-
-def test_gui_generate_uses_rule_limit_as_total_litmus_cap(tmp_path: Path) -> None:
-    from litmus_link.corpus_riscv import corpus_available
-
-    if not corpus_available():
-        return
-    out = tmp_path / "gui-mp-rule-limit"
-    report = generate_payload(
-        {
-            "mode": "rule",
-            "rule": {"name": "mp-cacheable", "axes": {"skeleton": ["MP"], "attribute": ["cacheable"]}, "limit": 3},
-            "out": str(out),
-        }
-    )
-    assert report["generated_litmus"] == 3
-    assert report["available_litmus"] > 3
-    assert report["generation_limit"] == 3
-    assert report["generation_limited"] is True
-    assert len(list(out.glob("*.litmus"))) == 3
-    assert len(list(out.glob("*.solver.json"))) == 3
-    assert len(list(out.glob("*.diagram.png"))) == 0
 
 
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:

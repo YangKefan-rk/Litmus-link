@@ -26,6 +26,23 @@ _VECTOR_FORMS = {
     "indexed_unordered_store": "vsuxei{index}.v-E{sew}",
 }
 
+_VECTOR_EVENT_FORMS = {
+    "unit_load": "VLE{sew}",
+    "unit_store": "VSE{sew}",
+    "strided_load": "VLSE{sew}",
+    "strided_store": "VSSE{sew}",
+    "indexed_ordered_load": "VLOXEI{index}/E{sew}",
+    "indexed_unordered_load": "VLUXEI{index}/E{sew}",
+    "indexed_ordered_store": "VSOXEI{index}/E{sew}",
+    "indexed_unordered_store": "VSUXEI{index}/E{sew}",
+}
+
+_VECTOR_ALIGNMENT_NAMES = {
+    "misalign_same16": "U16",
+    "misalign_cross16": "X16",
+    "misalign_cross64": "X64",
+}
+
 _CMO_NAMES = {
     "clean": "cbo.clean",
     "flush": "cbo.flush",
@@ -204,6 +221,60 @@ def native_cycle_name(
     if any(annotation != "P" for annotation in annotations):
         tokens.append("Ann." + "-".join(_token(annotation) for annotation in annotations))
     return _bounded("+".join(tokens))
+
+
+def vector_native_case_identity(
+    family: str,
+    cycle: Mapping[str, Any],
+    relation_labels: Sequence[str],
+    endpoint_choices: Sequence[Mapping[str, Any]],
+    alignment: str,
+) -> dict[str, Any]:
+    """Build separate human and machine identities for a Vector cycle case."""
+    canonical = {
+        "schema": "litmus-link.vector-case-identity.v1",
+        "family": family,
+        "cycle": dict(cycle),
+        "relation_labels": list(relation_labels),
+        "endpoint_choices": [dict(choice) for choice in endpoint_choices],
+        "alignment": alignment,
+    }
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    machine_name = f"LLV-{_token(family or 'Cycle')}-{digest}"
+    vector_events = [
+        f"E{index}:{_vector_event_name(choice, alignment)}"
+        for index, choice in enumerate(endpoint_choices)
+        if str(choice.get("category", "")) == "vector"
+    ]
+    relation_ring = ">".join(str(label) for label in relation_labels)
+    display_name = (
+        f"{family or 'Cycle'}+{{{relation_ring}}}+V{{{','.join(vector_events)}}}"
+    )
+    return {
+        "machine_name": machine_name,
+        "file_name": f"{machine_name}.litmus",
+        "display_name": display_name,
+        "sha256": digest,
+        "canonical": canonical,
+    }
+
+
+def _vector_event_name(choice: Mapping[str, Any], alignment: str) -> str:
+    form = str(choice.get("vector_form", ""))
+    params = choice.get("params")
+    values = params if isinstance(params, Mapping) else {}
+    sew = str(values.get("sew", "e32")).removeprefix("e")
+    index = str(values.get("index_eew", "ei32")).removeprefix("ei")
+    template = _VECTOR_EVENT_FORMS.get(form, _token(form).upper())
+    name = template.format(sew=sew, index=index)
+    alignment_name = _VECTOR_ALIGNMENT_NAMES.get(alignment)
+    return f"{name}/{alignment_name}" if alignment_name else name
 
 
 def variant_name(variant: str) -> str:

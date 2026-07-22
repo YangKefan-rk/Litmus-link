@@ -20,6 +20,8 @@ def render_ir(case_ir: LitmusCaseIR) -> str:
         f"(* cycle={case_ir.cycle} *)",
         f"(* expected_outcome={case_ir.expected_outcome} *)",
     ]
+    if case_ir.display_name != case_ir.name:
+        comments.insert(1, f"(* display_name={case_ir.display_name} *)")
     return "\n".join(
         [
             f"RISCV {case_ir.name}",

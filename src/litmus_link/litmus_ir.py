@@ -269,6 +269,7 @@ class LitmusCaseIR:
         return {
             "schema": "litmus-link.case-ir.v1",
             "name": self.name,
+            "file_name": f"{self.name}.litmus",
             "display_name": self.display_name,
             "combination_name": self.combination_name,
             "skeleton": self.skeleton,

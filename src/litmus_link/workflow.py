@@ -4,25 +4,14 @@ import json
 import re
 from collections import Counter
 from hashlib import sha256
-from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Callable, Dict, Iterable, Tuple
+from typing import Any, Callable, Dict, Iterable
 
 from .corpus_ir import corpus_to_ir
-from .corpus_riscv import corpus_available, judge as corpus_judge, parse_litmus, skeleton_counts, tests_for_skeleton
-from .descriptions import feature_description_catalog
-from .diagram import diagram_summary, render_diagram
-from .generator import (
-    _coverage_markdown,
-    audit_summary,
-    generate_combinations,
-    generate_profile,
-    write_audit,
-    write_audit_for_combinations,
-    write_one_generated_case,
-)
-from .litmus_ir import LitmusCaseIR, LitmusEvent, LitmusRelation, case_count
+from .corpus_riscv import parse_litmus
+from .diagram import DIAGRAM_RENDER_VERSION, diagram_summary, render_diagram
+from .litmus_ir import LitmusCaseIR
 from .models import GENERATED, Combination
 from .native_scalar import (
     DEFAULT_NATIVE_MECHANISMS,
@@ -49,15 +38,7 @@ from .memory_layout import (
     expand_memory_layouts,
 )
 from .profiles import (
-    ALIAS_MODES,
-    ATTRIBUTES,
-    CMO_OPS,
-    CMO_SYNC_SEQUENCES,
-    FORMAL_VECTOR_SKELETONS,
     SKELETONS,
-    STRESSORS,
-    TLB_OPS,
-    VECTOR_FOOTPRINTS,
     VECTOR_INDEX_EEWS,
     VECTOR_LENGTHS,
     VECTOR_LMULS,
@@ -65,28 +46,19 @@ from .profiles import (
     VECTOR_OPS,
     VECTOR_TAILS,
     VECTOR_WIDTHS,
-    VM_CONTEXTS,
-    PTE_STATES,
-    SHOOTDOWN_SCOPES,
-    list_profiles,
-    profile_combinations,
-    vector_combinations,
 )
-from .renderer import render_cases
-from .rule_file import RuleFileError, load_rule_data, rule_field_values
-from .rules import evaluate
 from .scalar import (
     DEFAULT_MECHANISMS,
     DEFAULT_RELAX_EDGES,
     DEFAULT_SAFE_EDGES,
     generate_scalar_cross,
     generate_scalar_enumerated,
-    scalar_catalog,
 )
-from .solver import solve_generated_case
 from .toolchain import HerdVerdict
 from .vector_native import (
     VECTOR_ALIGNMENTS,
+    VECTOR_GENERATION_MODES,
+    VECTOR_SAMPLE_MODES,
     VectorNativeDomain,
     generate_vector_cases,
     sample_vector_cases,
@@ -94,40 +66,22 @@ from .vector_native import (
 
 
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
-    "dep": ["addr", "data", "ctrl", "ctrl_fence", "aq", "rl", "aqrl"],
-    "width": ["w8", "w16", "w32", "w64"],
-    "outcome": ["allowed", "forbidden", "mixed_size"],
     "sew": list(VECTOR_WIDTHS),
     "index_eew": list(VECTOR_INDEX_EEWS),
     "lmul": list(VECTOR_LMULS),
     "mask": list(VECTOR_MASKS),
     "tail": list(VECTOR_TAILS),
-    "footprint": list(VECTOR_FOOTPRINTS),
     "vl": list(VECTOR_LENGTHS),
-    "sync": list(CMO_SYNC_SEQUENCES),
-    "vm": list(VM_CONTEXTS),
-    "shootdown": list(SHOOTDOWN_SCOPES),
-    "pte": list(PTE_STATES),
-    "alias": list(ALIAS_MODES),
-    "stress": list(STRESSORS),
 }
 
 
 def options_payload() -> Dict[str, Any]:
-    rule_fields = rule_field_values()
     return {
-        "profiles": list_profiles(),
         "axes": {
             "skeleton": list(SKELETONS),
-            "attribute": list(ATTRIBUTES),
             "vector": ["none", *VECTOR_OPS],
-            "cmo": ["no_cmo", *CMO_OPS],
-            "tlb": ["no_tlb", *TLB_OPS],
         },
-        "rule_file_fields": rule_fields,
-            "param_axes": PARAM_AXIS_VALUES,
-        "features": feature_description_catalog(),
-        "scalar": scalar_catalog(),
+        "param_axes": PARAM_AXIS_VALUES,
         "native_scalar": {
             **native_catalog(),
             "diy": {
@@ -152,6 +106,8 @@ def options_payload() -> Dict[str, Any]:
             "mechanisms": list(DEFAULT_NATIVE_MECHANISMS),
             "endpoint_modes": list(NATIVE_ANNOTATIONS),
             "alignments": list(VECTOR_ALIGNMENTS),
+            "preview_sampling_modes": list(VECTOR_SAMPLE_MODES),
+            "generation_modes": list(VECTOR_GENERATION_MODES),
         },
     }
 
@@ -160,101 +116,12 @@ def preview_payload(
     payload: Dict[str, Any],
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Dict[str, Any]:
-    if str(payload.get("mode", "profile")) == "scalar":
+    mode = str(payload.get("mode", "scalar"))
+    if mode == "scalar":
         return _scalar_preview_payload(payload, progress_callback=progress_callback)
-    if str(payload.get("mode", "profile")) == "vector":
+    if mode == "vector":
         return _vector_native_preview_payload(payload, progress_callback=progress_callback)
-    name, combinations, source = _combinations_from_payload(payload)
-    sample_limit = int(payload.get("sample_limit", 10))
-    compute_verdicts = bool(payload.get("compute_verdicts", True))
-    cached = list(combinations) if isinstance(combinations, list) else None
-    use_corpus = (
-        source == "gui"
-        and corpus_available()
-        and cached is not None
-        and any(_is_scalar_corpus_combination(combination) for combination in cached)
-    )
-
-    sample: list = []
-    progress_total = max(
-        sample_limit
-        if use_corpus or cached is None
-        else min(sample_limit, len(cached)),
-        1,
-    )
-    if progress_callback is not None:
-        progress_callback(0, progress_total, f"Preparing up to {sample_limit:,} preview entries")
-    if use_corpus:
-        # Total-item budget: bounds herd7 runs regardless of how many skeletons
-        # are checked. Corpus combinations expand into real tool-generated tests.
-        budget = max(sample_limit, 0)
-        for combination in (cached if cached is not None else []):
-            if budget <= 0:
-                break
-            if _is_scalar_corpus_combination(combination):
-                items = _corpus_preview_items(
-                    combination,
-                    min(budget, 8),
-                    compute_verdicts=compute_verdicts,
-                )
-            else:
-                items = _render_preview_items(combination, compute_verdicts=compute_verdicts)
-            for item in items:
-                if budget <= 0:
-                    break
-                sample.append(item)
-                budget -= 1
-                if progress_callback is not None:
-                    progress_callback(
-                        min(len(sample), progress_total),
-                        progress_total,
-                        f"Prepared {len(sample):,} preview entries",
-                    )
-    else:
-        iterator = iter(cached if cached is not None else combinations)
-        for combination_index, combination in enumerate(
-            islice(iterator, max(sample_limit, 0)),
-            start=1,
-        ):
-            sample.extend(
-                _render_preview_items(
-                    combination,
-                    compute_verdicts=compute_verdicts,
-                )
-            )
-            if progress_callback is not None:
-                progress_callback(
-                    min(combination_index, progress_total),
-                    progress_total,
-                    f"Prepared {len(sample):,} cases from {combination_index:,} combinations",
-                )
-
-    summary_combinations = cached if cached is not None else _combinations_from_payload(payload)[1]
-    domain_counts: Dict[str, Any] = {}
-    if cached is not None and not use_corpus:
-        domain_counts = _domain_classification_counts(
-            cached,
-            progress_callback=progress_callback,
-        )
-        report = _domain_audit_report(name, domain_counts, source)
-    else:
-        if progress_callback is not None:
-            progress_callback(progress_total, progress_total, "Classifying preview domain")
-        report = (
-            _gui_corpus_report(name, summary_combinations, source)
-            if use_corpus
-            else audit_summary(name, summary_combinations, source=source)
-        )
-    if domain_counts:
-        domain_counts["preview_displayed_cases"] = len(sample)
-    return {
-        "profile": name,
-        "source": source,
-        "report": report,
-        "sample": sample,
-        "classification_counts": _preview_classification_counts(sample),
-        "domain_classification_counts": domain_counts,
-    }
+    raise ValueError("GUI workflow supports only scalar and vector modes")
 
 
 _DIAGRAM_DIR = Path(gettempdir()) / "litmus-link-preview-diagrams"
@@ -267,7 +134,11 @@ def _deferred_preview_diagram(
     """Describe a preview diagram without paying the PNG rendering cost."""
     fingerprint = sha256(
         json.dumps(
-            {"case_ir": case_ir.to_json(), "solver": solver or {}},
+            {
+                "diagram_renderer": DIAGRAM_RENDER_VERSION,
+                "case_ir": case_ir.to_json(),
+                "solver": solver or {},
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -663,199 +534,6 @@ def _optional_nonnegative_int(value: Any) -> int | None:
     return parsed
 
 
-def _is_scalar_corpus_combination(combination: Combination) -> bool:
-    """True for a pure scalar RVWMO main-memory family we can serve from the
-    real corpus: no vector/CMO/TLB extension, cacheable, no body-changing params."""
-    if combination.vector != "none" or combination.cmo != "no_cmo" or combination.tlb != "no_tlb":
-        return False
-    if combination.attribute != "cacheable":
-        return False
-    if combination.params:
-        return False
-    return skeleton_counts().get(combination.skeleton, 0) > 0
-
-
-def _render_preview_items(
-    combination: Combination,
-    *,
-    compute_verdicts: bool = True,
-) -> list:
-    """Original (non-corpus) preview path: evaluate -> render -> solve -> draw."""
-    decision = evaluate(combination)
-    rendered_cases = render_cases(combination, decision) if decision.status == GENERATED else []
-    if not rendered_cases:
-        return [_preview_item(combination, decision.to_json(), combination.name, "", None, None, None)]
-    items = []
-    for case in rendered_cases:
-        solver = (
-            solve_generated_case(case).to_json()
-            if compute_verdicts
-            else _unchecked_preview_solver()
-        )
-        diagram = (
-            _deferred_preview_diagram(case.case_ir, solver)
-            if case.case_ir is not None
-            else None
-        )
-        items.append(
-            _preview_item(
-                combination,
-                decision.to_json(),
-                case.name,
-                case.litmus,
-                case.case_ir.to_json() if case.case_ir else None,
-                solver,
-                diagram,
-            )
-        )
-    return items
-
-
-def _safe_corpus_judge(test):
-    try:
-        return corpus_judge(test)
-    except Exception:
-        return None
-
-
-def _corpus_solver_json(verdict) -> Dict[str, Any]:
-    if verdict is None or verdict.outcome == "unknown":
-        return {
-            "schema": "litmus-link.solver.v1",
-            "status": "not_applicable",
-            "verdict": "unmodeled",
-            "allowed": None,
-            "model": "rvwmo-herd7",
-            "tool": "herd7",
-            "reason": "herd7 verdict unavailable for this test.",
-            "cross_check": "herd7_only",
-            "edges": [],
-            "fusion": None,
-            "observation": "",
-            "raw_output": "",
-            "command": [],
-        }
-    forbidden = verdict.outcome == "forbidden"
-    return {
-        "schema": "litmus-link.solver.v1",
-        "status": "verified",
-        "verdict": "forbidden" if forbidden else "allowed",
-        "allowed": verdict.allowed,
-        "model": "rvwmo-herd7",
-        "tool": "herd7",
-        "reason": (
-            f"herd7 + riscv.cat: exists outcome {'FORBIDDEN (Never observed)' if forbidden else 'OBSERVABLE'} "
-            f"[{verdict.observation} +{verdict.positive}/-{verdict.negative}]"
-        ),
-        "cross_check": "herd7_only",
-        "edges": [],
-        "fusion": None,
-        "observation": verdict.observation,
-        "raw_output": "",
-        "command": [],
-    }
-
-
-def _corpus_decision_json(test) -> Dict[str, Any]:
-    return {
-        "status": GENERATED,
-        "reason": f"Real RVWMO litmus from the {test.skeleton} family (tool-generated corpus).",
-        "rvwmo_class": "rvwmo-herd7",
-        "expected_kind": "rvwmo-herd7",
-        "requires": ["RV64I"],
-        "notes": [f"corpus:{test.family}", "verdict:herd7"],
-        "hand_category": "",
-        "metadata": {"corpus": "true", "cycle": test.cycle},
-    }
-
-
-def _corpus_preview_items(
-    combination: Combination,
-    limit: int,
-    *,
-    compute_verdicts: bool = True,
-) -> list:
-    items = []
-    for test in tests_for_skeleton(combination.skeleton, limit=limit):
-        # One malformed corpus sample (parse/IR error) must not
-        # take down the whole preview list. do_POST only catches
-        # ValueError/RuleFileError/FileNotFoundError, so anything else here
-        # would 500 the request and lose every other valid sample. Degrade the
-        # single bad row instead.
-        try:
-            verdict = _safe_corpus_judge(test) if compute_verdicts else None
-            ir = corpus_to_ir(test, verdict)
-            solver = (
-                _corpus_solver_json(verdict)
-                if compute_verdicts
-                else _unchecked_preview_solver()
-            )
-            diagram = _deferred_preview_diagram(ir, solver)
-            items.append(
-                _preview_item(
-                    combination,
-                    _corpus_decision_json(test),
-                    test.unique_id,
-                    test.text,
-                    ir.to_json(),
-                    solver,
-                    diagram,
-                )
-            )
-        except Exception:
-            # Skip just this malformed sample; keep every other valid one.
-            continue
-    return items
-
-
-def _unchecked_preview_solver() -> Dict[str, Any]:
-    return {
-        "schema": "litmus-link.solver.v1",
-        "status": "unchecked",
-        "verdict": "unchecked",
-        "allowed": None,
-        "model": "rvwmo",
-        "tool": "none",
-        "reason": "Fast preview skips outcome solving; use Verify Preview to calculate the verdict.",
-        "cross_check": "not_run",
-        "edges": [],
-        "fusion": None,
-        "observation": "",
-        "raw_output": "",
-        "command": [],
-    }
-
-
-def _gui_corpus_report(name: str, combinations: Iterable[Combination], source: str | None) -> Dict[str, Any]:
-    counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
-    total = 0
-    generated_litmus = 0
-    for combination in combinations:
-        total += 1
-        if _is_scalar_corpus_combination(combination):
-            counts[GENERATED] += 1
-            generated_litmus += skeleton_counts().get(combination.skeleton, 0)
-            continue
-        decision = evaluate(combination)
-        counts[decision.status] = counts.get(decision.status, 0) + 1
-        if decision.status == GENERATED:
-            generated_litmus += case_count(combination, decision)
-    report = {
-        "schema": "litmus-link.audit.v1",
-        "profile": name,
-        "total_combinations": total,
-        "generated": counts.get(GENERATED, 0),
-        "generated_litmus": generated_litmus,
-        "excluded_illegal": counts.get("excluded_illegal", 0),
-        "excluded_unsupported": counts.get("excluded_unsupported", 0),
-        "hand_required": counts.get("hand_required", 0),
-        "missing": counts.get("missing", 0),
-    }
-    if source:
-        report["source"] = source
-    return report
-
-
 def _preview_item(
     combination: Combination,
     decision: Dict[str, Any],
@@ -865,8 +543,12 @@ def _preview_item(
     solver: Dict[str, Any] | None,
     diagram: Dict[str, Any] | None,
 ) -> Dict[str, Any]:
+    case_id = str(case_ir.get("name", name)) if case_ir else name
+    display_name = str(case_ir.get("display_name", name)) if case_ir else name
     return {
-        "name": name,
+        "name": display_name,
+        "case_id": case_id,
+        "file_name": f"{case_id}.litmus" if litmus else "",
         "combination": combination.to_json(),
         "decision": decision,
         "litmus": litmus,
@@ -935,96 +617,6 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if counter
         },
     }
-
-
-def _domain_classification_counts(
-    combinations: Iterable[Combination],
-    *,
-    progress_callback: Callable[[int, int, str], None] | None = None,
-) -> Dict[str, Any]:
-    """Count the complete finite domain without rendering or solving cases.
-
-    A profile preview intentionally displays only a bounded sample.  These
-    counters keep the GUI honest about the full domain and weight generated
-    combinations by the number of Litmus ordering variants they expand into.
-    """
-    groups: Dict[str, Counter[str]] = {
-        "status": Counter(),
-        "skeleton": Counter(),
-        "category": Counter(),
-        "attribute": Counter(),
-        "memory_event": Counter(),
-        "vector": Counter(),
-        "cmo": Counter(),
-        "tlb": Counter(),
-        "sew": Counter(),
-        "lmul": Counter(),
-        "index_eew": Counter(),
-        "mask": Counter(),
-        "tail": Counter(),
-        "vl": Counter(),
-    }
-    domain_cases = 0
-    generated_cases = 0
-    total_combinations = len(combinations) if hasattr(combinations, "__len__") else 0
-    combination_status: Counter[str] = Counter()
-    last_percent = -1
-    for index, combination in enumerate(combinations, start=1):
-        decision = evaluate(combination)
-        combination_status[decision.status] += 1
-        weight = case_count(combination, decision) if decision.status == GENERATED else 1
-        domain_cases += weight
-        if decision.status == GENERATED:
-            generated_cases += weight
-        groups["status"][decision.status] += weight
-        axes = combination.axes()
-        for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
-            groups[key][_count_value(axes.get(key), "none")] += weight
-        for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
-            if key in combination.params:
-                groups[key][_count_value(combination.params.get(key), "default")] += weight
-        if progress_callback is not None and total_combinations:
-            percent = int(index * 100 / total_combinations)
-            if percent != last_percent:
-                last_percent = percent
-                progress_callback(
-                    index,
-                    total_combinations,
-                    f"Classified {index:,}/{total_combinations:,} domain combinations",
-                )
-    return {
-        "total_combinations": total_combinations,
-        "combination_status": dict(sorted(combination_status.items())),
-        "domain_cases": domain_cases,
-        "generated_cases": generated_cases,
-        "groups": {
-            key: dict(sorted(counter.items()))
-            for key, counter in groups.items()
-            if counter
-        },
-    }
-
-
-def _domain_audit_report(
-    name: str,
-    domain: Dict[str, Any],
-    source: str | None,
-) -> Dict[str, Any]:
-    statuses = domain.get("combination_status", {}) or {}
-    report = {
-        "schema": "litmus-link.audit.v1",
-        "profile": name,
-        "total_combinations": int(domain.get("total_combinations", 0)),
-        "generated": int(statuses.get(GENERATED, 0)),
-        "generated_litmus": int(domain.get("generated_cases", 0)),
-        "excluded_illegal": int(statuses.get("excluded_illegal", 0)),
-        "excluded_unsupported": int(statuses.get("excluded_unsupported", 0)),
-        "hand_required": int(statuses.get("hand_required", 0)),
-        "missing": int(statuses.get("missing", 0)),
-    }
-    if source:
-        report["source"] = source
-    return report
 
 
 def _preview_verdict(solver: Dict[str, Any]) -> str:
@@ -1207,8 +799,7 @@ def _memory_locations_from_ir(case_ir: Dict[str, Any] | None) -> list[str]:
 
 def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     out_dir = Path(str(payload.get("out") or "out/gui-audit"))
-    summary_only = bool(payload.get("summary_only", True))
-    mode = str(payload.get("mode", "profile"))
+    mode = str(payload.get("mode", "scalar"))
     if mode == "scalar":
         return _scalar_audit_payload(payload, out_dir)
     if mode == "vector":
@@ -1218,12 +809,7 @@ def audit_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         return audit
-    if mode == "profile":
-        return write_audit(str(payload.get("profile") or "smoke"), out_dir, summary_only=summary_only)
-    name, combinations, source = _combinations_from_payload(payload)
-    if source == "gui" and corpus_available():
-        return _gui_corpus_audit(name, list(combinations), out_dir, source, summary_only)
-    return write_audit_for_combinations(name, combinations, out_dir, source=source, summary_only=summary_only)
+    raise ValueError("GUI workflow supports only scalar and vector modes")
 
 
 def generate_payload(
@@ -1231,288 +817,12 @@ def generate_payload(
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Dict[str, Any]:
     out_dir = Path(str(payload.get("out") or "out/gui-generated"))
-    mode = str(payload.get("mode", "profile"))
+    mode = str(payload.get("mode", "scalar"))
     if mode == "scalar":
         return _run_scalar_generator(payload, out_dir, progress_callback=progress_callback)
     if mode == "vector":
         return generate_vector_cases(payload, out_dir, progress_callback=progress_callback)
-    if mode == "profile":
-        return generate_profile(
-            str(payload.get("profile") or "smoke"),
-            out_dir,
-            progress_callback=progress_callback,
-            diagrams=bool(payload.get("diagrams", False)),
-        )
-    name, combinations, source = _combinations_from_payload(payload)
-    if source == "gui" and corpus_available():
-        compute_verdicts = bool(payload.get("compute_verdicts", True))
-        diagrams = bool(payload.get("diagrams", False))
-        if diagrams:
-            compute_verdicts = True
-        rule = payload.get("rule") if isinstance(payload.get("rule"), dict) else {}
-        limit = payload.get("generate_limit", rule.get("generate_limit", rule.get("limit")))
-        return _gui_corpus_generate(
-            name, list(combinations), out_dir, source,
-            generation_limit=int(limit) if limit is not None else None,
-            compute_verdicts=compute_verdicts,
-            diagrams=diagrams,
-            progress_callback=progress_callback,
-        )
-    return generate_combinations(
-        name,
-        combinations,
-        out_dir,
-        source=source,
-        progress_callback=progress_callback,
-        diagrams=bool(payload.get("diagrams", False)),
-    )
-
-
-# __LL_CORPUS_GENERATE__
-
-
-def _corpus_meta(test, verdict_json: Dict[str, Any] | None) -> Dict[str, Any]:
-    return {
-        "schema": "litmus-link.corpus-meta.v1",
-        "name": test.name,
-        "family": test.family,
-        "skeleton": test.skeleton,
-        "cycle": test.cycle,
-        "exists": test.exists,
-        "nprocs": test.nprocs,
-        "source_path": test.path,
-        "model": "rvwmo-herd7",
-        "verdict": verdict_json,
-    }
-
-
-def _write_corpus_family(
-    combination,
-    out_dir,
-    generation_limit,
-    compute_verdicts,
-    diagrams,
-    generated_names,
-    solver_counts,
-    seen_names,
-    errors,
-    progress_callback=None,
-    progress_total=0,
-) -> tuple[int, int]:
-    written = 0
-    rendered_diagrams = 0
-    remaining = None if generation_limit is None else max(generation_limit - len(generated_names), 0)
-    if remaining == 0:
-        return 0, 0
-    for test in tests_for_skeleton(combination.skeleton, limit=remaining):
-        if test.unique_id in seen_names:
-            continue
-        seen_names.add(test.unique_id)
-        (out_dir / f"{test.unique_id}.litmus").write_text(test.text, encoding="utf-8")
-        verdict_json = None
-        if compute_verdicts:
-            try:
-                verdict = _safe_corpus_judge(test)
-                verdict_json = _corpus_solver_json(verdict)
-                solver_counts[verdict_json["status"]] = solver_counts.get(verdict_json["status"], 0) + 1
-                if diagrams:
-                    render_diagram(corpus_to_ir(test, verdict), verdict_json, out_dir)
-                    rendered_diagrams += 1
-                (out_dir / f"{test.unique_id}.solver.json").write_text(
-                    json.dumps(verdict_json, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-                )
-            except Exception as exc:
-                errors.append({"case": test.unique_id, "path": test.path, "error": str(exc)})
-        (out_dir / f"{test.unique_id}.meta.json").write_text(
-            json.dumps(_corpus_meta(test, verdict_json), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        generated_names.append(f"{test.unique_id}.litmus")
-        written += 1
-        if progress_callback is not None:
-            progress_callback(
-                min(len(generated_names), progress_total),
-                progress_total,
-                f"Generated {len(generated_names)}/{progress_total}: {test.unique_id}",
-            )
-    return written, rendered_diagrams
-
-
-# __LL_CORPUS_GENERATE2__
-
-
-def _gui_corpus_generate(
-    name,
-    combinations,
-    out_dir,
-    source,
-    generation_limit=None,
-    compute_verdicts=False,
-    diagrams=False,
-    progress_callback=None,
-) -> Dict[str, Any]:
-    """Generate GUI custom-rule output, serving scalar RVWMO families from the
-    real corpus. Solver results are optional and PNG diagrams are independently
-    controlled so large corpus generation can keep drawing fully on demand."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    potential_report = _gui_corpus_report(name, combinations, source)
-    available_litmus = int(potential_report.get("generated_litmus", 0) or 0)
-    generated_names: list[str] = []
-    solver_counts = {"verified": 0, "conflict": 0, "not_applicable": 0}
-    counts = {GENERATED: 0, "excluded_illegal": 0, "excluded_unsupported": 0, "hand_required": 0, "missing": 0}
-    seen_names: set[str] = set()
-    excluded: list[Dict[str, Any]] = []
-    errors: list[Dict[str, Any]] = []
-    total = len(combinations)
-    generated_litmus = 0
-    generated_diagrams = 0
-    progress_total = min(available_litmus, generation_limit) if generation_limit is not None else available_litmus
-    progress_total = max(progress_total, 1)
-    if progress_callback is not None:
-        progress_callback(0, progress_total, f"Generating 0/{min(available_litmus, progress_total)} cases")
-    for combination in combinations:
-        if generation_limit is not None and generated_litmus >= generation_limit:
-            break
-        if _is_scalar_corpus_combination(combination):
-            counts[GENERATED] += 1
-            written, rendered = _write_corpus_family(
-                combination, out_dir, generation_limit, compute_verdicts, diagrams,
-                generated_names, solver_counts, seen_names, errors,
-                progress_callback, progress_total,
-            )
-            generated_litmus += written
-            generated_diagrams += rendered
-            continue
-        decision = evaluate(combination)
-        counts[decision.status] = counts.get(decision.status, 0) + 1
-        if decision.status == GENERATED:
-            for case in render_cases(combination, decision):
-                if generation_limit is not None and generated_litmus >= generation_limit:
-                    break
-                status, fname = write_one_generated_case(case, out_dir, diagrams=diagrams)
-                if diagrams and case.case_ir is not None:
-                    generated_diagrams += 1
-                solver_counts[status] = solver_counts.get(status, 0) + 1
-                generated_names.append(fname)
-                generated_litmus += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        min(generated_litmus, progress_total),
-                        progress_total,
-                        f"Generated {generated_litmus}/{progress_total}: {case.name}",
-                    )
-        else:
-            excluded.append({"combination": combination.to_json(), "decision": decision.to_json()})
-
-    report = {
-        "schema": "litmus-link.audit.v1",
-        "profile": name,
-        "total_combinations": total,
-        "generated": counts[GENERATED],
-        "generated_litmus": generated_litmus,
-        "available_litmus": available_litmus,
-        "excluded_illegal": counts["excluded_illegal"],
-        "excluded_unsupported": counts["excluded_unsupported"],
-        "hand_required": counts["hand_required"],
-        "missing": counts["missing"],
-        "solver": solver_counts,
-        "verdict_mode": "computed" if compute_verdicts else "deferred",
-        "diagram_mode": "eager" if diagrams else "on_demand",
-        "generated_diagrams": generated_diagrams,
-        "generation_limit": generation_limit,
-        "generation_limited": generation_limit is not None and generated_litmus < available_litmus,
-        "generation_errors": len(errors),
-        "source": source,
-    }
-    (out_dir / "excluded.json").write_text(json.dumps(excluded, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if errors:
-        (out_dir / "generation-errors.json").write_text(json.dumps(errors, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out_dir / "@all").write_text("\n".join(generated_names) + ("\n" if generated_names else ""), encoding="utf-8")
-    (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if progress_callback is not None:
-        progress_callback(progress_total, progress_total, "Finalized indexes and audit report")
-    return report
-
-
-def _gui_corpus_audit(name, combinations, out_dir, source, summary_only) -> Dict[str, Any]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report = _gui_corpus_report(name, combinations, source)
-    (out_dir / "cross-coverage.md").write_text(_coverage_markdown(report), encoding="utf-8")
-    (out_dir / "audit-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return report
-
-
-def _combinations_from_payload(payload: Dict[str, Any]) -> Tuple[str, Iterable[Combination], str | None]:
-    mode = str(payload.get("mode", "profile"))
-    if mode == "profile":
-        profile = str(payload.get("profile") or "smoke")
-        return profile, profile_combinations(profile), None
-    if mode == "vector":
-        return _vector_combinations_from_payload(payload)
-    rule = payload.get("rule")
-    if not isinstance(rule, dict):
-        raise RuleFileError("custom GUI requests must include a rule object")
-    rule_set = load_rule_data(rule, Path("<gui-rule>"))
-    return rule_set.name, rule_set.combinations, "gui"
-
-
-def _vector_combinations_from_payload(
-    payload: Dict[str, Any],
-) -> Tuple[str, list[Combination], str | None]:
-    """Return the legality-filtered formal Vector domain selected by the GUI.
-
-    The dedicated Vector GUI filters the canonical ``vector_mem`` profile
-    instead of rebuilding a Cartesian product.  This preserves its conditional
-    SEW/LMUL, same-line, form/endpoint, and indexed-EEW legality rules.
-    """
-    if bool(payload.get("complete", False)):
-        return "vector_mem", vector_combinations("vector_mem"), "vector-gui"
-
-    skeletons = _vector_filter_values(
-        payload, "skeletons", FORMAL_VECTOR_SKELETONS
-    )
-    forms = _vector_filter_values(payload, "forms", VECTOR_OPS)
-    sews = _vector_filter_values(payload, "sew", VECTOR_WIDTHS)
-    lmuls = _vector_filter_values(payload, "lmul", VECTOR_LMULS)
-    index_eews = _vector_filter_values(payload, "index_eew", VECTOR_INDEX_EEWS)
-    masks = _vector_filter_values(payload, "mask", VECTOR_MASKS)
-    tails = _vector_filter_values(payload, "tail", VECTOR_TAILS)
-    vls = _vector_filter_values(payload, "vl", VECTOR_LENGTHS)
-    endpoint_scope = str(payload.get("endpoint_scope", "all"))
-    if endpoint_scope not in {"all", "first"}:
-        raise ValueError("vector endpoint_scope must be 'all' or 'first'")
-
-    selected = vector_combinations(
-        str(payload.get("name") or "vector-custom"),
-        skeletons=skeletons,
-        vectors=forms,
-        widths=sews,
-        lmuls=lmuls,
-        index_eews=index_eews,
-        masks=masks,
-        tails=tails,
-        lengths=vls,
-        endpoint_scope=endpoint_scope,
-    )
-
-    if not selected:
-        raise ValueError("the selected Vector filters contain no legal combinations")
-    return str(payload.get("name") or "vector-custom"), selected, "vector-gui"
-
-
-def _vector_filter_values(
-    payload: Dict[str, Any], key: str, allowed: Iterable[str]
-) -> list[str]:
-    domain = list(allowed)
-    selected = _string_list(payload.get(key))
-    if not selected:
-        raise ValueError(f"select at least one Vector {key} value")
-    unknown = sorted(set(selected) - set(domain))
-    if unknown:
-        raise ValueError(
-            f"unknown Vector {key} value(s): {', '.join(unknown)}"
-        )
-    selected_set = set(selected)
-    return [value for value in domain if value in selected_set]
+    raise ValueError("GUI workflow supports only scalar and vector modes")
 
 
 def _scalar_audit_payload(payload: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
