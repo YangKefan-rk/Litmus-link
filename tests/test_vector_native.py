@@ -4,14 +4,19 @@ import json
 import re
 from collections import Counter
 from dataclasses import replace
+from itertools import product
+from types import SimpleNamespace
 
 import pytest
+import litmus_link.vector_native as vector_native
 
 from litmus_link.amo import AMO_OPERATIONS, AMO_ORDERINGS
 from litmus_link.native_cycles import vertex_directions
 from litmus_link.native_edges import READ
 from litmus_link.native_scalar import native_template_cycles
+from litmus_link.profiles import vector_effective_vl
 from litmus_link.solver import solve_generated_case
+from litmus_link.vector_solver import expand_vector_case, solve_vector_case
 from litmus_link.validator import validate_path
 from litmus_link.vector_native import (
     EndpointChoice,
@@ -218,6 +223,57 @@ def test_vector_crosscheck_backend_runs_external_projection() -> None:
     }
 
 
+def test_vector_backend_only_requests_herd_projection_for_crosscheck(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    external_flags = []
+
+    def fake_solver(_case, *, vector_external_check=False):  # type: ignore[no-untyped-def]
+        external_flags.append(vector_external_check)
+        return SimpleNamespace(
+            to_json=lambda: {
+                "status": "verified",
+                "verdict": "allowed",
+                "allowed": True,
+                "cross_check": "not_run",
+            }
+        )
+
+    monkeypatch.setattr(vector_native, "solve_generated_case", fake_solver)
+    sample_vector_cases(
+        _small_payload(sample_limit=1, solver_backend="embedded"),
+        compute_verdicts=True,
+    )
+    sample_vector_cases(
+        _small_payload(sample_limit=1, solver_backend="crosscheck"),
+        compute_verdicts=True,
+    )
+    assert external_flags == [False, True]
+
+
+def test_vector_candidate_limit_is_inconclusive_not_forbidden() -> None:
+    cycles = native_template_cycles(["SB"], ["fence"])[0]
+    cycle = next(
+        cycle
+        for cycle in cycles
+        if cycle.labels
+        == ("Fence.r.rsWR", "Fre", "Fence.rw.rwsWR", "Fre")
+    )
+    directions = vertex_directions(cycle.edges)
+    choices = (
+        _vector_choice(directions[0]),
+        _vector_choice(directions[1]),
+        _amo_choice(directions[2], "add", "d", "relaxed"),
+        _vector_choice(directions[3]),
+    )
+    case = lower_vector_assignment(VectorAssignment(cycle, choices))
+    verdict = solve_vector_case(case.case_ir, max_candidates=1)
+    assert verdict.status == "inconclusive"
+    assert verdict.verdict == "unknown"
+    assert verdict.allowed is None
+    assert "forbidden verdict requires exhaustive search" in verdict.reason
+
+
 @pytest.mark.parametrize("layout", ["same_start", "contained", "low_partial", "high_partial"])
 def test_mixed_width_overlap_layouts_are_naturally_aligned_and_formal(layout: str) -> None:
     domain = VectorNativeDomain.from_payload(
@@ -292,6 +348,124 @@ def test_domain_includes_all_selected_axes() -> None:
     assert {choice.width_bytes for choice in domain.read_choices if choice.category == "scalar"} == {1, 2, 4, 8}
     assert {str((choice.params or {}).get("amo_op")) for choice in domain.read_choices if choice.category == "amo"} == set(AMO_OPERATIONS)
     assert {str((choice.params or {}).get("amo_ordering")) for choice in domain.read_choices if choice.category == "amo"} == set(AMO_ORDERINGS)
+    actual_amos = {
+        (
+            str((choice.params or {}).get("amo_op")),
+            str((choice.params or {}).get("amo_width")),
+            str((choice.params or {}).get("amo_ordering")),
+            choice.direction,
+        )
+        for choice in (*domain.read_choices, *domain.write_choices)
+        if choice.category == "amo"
+    }
+    assert actual_amos == set(
+        product(AMO_OPERATIONS, ("w", "d"), AMO_ORDERINGS, ("R", "W"))
+    )
+
+
+def test_all_scalar_vector_width_pairs_and_overlap_shapes_remain_aligned() -> None:
+    cycle = native_template_cycles(["MP"], ["po"])[0][0]
+    directions = vertex_directions(cycle.edges)
+    for scalar_width, vector_sew, layout in product(
+        ("b", "h", "w", "d"),
+        ("e8", "e16", "e32", "e64"),
+        ("same_start", "contained", "low_partial", "high_partial"),
+    ):
+        choices = (
+            _vector_choice(directions[0], vector_sew),
+            _scalar_choice(directions[1], scalar_width),
+            _scalar_choice(directions[2], "d"),
+            _scalar_choice(directions[3], "b"),
+        )
+        case = lower_vector_assignment(
+            VectorAssignment(cycle, choices, overlap_layout=layout)
+        )
+        expansion = expand_vector_case(case.case_ir)
+        assert all(
+            event.memory_access is None or event.memory_access.natural_aligned
+            for event in expansion.case.events()
+        ), (scalar_width, vector_sew, layout)
+
+
+def test_every_generated_vector_endpoint_has_aligned_active_elements() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _payload(
+            skeletons=["Co"],
+            mechanisms=["po"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=[
+                "unit_load", "unit_store", "strided_load", "strided_store",
+                "indexed_unordered_load", "indexed_unordered_store",
+                "indexed_ordered_load", "indexed_ordered_store",
+            ],
+        )
+    )
+    vector_choices = [
+        choice
+        for choice in (*domain.read_choices, *domain.write_choices)
+        if choice.category == "vector"
+    ]
+    assert vector_choices
+    for choice in vector_choices:
+        params = dict(choice.params or {})
+        width = choice.width_bytes
+        effective_vl = vector_effective_vl(
+            str(params["sew"]), str(params["lmul"]), str(params["vl"])
+        )
+        assert effective_vl is not None
+        stride = width * 2 if choice.vector_form.startswith("strided_") else width
+        active = [
+            index
+            for index in range(effective_vl)
+            if params["mask"] == "unmasked" or index % 2 == 0
+        ]
+        assert active
+        assert all((index * stride) % width == 0 for index in active)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("scalar_widths", "scalar width"),
+        ("amo_ops", "AMO opcode"),
+        ("amo_widths", "AMO width"),
+        ("amo_orderings", "AMO ordering"),
+        ("forms", "Vector form"),
+        ("sew", "SEW"),
+        ("lmul", "LMUL"),
+        ("mask", "mask mode"),
+        ("tail", "tail policy"),
+        ("vl", "Vector length"),
+        ("alignments", "Vector alignment"),
+        ("overlap_layouts", "fusion overlap layout"),
+    ],
+)
+def test_empty_enabled_axis_is_rejected(field: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        VectorNativeDomain.from_payload(_small_payload(**{field: []}))
+
+
+def test_indexed_form_requires_an_index_eew() -> None:
+    with pytest.raises(ValueError, match="indexed offset EEW"):
+        VectorNativeDomain.from_payload(
+            _small_payload(forms=["indexed_ordered_load"], index_eew=[])
+        )
+
+
+def test_impossible_vector_only_direction_is_audited() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["unit_load"],
+        )
+    )
+    audit = domain.audit()
+    assert domain.total_cases == 0
+    assert audit["request_exclusions"] == {
+        "excluded_unsatisfiable_endpoint_composition": 1
+    }
 
 
 def test_audit_accounts_for_illegal_vector_configs_and_nanhu_amo_widths() -> None:
@@ -326,12 +500,14 @@ def test_scope_audit_excludes_misaligned_amo_and_pbmt_requests() -> None:
             alignments=["aligned", "misalign_cross64"],
             attributes=["cacheable", "pbmt_nc", "pbmt_io"],
             pbmt=[0, 1, 2, 3],
+            pma_atomic=False,
         )
     )
     audit = domain.audit()
     assert audit["request_exclusions"] == {
         "excluded_illegal_misaligned_amo_request": 1,
         "excluded_illegal_pbmt_reserved_request": 1,
+        "excluded_unsupported_pma_nonatomic_request": 1,
         "excluded_unsupported_pbmt_nc_io_request": 4,
     }
     assert audit["formal_scope"] == {

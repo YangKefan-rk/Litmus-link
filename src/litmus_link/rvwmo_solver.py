@@ -767,15 +767,13 @@ def _static_relations(
         dependency = relation.kind == "dependency" or any(
             token in label for token in ("addr", "data", "ctrl")
         )
-        if dependency:
-            # A dependency sourced by a Vector load consumes vmv.x.s element 0,
-            # not every active element of the parent memory instruction.  A
-            # dependency targeting a Vector access still reaches every element
-            # because the generated base/data operand is shared by the full
-            # instruction.
-            element_zero = tuple(source for source in sources if source.event_id.endswith(".e0"))
-            if element_zero:
-                sources = element_zero
+        if not dependency:
+            continue
+        # Relations are recorded between architectural parent instructions.
+        # Every active memory element belongs to that instruction, so lift both
+        # endpoints over the complete parent event set. Element-level ordering
+        # inside an unordered Vector instruction remains absent; this only
+        # preserves the parent dependency to another instruction.
         lifted = {
             (source.event_id, target.event_id)
             for source in sources

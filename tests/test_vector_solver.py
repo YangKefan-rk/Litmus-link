@@ -10,6 +10,7 @@ from litmus_link.profiles import FORMAL_VECTOR_SKELETONS, VECTOR_ENDPOINTS
 from litmus_link.renderer import render_cases
 from litmus_link.rules import evaluate
 from litmus_link.solver import solve_generated_case
+from litmus_link.vector_native import VectorNativeDomain, lower_vector_assignment
 from litmus_link.vector_solver import SUPPORTED_VECTOR_FORMS, expand_vector_case, solve_vector_case
 
 
@@ -169,6 +170,50 @@ def test_ordered_indexed_adds_element_ppo_but_unordered_does_not() -> None:
     assert len(ordered.embedded.execution.ppo_rules["vector-element-order"]) == 6
     assert unordered.embedded.execution.ppo_rules["vector-element-order"] == set()
     assert ("p1_rx.e0", "p1_rx.e1") not in unordered.embedded.execution.po
+
+
+def test_parent_dependency_lifts_to_all_active_vector_elements() -> None:
+    domain = VectorNativeDomain.from_payload(
+        {
+            "skeletons": ["LB"],
+            "mechanisms": ["po", "dependency"],
+            "endpoint_categories": ["vector"],
+            "endpoint_compositions": ["vector_only"],
+            "overlap_layouts": ["same_start"],
+            "forms": ["unit_load", "unit_store"],
+            "sew": ["e32"],
+            "lmul": ["m1"],
+            "index_eew": ["ei16"],
+            "mask": ["unmasked"],
+            "tail": ["ta_ma"],
+            "vl": ["vl2"],
+            "alignments": ["aligned"],
+        }
+    )
+    assignment = next(
+        assignment
+        for assignment in domain.assignments()
+        if any(label.startswith("Dp") for label in assignment.cycle.labels)
+    )
+    case = lower_vector_assignment(assignment).case_ir
+    result = solve_vector_case(case)
+    assert result.embedded is not None and result.embedded.execution is not None
+    dependency = next(
+        relation
+        for relation in case.relations
+        if relation.kind == "dependency"
+    )
+    expected = {
+        (f"{dependency.src}.e{source}", f"{dependency.dst}.e{target}")
+        for source in range(2)
+        for target in range(2)
+    }
+    actual = set().union(
+        result.embedded.execution.ppo_rules["r9"],
+        result.embedded.execution.ppo_rules["r10"],
+        result.embedded.execution.ppo_rules["r11"],
+    )
+    assert expected <= actual
 
 
 def test_mask_removes_inactive_elements_from_memory_graph() -> None:

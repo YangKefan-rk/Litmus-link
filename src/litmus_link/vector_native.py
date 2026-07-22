@@ -327,6 +327,8 @@ class VectorNativeDomain:
             else ((), _empty_endpoint_audit())
         )
         requested_alignments = _selected(payload, "alignments", ("aligned",))
+        if not requested_alignments:
+            raise ValueError("select at least one Vector alignment")
         known_misaligned = {
             "misalign_same16",
             "misalign_cross16",
@@ -350,6 +352,8 @@ class VectorNativeDomain:
         if not supported_scope_requested:
             alignments = ()
         overlap_layouts = _selected(payload, "overlap_layouts", ("same_start",))
+        if not overlap_layouts:
+            raise ValueError("select at least one fusion overlap layout")
         unknown_layouts = set(overlap_layouts) - set(FUSION_OVERLAP_LAYOUTS)
         if unknown_layouts:
             raise ValueError(
@@ -377,6 +381,19 @@ class VectorNativeDomain:
         choices = tuple((*scalar_choices, *amo_choices, *vector_choices))
         read_choices = tuple(choice for choice in choices if choice.direction == READ)
         write_choices = tuple(choice for choice in choices if choice.direction == WRITE)
+        impossible_compositions = _impossible_endpoint_compositions(
+            compositions,
+            read_choices,
+            write_choices,
+            cycles,
+        )
+        if impossible_compositions:
+            request_exclusions = {
+                **dict(request_exclusions),
+                "excluded_unsatisfiable_endpoint_composition": len(
+                    impossible_compositions
+                ),
+            }
         return cls(
             tuple(cycles),
             read_choices,
@@ -763,6 +780,38 @@ def _derived_seed(seed: int, family: str) -> int:
         (index + 1) * ord(character) for index, character in enumerate(family)
     )
     return (seed * 1_000_003 + family_value) & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _impossible_endpoint_compositions(
+    compositions: Sequence[str],
+    read_choices: Sequence[EndpointChoice],
+    write_choices: Sequence[EndpointChoice],
+    cycles: Sequence[NativeCycle],
+) -> tuple[str, ...]:
+    categories = {
+        READ: tuple(dict.fromkeys(choice.category for choice in read_choices)),
+        WRITE: tuple(dict.fromkeys(choice.category for choice in write_choices)),
+    }
+    direction_shapes = {
+        vertex_directions(cycle.edges)
+        for cycle in cycles
+    }
+    impossible = []
+    for name in compositions:
+        required = _COMPOSITION_CATEGORIES[name]
+        possible = any(
+            all(categories[direction] for direction in shape)
+            and any(
+                frozenset(assignment) == required
+                for assignment in product(
+                    *(categories[direction] for direction in shape)
+                )
+            )
+            for shape in direction_shapes
+        )
+        if not possible:
+            impossible.append(name)
+    return tuple(impossible)
 
 
 def _balanced_quotas(
@@ -1502,6 +1551,8 @@ def _fusion_request_audit(
     raw_attributes = payload.get("attributes", payload.get("attribute"))
     if raw_attributes is not None:
         attributes = _request_values(raw_attributes, "attributes")
+        if not attributes:
+            raise ValueError("select at least one fusion memory attribute")
         known = {
             "cacheable",
             "pbmt_nc",
@@ -1524,6 +1575,8 @@ def _fusion_request_audit(
 
     if "pbmt" in payload:
         pbmt_values = _request_values(payload.get("pbmt"), "pbmt")
+        if not pbmt_values:
+            raise ValueError("select at least one PBMT value")
         parsed_pbmt: list[int] = []
         for value in pbmt_values:
             try:
@@ -1544,7 +1597,11 @@ def _fusion_request_audit(
 
     if payload.get("pma_atomic") is False:
         excluded["excluded_unsupported_pma_nonatomic_request"] += 1
-        supported_scope = False
+        # The aligned-fusion workflow has one fixed Nanhu formal target:
+        # PMA atomic=true.  Treat an explicit ``false`` request like the
+        # unsupported members of the attribute/PBMT axes: account for it in
+        # the audit, then keep the supported fixed target instead of clearing
+        # an otherwise valid aligned domain.
 
     return (
         {reason: count for reason, count in sorted(excluded.items()) if count},
@@ -1562,6 +1619,8 @@ def _request_values(value: Any, field: str) -> tuple[str, ...]:
 
 def _scalar_choices(payload: Mapping[str, Any]) -> tuple[EndpointChoice, ...]:
     widths = _selected(payload, "scalar_widths", SCALAR_WIDTHS)
+    if not widths:
+        raise ValueError("select at least one scalar width")
     unknown = set(widths) - set(SCALAR_WIDTHS)
     if unknown:
         raise ValueError(f"unknown scalar width(s): {', '.join(sorted(unknown))}")
@@ -1595,6 +1654,12 @@ def _amo_choices_with_audit(
     operations = _selected(payload, "amo_ops", AMO_OPERATIONS)
     widths = _selected(payload, "amo_widths", AMO_WIDTHS)
     orderings = _selected(payload, "amo_orderings", AMO_ORDERINGS)
+    if not operations:
+        raise ValueError("select at least one AMO opcode")
+    if not widths:
+        raise ValueError("select at least one AMO width")
+    if not orderings:
+        raise ValueError("select at least one AMO ordering")
     unknown_ops = set(operations) - set(AMO_OPERATIONS)
     unknown_widths = set(widths) - {"b", "h", *AMO_WIDTHS}
     unknown_orderings = set(orderings) - set(AMO_ORDERINGS)
@@ -1649,6 +1714,19 @@ def _vector_choices_with_audit(
     masks = _selected(payload, "mask", VECTOR_MASKS)
     tails = _selected(payload, "tail", VECTOR_TAILS)
     vls = _selected(payload, "vl", VECTOR_LENGTHS)
+    required_axes = {
+        "Vector form": forms,
+        "SEW": sews,
+        "LMUL": lmuls,
+        "mask mode": masks,
+        "tail policy": tails,
+        "Vector length": vls,
+    }
+    for label, selected in required_axes.items():
+        if not selected:
+            raise ValueError(f"select at least one {label}")
+    if any("indexed" in form for form in forms) and not index_eews:
+        raise ValueError("select at least one indexed offset EEW")
     validators = (
         ("Vector form", forms, VECTOR_OPS),
         ("SEW", sews, VECTOR_WIDTHS),

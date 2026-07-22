@@ -1052,6 +1052,8 @@ class _LitmusLinkQtWindow:
             self._update_vector_endpoint_scope()
         elif control in self.vector_composition_checks:
             self._ensure_vector_composition()
+        elif control in self.vector_checks.get("forms", []):
+            self._update_vector_form_scope()
 
     def _update_vector_endpoint_scope(self) -> None:
         selected = {
@@ -1098,14 +1100,35 @@ class _LitmusLinkQtWindow:
                     check.setChecked(True)
                     break
 
+    def _update_vector_form_scope(self) -> None:
+        indexed = any(
+            check.isChecked()
+            and "indexed" in str(check.property("axis_value"))
+            for check in self.vector_checks.get("forms", [])
+        )
+        group = self.vector_group_by_key.get("index_eew")
+        if group is None:
+            return
+        active = indexed and self.vector_filter_widget.isEnabled()
+        group.setEnabled(active)
+        group.setProperty("dependency_state", "active" if indexed else "inactive")
+        for check in self.vector_checks.get("index_eew", []):
+            check.setEnabled(active)
+        self._refresh_widget_style(group)
+
     def _update_vector_scope(self, complete: bool) -> None:
         if not hasattr(self, "vector_filter_widget"):
             return
+        if complete:
+            for checks in self.vector_checks.values():
+                for check in checks:
+                    check.setChecked(True)
         self.vector_filter_widget.setEnabled(not complete)
         for group in self.vector_filter_groups:
             group.setProperty("group_state", "inactive" if complete else "active")
             self._refresh_widget_style(group)
         self._update_vector_endpoint_scope()
+        self._update_vector_form_scope()
 
     def _update_vector_generation_mode(self) -> None:
         if not hasattr(self, "vector_generation_mode"):
@@ -2488,7 +2511,7 @@ def _amo_ordering_label(value: str) -> str:
         "relaxed": "Relaxed",
         "aq": ".aq",
         "rl": ".rl",
-        "aqrl": ".aq.rl",
+        "aqrl": ".aqrl",
     }.get(value, value)
 
 

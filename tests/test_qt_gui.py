@@ -222,6 +222,24 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         assert "vector_scalar" not in without_scalar["endpoint_compositions"]
         assert "vector_scalar_amo" not in without_scalar["endpoint_compositions"]
         assert not ui.vector_group_by_key["scalar_widths"].isEnabled()
+        for check in ui.vector_checks["forms"]:
+            if "indexed" in str(check.property("axis_value")):
+                check.setChecked(False)
+        assert not ui.vector_group_by_key["index_eew"].isEnabled()
+
+        ui.vector_complete.setChecked(True)
+        restored = ui._payload()
+        assert set(restored["endpoint_categories"]) == {"vector", "scalar", "amo"}
+        assert set(restored["endpoint_compositions"]) == {
+            "vector_only", "vector_scalar", "vector_amo", "vector_scalar_amo"
+        }
+        assert all(
+            check.isChecked()
+            for checks in ui.vector_checks.values()
+            for check in checks
+        )
+        ui.vector_complete.setChecked(False)
+        assert ui.vector_group_by_key["index_eew"].isEnabled()
 
         crosscheck = ui.vector_solver_backend.findData("crosscheck")
         ui.vector_solver_backend.setCurrentIndex(crosscheck)
