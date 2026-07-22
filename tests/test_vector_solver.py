@@ -279,7 +279,7 @@ def test_vstart_restart_is_rejected_by_vector_solver() -> None:
     assert "vstart/restart" in result.reason
 
 
-def test_mixed_size_scalar_vector_endpoint_is_rejected() -> None:
+def test_mixed_size_scalar_vector_endpoint_is_formally_solved() -> None:
     case = _case("unit_load", sew="e64").case_ir
     harts = []
     for hart in case.harts:
@@ -292,5 +292,11 @@ def test_mixed_size_scalar_vector_endpoint_is_rejected() -> None:
             ]
         )
     result = solve_vector_case(replace(case, harts=harts))
-    assert result.status == "not_applicable"
-    assert "mixed-size is deferred" in result.reason
+    assert result.status == "verified"
+    assert result.embedded is not None
+    assert result.embedded.execution is not None
+    scalar = next(event for event in result.embedded.events if event.event_id == "p0_wx")
+    vector = next(event for event in result.embedded.events if event.event_id == "p1_rx.e0")
+    assert scalar.access_size == 4
+    assert vector.access_size == 8
+    assert scalar.byte_locations < vector.byte_locations

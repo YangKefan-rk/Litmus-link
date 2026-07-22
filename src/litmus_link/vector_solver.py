@@ -347,7 +347,7 @@ def is_vector_case(case: LitmusCaseIR) -> bool:
 
 def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
     config_by_event = _vector_configs(case)
-    _validate_same_location_widths(case, config_by_event)
+    _validate_aligned_mixed_size_scope(case, config_by_event)
     harts: list[list[LitmusEvent]] = []
     order_by_event: dict[str, int] = {}
     instruction_by_event: dict[str, str] = {}
@@ -417,6 +417,9 @@ def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
                         offset,
                         config.element_bytes,
                         config.atomicity_model,
+                        transaction_kind="vector_element",
+                        parent_instruction=event.event_id,
+                        element_index=index,
                     ),
                 )
                 expanded_hart.append(expanded_event)
@@ -556,54 +559,28 @@ def _scalar_element_instruction(kind: str, sew_bits: int) -> str:
     return f"{mnemonic} {register},0(x31)"
 
 
-def _validate_same_location_widths(
+def _validate_aligned_mixed_size_scope(
     case: LitmusCaseIR,
     configs: Mapping[str, VectorConfig],
 ) -> None:
-    vector_widths: dict[str, set[int]] = {}
-    for event in case.events():
-        if _is_vector_memory(event):
-            vector_widths.setdefault(event.location, set()).add(configs[event.event_id].sew_bits)
-    for location, widths in vector_widths.items():
-        if len(widths) != 1:
+    for event_id, config in configs.items():
+        if config.atomicity_model != "aligned_atomic" or config.alignment != "aligned":
             raise VectorSolverError(
-                f"multiple Vector SEWs overlap at {location}: {sorted(widths)}; mixed-size is deferred"
+                f"Vector event {event_id} is misaligned; aligned Vector/scalar/AMO fusion only"
             )
+        for index in range(config.effective_vl):
+            if not config.active(index):
+                continue
+            offset = config.base_offset_bytes + config.offset(index)
+            if offset % config.element_bytes:
+                raise VectorSolverError(
+                    f"Vector event {event_id} element {index} is not naturally aligned"
+                )
     for event in case.events():
-        if (
-            event.kind not in {"load", "store", "amo"}
-            or _is_vector_memory(event)
-            or event.location not in vector_widths
-        ):
+        if event.kind != "amo" or event.memory_access is None:
             continue
-        mnemonic = event.instruction.strip().split(maxsplit=1)[0].lower()
-        width = event.memory_access.size_bytes * 8 if event.memory_access is not None else {
-            "lb": 8,
-            "lbu": 8,
-            "sb": 8,
-            "lh": 16,
-            "lhu": 16,
-            "sh": 16,
-            "lw": 32,
-            "lwu": 32,
-            "sw": 32,
-            "ld": 64,
-            "sd": 64,
-        }.get(mnemonic)
-        expected = next(iter(vector_widths[event.location]))
-        if width != expected:
-            raise VectorSolverError(
-                f"scalar/vector access width mismatch at {event.location}: "
-                f"scalar={width or 'unknown'}, vector SEW={expected}; mixed-size is deferred"
-            )
-        if any(
-            config.atomicity_model == "byte_level_no_mag"
-            for vector_id, config in configs.items()
-            if case.event_map()[vector_id].location == event.location
-        ):
-            raise VectorSolverError(
-                f"misaligned Vector/scalar partial overlap at {event.location} requires a mixed-size atomic model"
-            )
+        if not event.memory_access.natural_aligned:
+            raise VectorSolverError(f"AMO event {event.event_id} is not naturally aligned")
 
 
 def _integer(value: object, field: str) -> int:

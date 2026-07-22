@@ -106,7 +106,7 @@ def test_byte_level_no_mag_allows_a_torn_read_without_sync() -> None:
     assert source_by_read["v1.b1"].startswith("init:")
 
 
-def test_mixed_size_atomic_is_not_claimed_verified_by_embedded_solver() -> None:
+def test_aligned_mixed_size_plain_transactions_receive_formal_verdict() -> None:
     layout = next(
         item
         for item in expand_memory_layouts(
@@ -117,8 +117,45 @@ def test_mixed_size_atomic_is_not_claimed_verified_by_embedded_solver() -> None:
     )
     case = lower_native_cycle(_case(["Rfe", "PodRR", "Fre", "PodWW"]).cycle, memory_layout=layout)
     verdict = solve_rvwmo(case.case_ir)
-    assert verdict.status == "not_applicable"
-    assert "mixed-size atomic" in verdict.reason
+    assert verdict.status == "verified"
+    assert verdict.verdict == "observable"
+    assert verdict.execution is not None
+    assert verdict.execution.rf_bytes
+    assert all(
+        len(event.footprint) == event.access_size
+        for event in verdict.events
+        if not event.initial
+    )
+    assert all(
+        not event.event_id.endswith(tuple(f".b{index}" for index in range(8)))
+        for event in verdict.events
+        if not event.initial
+    )
+
+
+def test_aligned_partial_overlap_is_computed_by_byte_footprint() -> None:
+    layout = next(
+        item
+        for item in expand_memory_layouts(
+            ("atomic_mixed",),
+            widths=(2, 4, 8),
+            atomic_overlaps=("partial_overlap",),
+            event_count=4,
+        )
+        if item.width_pattern == (2, 4, 8, 2)
+    )
+    case = lower_native_cycle(
+        _case(["Rfe", "PodRR", "Fre", "PodWW"]).cycle,
+        memory_layout=layout,
+    )
+    verdict = solve_rvwmo(case.case_ir)
+    assert verdict.status == "verified"
+    assert verdict.execution is not None
+    rf_bytes = verdict.execution.rf_bytes
+    assert ("v0", "v1", "x[6]") in rf_bytes
+    assert ("v0", "v1", "x[7]") in rf_bytes
+    assert ("init:x[4]", "v1", "x[4]") in rf_bytes
+    assert ("init:x[5]", "v1", "x[5]") in rf_bytes
 
 
 def test_memory_access_round_trips_through_case_ir_json() -> None:

@@ -22,6 +22,7 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from math import factorial
 from typing import Iterable, Iterator, Mapping, Sequence
 
 from .litmus_ir import LitmusCaseIR
@@ -29,6 +30,8 @@ from .litmus_ir import LitmusCaseIR
 
 Pair = tuple[str, str]
 Relation = set[Pair]
+ByteEdge = tuple[str, str, str]
+ByteRelation = set[ByteEdge]
 
 
 class RvwmoSolverError(ValueError):
@@ -69,10 +72,30 @@ class MemoryEvent:
     byte_offset: int | None = None
     access_size: int = 0
     atomicity_model: str = "location_atomic"
+    footprint: tuple[str, ...] = ()
+    read_bytes: tuple[tuple[str, int | None], ...] = ()
+    write_bytes: tuple[tuple[str, int | None], ...] = ()
+    transaction_kind: str = "legacy"
 
     @property
     def rcsc(self) -> bool:
         return self.amo and (self.aq or self.rl)
+
+    @property
+    def byte_locations(self) -> frozenset[str]:
+        return frozenset(self.footprint or (self.location,))
+
+    def reads_byte(self, location: str) -> bool:
+        return any(byte == location for byte, _value in self.read_bytes)
+
+    def writes_byte(self, location: str) -> bool:
+        return any(byte == location for byte, _value in self.write_bytes)
+
+    def read_byte_value(self, location: str) -> int | None:
+        return next((value for byte, value in self.read_bytes if byte == location), None)
+
+    def write_byte_value(self, location: str) -> int | None:
+        return next((value for byte, value in self.write_bytes if byte == location), None)
 
     def to_json(self) -> dict:
         return {
@@ -92,6 +115,16 @@ class MemoryEvent:
             "byte_offset": self.byte_offset,
             "access_size": self.access_size,
             "atomicity_model": self.atomicity_model,
+            "footprint": list(self.footprint or (self.location,)),
+            "read_bytes": [
+                {"location": location, "value": value}
+                for location, value in self.read_bytes
+            ],
+            "write_bytes": [
+                {"location": location, "value": value}
+                for location, value in self.write_bytes
+            ],
+            "transaction_kind": self.transaction_kind,
         }
 
 
@@ -104,6 +137,9 @@ class Execution:
     po_loc: Relation
     ppo: Relation
     ppo_rules: Mapping[str, Relation]
+    rf_bytes: ByteRelation = field(default_factory=set)
+    co_bytes: ByteRelation = field(default_factory=set)
+    fr_bytes: ByteRelation = field(default_factory=set)
 
     def to_json(self) -> dict:
         return {
@@ -118,7 +154,18 @@ class Execution:
                 for rule, edges in sorted(self.ppo_rules.items())
                 if edges
             },
+            "byte_relations": {
+                "rf": _byte_pairs_json(self.rf_bytes),
+                "co": _byte_pairs_json(self.co_bytes),
+                "fr": _byte_pairs_json(self.fr_bytes),
+            },
         }
+
+
+@dataclass(frozen=True)
+class _CandidateRelation:
+    relation: Relation
+    bytes: ByteRelation
 
 
 @dataclass(frozen=True)
@@ -209,8 +256,8 @@ def solve_rvwmo(
     consistent = 0
     last_execution: Execution | None = None
     try:
-        for rf in _rf_candidates(events):
-            for co in _co_candidates(events, final_values):
+        for co in _co_candidates(events, final_values):
+            for rf in _rf_candidates(events, co):
                 if time.monotonic() - started > timeout_seconds:
                     raise _SearchLimit("timeout")
                 candidates += 1
@@ -288,7 +335,7 @@ class _SearchLimit(RuntimeError):
 
 def _memory_events(case: LitmusCaseIR, ordering: OrderingOverrides) -> tuple[MemoryEvent, ...]:
     memory: list[MemoryEvent] = []
-    locations: set[str] = set()
+    byte_locations: set[str] = set()
     for hart, sequence in enumerate(case.harts):
         order = 0
         for event in sequence:
@@ -302,12 +349,16 @@ def _memory_events(case: LitmusCaseIR, ordering: OrderingOverrides) -> tuple[Mem
             instruction_id = ordering.instruction_by_event.get(event.event_id, event.event_id)
             classified = _classify_events(event, hart, event_order, instruction_id)
             memory.extend(classified)
-            locations.update(item.location for item in classified)
+            byte_locations.update(
+                location
+                for item in classified
+                for location in item.byte_locations
+            )
             order += 1
     if not memory:
         raise RvwmoSolverError("case has no scalar memory events")
     init = _initial_values(case.init_lines)
-    for location in sorted(locations):
+    for location in sorted(byte_locations):
         memory.append(
             MemoryEvent(
                 event_id=f"init:{location}",
@@ -317,12 +368,15 @@ def _memory_events(case: LitmusCaseIR, ordering: OrderingOverrides) -> tuple[Mem
                 read=False,
                 write=True,
                 read_value=None,
-                write_value=init.get(location, 0),
+                write_value=_initial_byte_value(init, location),
                 initial=True,
                 instruction_id=f"init:{location}",
                 byte_offset=_location_byte_offset(location),
                 access_size=1 if _location_byte_offset(location) is not None else 0,
                 atomicity_model="initial",
+                footprint=(location,),
+                write_bytes=((location, _initial_byte_value(init, location)),),
+                transaction_kind="initial",
             )
         )
     ids = [event.event_id for event in memory]
@@ -338,9 +392,9 @@ def _classify_events(
     instruction_id: str,
 ) -> tuple[MemoryEvent, ...]:
     access = event.memory_access
-    if access is not None and access.atomicity_model == "mixed_size_atomic":
+    if access is not None and access.atomicity_model == "mixed_size_atomic" and event.kind == "amo":
         raise RvwmoSolverError(
-            f"mixed-size atomic access {event.event_id} requires a mixed-size atomic execution model"
+            f"mixed-size AMO access {event.event_id} requires the AMO transaction model"
         )
     if access is not None and access.atomicity_model == "byte_level_no_mag":
         if event.kind not in {"load", "store"}:
@@ -367,6 +421,18 @@ def _classify_events(
                     byte_offset=absolute_byte,
                     access_size=access.size_bytes,
                     atomicity_model="byte_level_no_mag",
+                    footprint=(access.byte_location(absolute_byte),),
+                    read_bytes=(
+                        ((access.byte_location(absolute_byte), byte_value),)
+                        if event.kind == "load"
+                        else ()
+                    ),
+                    write_bytes=(
+                        ((access.byte_location(absolute_byte), byte_value),)
+                        if event.kind == "store"
+                        else ()
+                    ),
+                    transaction_kind="byte_split",
                 )
             )
         return tuple(out)
@@ -379,38 +445,66 @@ def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: s
     rl = ".rl" in instruction or ".aq.rl" in instruction
     value = _integer(event.value, f"event {event.event_id} value") if event.value else None
     access = event.memory_access
+    inferred_size, inferred_offset = _instruction_access_shape(event.instruction)
     access_metadata = {
-        "byte_offset": access.offset_bytes if access is not None else _location_byte_offset(event.location),
-        "access_size": access.size_bytes if access is not None else 0,
+        "byte_offset": (
+            access.offset_bytes
+            if access is not None
+            else inferred_offset
+        ),
+        "access_size": (
+            access.size_bytes
+            if access is not None
+            else inferred_size or 0
+        ),
         "atomicity_model": access.atomicity_model if access is not None else "location_atomic",
     }
+    footprint = _event_footprint(event)
+    read_bytes = _value_bytes(footprint, value) if value is not None else tuple(
+        (location, None) for location in footprint
+    )
+    transaction_kind = access.transaction_kind if access is not None else "scalar_plain"
     if event.kind == "load":
         if value is None and not event.role.startswith("vector-element"):
             raise RvwmoSolverError(f"load {event.event_id} has no target read value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, True, False, value, None,
-            aq=aq, rl=rl, instruction_id=instruction_id, **access_metadata,
+            aq=aq, rl=rl, instruction_id=instruction_id,
+            footprint=footprint, read_bytes=read_bytes,
+            transaction_kind=transaction_kind, **access_metadata,
         )
     if event.kind == "store":
         if value is None:
             raise RvwmoSolverError(f"store {event.event_id} has no write value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, False, True, None, value,
-            aq=aq, rl=rl, instruction_id=instruction_id, **access_metadata,
+            aq=aq, rl=rl, instruction_id=instruction_id,
+            footprint=footprint, write_bytes=_value_bytes(footprint, value),
+            transaction_kind=transaction_kind, **access_metadata,
         )
     if "amoor" in instruction:
         if value is None:
             raise RvwmoSolverError(f"AMO load {event.event_id} has no target read value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, True, True, value, value,
-            aq=aq, rl=rl, amo=True, instruction_id=instruction_id, **access_metadata,
+            aq=aq, rl=rl, amo=True, instruction_id=instruction_id,
+            footprint=footprint,
+            read_bytes=read_bytes,
+            write_bytes=_value_bytes(footprint, value),
+            transaction_kind="amo_rmw",
+            **access_metadata,
         )
     if "amoswap" in instruction:
         if value is None:
             raise RvwmoSolverError(f"AMO store {event.event_id} has no write value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, True, True, None, value,
-            aq=aq, rl=rl, amo=True, instruction_id=instruction_id, **access_metadata,
+            aq=aq, rl=rl, amo=True, instruction_id=instruction_id,
+            footprint=footprint,
+            read_bytes=tuple((location, None) for location in footprint),
+            write_bytes=_value_bytes(footprint, value),
+            transaction_kind="amo_rmw",
+            **access_metadata,
         )
     raise RvwmoSolverError(f"unsupported AMO instruction in {event.event_id}: {event.instruction}")
 
@@ -425,6 +519,58 @@ def _initial_values(lines: Sequence[str]) -> dict[str, int]:
     return out
 
 
+def _initial_byte_value(initial: Mapping[str, int], byte_location: str) -> int:
+    base, offset = _split_byte_location(byte_location)
+    return (initial.get(base, 0) >> (8 * offset)) & 0xFF
+
+
+def _event_footprint(event: LitmusEvent) -> tuple[str, ...]:
+    access = event.memory_access
+    if access is not None:
+        return tuple(access.byte_location(offset) for offset in access.covered_bytes)
+    size, offset = _instruction_access_shape(event.instruction)
+    if size is None:
+        return (event.location,)
+    return tuple(f"{event.location}[{offset + index}]" for index in range(size))
+
+
+def _instruction_access_shape(instruction: str) -> tuple[int | None, int]:
+    normalized = instruction.strip().lower()
+    mnemonic = normalized.split(maxsplit=1)[0]
+    size = {
+        "lb": 1,
+        "lbu": 1,
+        "sb": 1,
+        "lh": 2,
+        "lhu": 2,
+        "sh": 2,
+        "lw": 4,
+        "lwu": 4,
+        "sw": 4,
+        "ld": 8,
+        "sd": 8,
+    }.get(mnemonic)
+    match = re.search(r"(-?\d+)\(x\d+\)", normalized)
+    return size, int(match.group(1)) if match else 0
+
+
+def _value_bytes(
+    footprint: Sequence[str],
+    value: int,
+) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        (location, (value >> (8 * index)) & 0xFF)
+        for index, location in enumerate(footprint)
+    )
+
+
+def _split_byte_location(location: str) -> tuple[str, int]:
+    match = re.fullmatch(r"([A-Za-z_]\w*)\[(\d+)\]", location)
+    if match:
+        return match.group(1), int(match.group(2))
+    return location, 0
+
+
 def _final_values(exists: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for location, value in re.findall(
@@ -435,9 +581,22 @@ def _final_values(exists: str) -> dict[str, int]:
     return out
 
 
+def _final_byte_value(final_values: Mapping[str, int], byte_location: str) -> int | None:
+    if byte_location in final_values:
+        return final_values[byte_location] & 0xFF
+    base, offset = _split_byte_location(byte_location)
+    if base not in final_values:
+        return None
+    return (final_values[base] >> (8 * offset)) & 0xFF
+
+
 def _location_byte_offset(location: str) -> int | None:
     match = re.fullmatch(r"[A-Za-z_]\w*\[(\d+)\]", location)
     return int(match.group(1)) if match else None
+
+
+def _overlap(left: MemoryEvent, right: MemoryEvent) -> bool:
+    return bool(left.byte_locations & right.byte_locations)
 
 
 def _static_relations(
@@ -469,7 +628,7 @@ def _static_relations(
     po.update(explicit_order)
     po_loc = {
         pair for pair in po
-        if event_map[pair[0]].location == event_map[pair[1]].location
+        if _overlap(event_map[pair[0]], event_map[pair[1]])
     }
     addr: Relation = set()
     data: Relation = set()
@@ -567,61 +726,179 @@ def _fence_orders(pred: str, succ: str, left: MemoryEvent, right: MemoryEvent) -
     return _mode_covers(pred, left) and _mode_covers(succ, right)
 
 
-def _rf_candidates(events: Sequence[MemoryEvent]) -> Iterator[Relation]:
+def _rf_candidates(
+    events: Sequence[MemoryEvent],
+    co: _CandidateRelation,
+) -> Iterator[_CandidateRelation]:
     writes = [event for event in events if event.write]
     reads = [event for event in events if event.read and not event.initial]
-    choices: list[list[Pair]] = []
+    choices: list[list[ByteEdge]] = []
     for read in reads:
-        sources = [
-            write
-            for write in writes
-            if write.location == read.location
-            and write.event_id != read.event_id
-            and (read.read_value is None or write.write_value == read.read_value)
-        ]
-        if not sources:
-            return
-        choices.append([(write.event_id, read.event_id) for write in sources])
+        for location, read_value in read.read_bytes:
+            sources = [
+                write
+                for write in writes
+                if write.writes_byte(location)
+                and write.event_id != read.event_id
+                and (
+                    read_value is None
+                    or write.write_byte_value(location) == read_value
+                )
+            ]
+            if not sources:
+                return
+            choices.append(
+                [(write.event_id, read.event_id, location) for write in sources]
+            )
     for selected in itertools.product(*choices):
-        yield set(selected)
+        byte_edges = set(selected)
+        fr_bytes = _from_read_bytes(byte_edges, co.bytes)
+        rf_pairs = {(write, read) for write, read, _location in byte_edges}
+        fr_pairs = {(read, write) for read, write, _location in fr_bytes}
+        if rf_pairs & {(write, read) for read, write in fr_pairs}:
+            continue
+        yield _CandidateRelation(
+            rf_pairs,
+            byte_edges,
+        )
 
 
-def _co_candidates(events: Sequence[MemoryEvent], final_values: Mapping[str, int]) -> Iterator[Relation]:
-    by_location: dict[str, list[MemoryEvent]] = defaultdict(list)
+def _co_candidates(
+    events: Sequence[MemoryEvent],
+    final_values: Mapping[str, int],
+) -> Iterator[_CandidateRelation]:
+    event_map = {event.event_id: event for event in events}
+    by_location: dict[str, list[str]] = defaultdict(list)
+    initial_by_location: dict[str, str] = {}
+    normal: list[str] = []
     for event in events:
-        if event.write:
-            by_location[event.location].append(event)
-    orders: list[list[tuple[str, ...]]] = []
-    for location in sorted(by_location):
-        initial = [event for event in by_location[location] if event.initial]
-        normal = [event for event in by_location[location] if not event.initial]
+        if event.write and not event.initial:
+            normal.append(event.event_id)
+        for location, _value in event.write_bytes:
+            by_location[location].append(event.event_id)
+            if event.initial:
+                initial_by_location[location] = event.event_id
+    for location, writers in by_location.items():
+        initial = [writer for writer in writers if event_map[writer].initial]
         if len(initial) != 1:
             raise RvwmoSolverError(f"location {location} does not have exactly one initial write")
-        location_orders: list[tuple[str, ...]] = []
-        for permutation in itertools.permutations(normal):
-            order = (initial[0],) + permutation
-            target = final_values.get(location)
-            if target is not None and order[-1].write_value != target:
+    overlap_pairs = tuple(
+        (left, right)
+        for index, left in enumerate(normal)
+        for right in normal[index + 1 :]
+        if _overlap(event_map[left], event_map[right])
+    )
+    components = _write_components(normal, overlap_pairs)
+    orientation_domains = [
+        tuple(_component_orientations(component, overlap_pairs))
+        for component in components
+    ]
+    for selected in itertools.product(*orientation_domains):
+        normal_order = set().union(*selected) if selected else set()
+        byte_edges: ByteRelation = set()
+        valid_final = True
+        for location, writers in sorted(by_location.items()):
+            initial = initial_by_location[location]
+            active = [writer for writer in writers if writer != initial]
+            byte_edges.update((initial, writer, location) for writer in active)
+            byte_edges.update(
+                (left, right, location)
+                for left, right in normal_order
+                if left in active and right in active
+            )
+            latest = _latest_write(active, normal_order) if active else initial
+            target = _final_byte_value(final_values, location)
+            if target is not None and event_map[latest].write_byte_value(location) != target:
+                valid_final = False
+                break
+        if not valid_final:
+            continue
+        yield _CandidateRelation(
+            {(left, right) for left, right, _location in byte_edges},
+            byte_edges,
+        )
+
+
+def _write_components(
+    writes: Sequence[str],
+    overlap_pairs: Sequence[Pair],
+) -> tuple[tuple[str, ...], ...]:
+    adjacency: dict[str, set[str]] = {write: set() for write in writes}
+    for left, right in overlap_pairs:
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+    components: list[tuple[str, ...]] = []
+    unseen = set(writes)
+    while unseen:
+        root = min(unseen)
+        stack = [root]
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in component:
                 continue
-            location_orders.append(tuple(event.event_id for event in order))
-        if not location_orders:
-            return
-        orders.append(location_orders)
-    for selected in itertools.product(*orders):
-        co: Relation = set()
-        for order in selected:
-            co.update((left, right) for index, left in enumerate(order) for right in order[index + 1 :])
-        yield co
+            component.add(current)
+            unseen.discard(current)
+            stack.extend(adjacency[current] - component)
+        components.append(tuple(sorted(component)))
+    return tuple(components)
+
+
+def _component_orientations(
+    component: Sequence[str],
+    overlap_pairs: Sequence[Pair],
+) -> Iterator[Relation]:
+    pairs = tuple(
+        pair
+        for pair in overlap_pairs
+        if pair[0] in component and pair[1] in component
+    )
+    if not pairs:
+        yield set()
+        return
+    if factorial(len(component)) <= 2 ** len(pairs):
+        seen: set[frozenset[Pair]] = set()
+        for permutation in itertools.permutations(component):
+            position = {event: index for index, event in enumerate(permutation)}
+            relation = frozenset(
+                (left, right) if position[left] < position[right] else (right, left)
+                for left, right in pairs
+            )
+            if relation not in seen:
+                seen.add(relation)
+                yield set(relation)
+        return
+    for bits in itertools.product((False, True), repeat=len(pairs)):
+        relation = {
+            (right, left) if reverse else (left, right)
+            for (left, right), reverse in zip(pairs, bits)
+        }
+        if _find_cycle(relation) is None:
+            yield relation
+
+
+def _latest_write(writes: Sequence[str], ordering: Relation) -> str:
+    latest = [
+        write
+        for write in writes
+        if not any((write, other) in ordering for other in writes if other != write)
+    ]
+    if len(latest) != 1:
+        raise RvwmoSolverError("overlapping writes do not have a unique latest transaction")
+    return latest[0]
 
 
 def _check_execution(
     events: Sequence[MemoryEvent],
     static: _StaticRelations,
-    rf: Relation,
-    co: Relation,
+    rf_candidate: _CandidateRelation,
+    co_candidate: _CandidateRelation,
 ) -> tuple[Execution, str | None, tuple[str, ...] | None]:
     event_map = static.event_map
-    fr = _from_read(rf, co)
+    rf = rf_candidate.relation
+    co = co_candidate.relation
+    fr_bytes = _from_read_bytes(rf_candidate.bytes, co_candidate.bytes)
+    fr = {(read, write) for read, write, _location in fr_bytes}
     rfe = {
         (write, read) for write, read in rf
         if event_map[write].hart != event_map[read].hart
@@ -635,9 +912,20 @@ def _check_execution(
         (left, right) for left, right in co
         if event_map[left].hart != event_map[right].hart
     }
-    ppo_rules = _ppo_relations(events, static, rf, rfi)
+    ppo_rules = _ppo_relations(events, static, rf, rfi, rf_candidate.bytes)
     ppo = set().union(*ppo_rules.values()) if ppo_rules else set()
-    execution = Execution(set(rf), set(co), fr, set(static.po), set(static.po_loc), ppo, ppo_rules)
+    execution = Execution(
+        set(rf),
+        set(co),
+        fr,
+        set(static.po),
+        set(static.po_loc),
+        ppo,
+        ppo_rules,
+        set(rf_candidate.bytes),
+        set(co_candidate.bytes),
+        fr_bytes,
+    )
 
     coherence = co | rf | fr | static.po_loc
     cycle = _find_cycle(coherence)
@@ -655,14 +943,14 @@ def _check_execution(
     return execution, None, None
 
 
-def _from_read(rf: Relation, co: Relation) -> Relation:
-    successors: dict[str, set[str]] = defaultdict(set)
-    for before, after in co:
-        successors[before].add(after)
+def _from_read_bytes(rf: ByteRelation, co: ByteRelation) -> ByteRelation:
+    successors: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for before, after, location in co:
+        successors[(before, location)].add(after)
     return {
-        (read, later)
-        for source, read in rf
-        for later in successors.get(source, ())
+        (read, later, location)
+        for source, read, location in rf
+        for later in successors.get((source, location), ())
         if later != read
     }
 
@@ -672,6 +960,7 @@ def _ppo_relations(
     static: _StaticRelations,
     rf: Relation,
     rfi: Relation,
+    rf_bytes: ByteRelation,
 ) -> dict[str, Relation]:
     reads = {event.event_id for event in events if event.read and not event.initial}
     writes = {event.event_id for event in events if event.write and not event.initial}
@@ -693,13 +982,17 @@ def _ppo_relations(
             for middle in memory
         )
     }
-    source_for_read = {read: write for write, read in rf}
-    rsw = {
+    r2 = {
         (left, right)
-        for left in reads for right in reads
-        if left != right and source_for_read.get(left) == source_for_read.get(right)
+        for left, right in po_loc_no_w
+        if _loads_read_different_writes(
+            static.event_map[left],
+            static.event_map[right],
+            rf_bytes,
+            events,
+            static.po,
+        )
     }
-    r2 = po_loc_no_w - rsw
     r3 = {(left, right) for left, right in rfi if left in amo and right in reads}
     r4 = set(static.fence)
     r5 = {(left, right) for left, right in static.po if left in aq and right in memory}
@@ -733,6 +1026,39 @@ def _ppo_relations(
         "r13": r13,
         "vector-element-order": r14,
     }
+
+
+def _loads_read_different_writes(
+    left: MemoryEvent,
+    right: MemoryEvent,
+    rf_bytes: ByteRelation,
+    events: Sequence[MemoryEvent],
+    po: Relation,
+) -> bool:
+    common = left.byte_locations & right.byte_locations
+    if not common:
+        return False
+    sources = {
+        (read, location): write
+        for write, read, location in rf_bytes
+    }
+    writes = {
+        event.event_id
+        for event in events
+        if event.write and not event.initial
+    }
+    for location in common:
+        if sources.get((left.event_id, location)) == sources.get((right.event_id, location)):
+            continue
+        intervening = any(
+            (left.event_id, middle) in po
+            and (middle, right.event_id) in po
+            and next(event for event in events if event.event_id == middle).writes_byte(location)
+            for middle in writes
+        )
+        if not intervening:
+            return True
+    return False
 
 
 def _atomicity_ok(events: Sequence[MemoryEvent], rf: Relation, co: Relation) -> bool:
@@ -810,3 +1136,10 @@ def _integer(value: str, field: str) -> int:
 
 def _pairs_json(relation: Iterable[Pair]) -> list[list[str]]:
     return [[left, right] for left, right in sorted(relation)]
+
+
+def _byte_pairs_json(relation: Iterable[ByteEdge]) -> list[dict[str, str]]:
+    return [
+        {"src": left, "dst": right, "byte": location}
+        for left, right, location in sorted(relation)
+    ]
