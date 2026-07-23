@@ -194,6 +194,7 @@ def synthesize_address_layout(
     by_vertex = {footprint.vertex: footprint for footprint in footprints}
     offsets: dict[int, int] = {}
     strict_overlap = False
+    shape_realized = shape == "same_start"
 
     if shape == "disjoint_control":
         raise FusionLayoutError(
@@ -205,42 +206,21 @@ def synthesize_address_layout(
         return _synthesize_misaligned_layout(footprints, location_groups, shape)
 
     for group in location_groups:
-        members = [by_vertex[vertex] for vertex in group]
+        members = tuple(by_vertex[vertex] for vertex in group)
         if not members:
             continue
-        max_span = max(member.span_bytes for member in members)
-        distinct_spans = len({member.span_bytes for member in members}) > 1
-        strict_overlap = strict_overlap or distinct_spans
+        selected, placed, group_matches = _select_group_layout(members, shape)
+        offsets.update(
+            (member.vertex, offset)
+            for member, offset in zip(members, selected)
+        )
+        strict_overlap = strict_overlap or len(set(placed.values())) > 1
+        shape_realized = shape_realized or group_matches
 
-        anchor = {
-            "same_start": 0,
-            "low_partial": 0,
-            "contained": max_span // 2,
-            "high_partial": max_span - 1,
-        }[shape]
-        for member in members:
-            # For naturally aligned power-of-two accesses, overlap implies
-            # nesting: two different widths cannot form a strict non-contained
-            # partial overlap. Place every endpoint's aligned interval around a
-            # common low/center/high anchor so all cycle relations retain at
-            # least one shared byte.
-            offset = _align_down(anchor, member.alignment_bytes)
-            offsets[member.vertex] = offset
-
-        placed = {
-            member.vertex: member.placed(offsets[member.vertex])
-            for member in members
-        }
-        if len(members) > 1 and not _connected_overlap(tuple(placed.values())):
-            raise FusionLayoutError(
-                "excluded_unsatisfiable_value_layout",
-                f"{shape} does not preserve byte overlap for location group {list(group)}",
-            )
-
-    if shape != "same_start" and not strict_overlap:
+    if shape != "same_start" and (not strict_overlap or not shape_realized):
         raise FusionLayoutError(
             "excluded_unsatisfiable_value_layout",
-            f"{shape} requires at least two different endpoint footprint spans",
+            f"{shape} requires at least one location group with that concrete geometry",
         )
 
     placed_all = {
@@ -270,66 +250,16 @@ def _synthesize_misaligned_layout(
     offsets: dict[int, int] = {}
     placed_all: dict[int, frozenset[int]] = {}
     strict_overlap = False
+    shape_realized = shape == "same_start"
 
     for group in location_groups:
         members = tuple(by_vertex[vertex] for vertex in group)
         if not members:
             continue
-        anchor = _misaligned_anchor(members)
-        candidates = {
-            member.vertex: _placement_candidates(member, anchor)
-            for member in members
-        }
-        if any(not values for values in candidates.values()):
-            raise FusionLayoutError(
-                "excluded_unsatisfiable_misaligned_layout",
-                f"no {shape} placement satisfies the alignment boundary for location group {list(group)}",
-            )
-
-        selected_offsets: tuple[int, ...] | None = None
-        selected_footprints: dict[int, frozenset[int]] | None = None
-        if shape == "same_start":
-            common = set.intersection(
-                *(set(candidates[member.vertex]) for member in members)
-            )
-            if common:
-                offset = min(
-                    common,
-                    key=lambda value: _misaligned_selection_key(
-                        shape,
-                        tuple(value for _member in members),
-                        anchor,
-                    ),
-                )
-                selected_offsets = tuple(offset for _member in members)
-                selected_footprints = {
-                    member.vertex: member.placed(offset) for member in members
-                }
-        else:
-            domains = tuple(candidates[member.vertex] for member in members)
-            if shape == "high_partial":
-                domains = tuple(tuple(reversed(values)) for values in domains)
-            for selected in product(*domains):
-                placed = {
-                    member.vertex: member.placed(offset)
-                    for member, offset in zip(members, selected)
-                }
-                if not set.intersection(*(set(value) for value in placed.values())):
-                    continue
-                distinct = len(set(placed.values())) > 1
-                if not distinct:
-                    continue
-                if shape == "contained" and not _has_strict_containment(placed.values()):
-                    continue
-                selected_offsets = tuple(selected)
-                selected_footprints = placed
-                break
-
-        if selected_offsets is None or selected_footprints is None:
-            raise FusionLayoutError(
-                "excluded_unsatisfiable_misaligned_layout",
-                f"{shape} cannot preserve a common byte for location group {list(group)}",
-            )
+        selected_offsets, selected_footprints, group_matches = _select_group_layout(
+            members, shape
+        )
+        shape_realized = shape_realized or group_matches
         offsets.update(
             (member.vertex, offset)
             for member, offset in zip(members, selected_offsets)
@@ -350,6 +280,12 @@ def _synthesize_misaligned_layout(
             offsets[footprint.vertex] = candidates[0]
             placed_all[footprint.vertex] = footprint.placed(candidates[0])
 
+    if shape != "same_start" and not shape_realized:
+        raise FusionLayoutError(
+            "excluded_unsatisfiable_misaligned_layout",
+            f"{shape} requires at least one location group with that concrete geometry",
+        )
+
     if max((max(value) for value in placed_all.values()), default=0) >= 4096:
         raise FusionLayoutError(
             "excluded_unsupported_cross_page",
@@ -361,6 +297,108 @@ def _synthesize_misaligned_layout(
         placed_all,
         strict_overlap,
         {footprint.vertex: footprint.placement for footprint in footprints},
+    )
+
+
+def _select_group_layout(
+    members: Sequence[EndpointFootprint],
+    shape: str,
+) -> tuple[tuple[int, ...], dict[int, frozenset[int]], bool]:
+    """Select one concrete group placement and report whether it realizes shape.
+
+    The counting path calls this same helper, so audit cardinality cannot drift
+    from the layouts emitted by ``synthesize_address_layout``.
+    """
+
+    if any(member.placement != "aligned" for member in members):
+        return _select_misaligned_group_layout(members, shape)
+
+    max_span = max(member.span_bytes for member in members)
+    anchor = {
+        "same_start": 0,
+        "low_partial": 0,
+        "contained": max_span // 2,
+        "high_partial": max_span - 1,
+    }[shape]
+    selected = tuple(_align_down(anchor, member.alignment_bytes) for member in members)
+    placed = {
+        member.vertex: member.placed(offset)
+        for member, offset in zip(members, selected)
+    }
+    if len(members) > 1 and not _connected_overlap(tuple(placed.values())):
+        raise FusionLayoutError(
+            "excluded_unsatisfiable_value_layout",
+            f"{shape} does not preserve byte overlap",
+        )
+    realized = _overlap_shape_matches(members, placed, shape)
+    if shape == "same_start" and not realized:
+        raise FusionLayoutError(
+            "excluded_unsatisfiable_value_layout",
+            "same_start cannot be realized by naturally aligned footprints",
+        )
+    return selected, placed, realized
+
+
+def _select_misaligned_group_layout(
+    members: Sequence[EndpointFootprint],
+    shape: str,
+) -> tuple[tuple[int, ...], dict[int, frozenset[int]], bool]:
+    anchor = _misaligned_anchor(members)
+    candidates = {
+        member.vertex: _placement_candidates(member, anchor)
+        for member in members
+    }
+    if any(not values for values in candidates.values()):
+        raise FusionLayoutError(
+            "excluded_unsatisfiable_misaligned_layout",
+            f"no {shape} placement satisfies the requested alignment boundary",
+        )
+
+    if shape == "same_start":
+        common = set.intersection(
+            *(set(candidates[member.vertex]) for member in members)
+        )
+        if not common:
+            raise FusionLayoutError(
+                "excluded_unsatisfiable_misaligned_layout",
+                "same_start cannot preserve a common byte",
+            )
+        offset = min(
+            common,
+            key=lambda value: _misaligned_selection_key(
+                shape,
+                tuple(value for _member in members),
+                anchor,
+            ),
+        )
+        selected = tuple(offset for _member in members)
+        placed = {member.vertex: member.placed(offset) for member in members}
+        return selected, placed, True
+
+    domains = tuple(candidates[member.vertex] for member in members)
+    for selected in product(*domains):
+        placed = {
+            member.vertex: member.placed(offset)
+            for member, offset in zip(members, selected)
+        }
+        if _overlap_shape_matches(members, placed, shape):
+            return tuple(selected), placed, True
+
+    # A case-level layout needs only one location group to realize the named
+    # shape. Other groups use a neutral same-start/contained placement.
+    for selected in product(*domains):
+        placed = {
+            member.vertex: member.placed(offset)
+            for member, offset in zip(members, selected)
+        }
+        if _overlap_shape_matches(
+            members, placed, "same_start"
+        ) or _overlap_shape_matches(members, placed, "contained"):
+            return tuple(selected), placed, False
+
+    raise FusionLayoutError(
+        "excluded_unsatisfiable_misaligned_layout",
+        f"{shape} cannot preserve a common byte",
     )
 
 
@@ -395,13 +433,67 @@ def _placement_candidates(
     )
 
 
-def _has_strict_containment(footprints: Sequence[frozenset[int]]) -> bool:
-    values = tuple(footprints)
-    return any(
-        left < right or right < left
-        for index, left in enumerate(values)
-        for right in values[index + 1 :]
+def _overlap_shape_matches(
+    members: Sequence[EndpointFootprint],
+    placed: Mapping[int, frozenset[int]],
+    shape: str,
+) -> bool:
+    """Check the concrete geometry represented by an overlap label.
+
+    ``same_start`` and ``contained`` are deliberately distinct.  A partial
+    layout requires a strict, non-contained overlap and is oriented relative
+    to the first misaligned Vector endpoint (or the lowest-numbered endpoint
+    when all accesses are aligned).  This prevents low/high labels from being
+    aliases that differ only in metadata.
+    """
+
+    values = tuple(placed[member.vertex] for member in members)
+    if not values:
+        return False
+    starts = tuple(min(value) for value in values)
+    if shape == "same_start":
+        return len(set(starts)) == 1
+    if len(values) < 2 or not set.intersection(*(set(value) for value in values)):
+        return False
+
+    pair_relations = []
+    for index, left in enumerate(values):
+        for right in values[index + 1 :]:
+            if not left & right:
+                continue
+            if left == right:
+                pair_relations.append("equal")
+            elif left < right or right < left:
+                pair_relations.append("contained")
+            else:
+                pair_relations.append("partial")
+
+    if shape == "contained":
+        return (
+            len(set(starts)) > 1
+            and "contained" in pair_relations
+            and "partial" not in pair_relations
+        )
+    if shape not in {"low_partial", "high_partial"}:
+        return False
+    if "partial" not in pair_relations:
+        return False
+
+    reference_index = next(
+        (
+            index
+            for index, member in enumerate(members)
+            if member.placement != "aligned"
+        ),
+        0,
     )
+    reference = values[reference_index]
+    common = frozenset.intersection(*values)
+    touches_low = min(common) == min(reference)
+    touches_high = max(common) == max(reference)
+    if shape == "low_partial":
+        return touches_low and not touches_high
+    return touches_high and not touches_low
 
 
 def _misaligned_selection_key(

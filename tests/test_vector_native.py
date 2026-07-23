@@ -415,7 +415,7 @@ def test_vector_search_limit_is_inconclusive_not_forbidden() -> None:
     assert "forbidden verdict requires exhaustive search" in verdict.reason
 
 
-@pytest.mark.parametrize("layout", ["same_start", "contained", "low_partial", "high_partial"])
+@pytest.mark.parametrize("layout", ["same_start", "contained"])
 def test_mixed_width_overlap_layouts_are_naturally_aligned_and_formal(layout: str) -> None:
     domain = VectorNativeDomain.from_payload(
         _small_payload(overlap_layouts=[layout])
@@ -431,6 +431,52 @@ def test_mixed_width_overlap_layouts_are_naturally_aligned_and_formal(layout: st
     assert all(access.natural_aligned for access in accesses)
     assert case.case_ir.metadata["memory_layout"]["overlap_layout"] == layout
     assert solve_generated_case(case).status == "verified"
+
+
+@pytest.mark.parametrize("layout", ["low_partial", "high_partial"])
+def test_aligned_partial_layouts_are_counted_as_unsatisfiable(layout: str) -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(alignments=["aligned"], overlap_layouts=[layout])
+    )
+    audit = domain.audit()
+    assert audit["generated"] == 0
+    assert audit["excluded"]["excluded_unsatisfiable_value_layout"] == audit["raw_combinations"]
+    assert list(domain.assignments()) == []
+
+
+@pytest.mark.parametrize("layout", ["low_partial", "high_partial"])
+def test_misaligned_partial_count_matches_assignment_enumeration(layout: str) -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["scalar", "vector"],
+            endpoint_compositions=["vector_scalar"],
+            scalar_widths=["w"],
+            forms=["unit_load", "unit_store"],
+            sew=["e32"],
+            alignments=["misalign_same16"],
+            overlap_layouts=[layout],
+        )
+    )
+    assignments = list(domain.assignments())
+    assert assignments
+    assert domain.total_cases == len(assignments)
+
+
+def test_misaligned_layout_feasibility_is_boundary_translation_invariant() -> None:
+    from litmus_link.vector_native import _group_layout_status
+
+    categories = ("vector", "scalar", "vector", "scalar")
+    for widths in product((2, 4, 8), repeat=4):
+        for layout in ("same_start", "contained", "low_partial", "high_partial"):
+            statuses = {
+                _group_layout_status(categories, widths, alignment, layout)
+                for alignment in (
+                    "misalign_same16",
+                    "misalign_cross16",
+                    "misalign_cross64",
+                )
+            }
+            assert len(statuses) == 1
 
 
 def test_disjoint_layout_is_audited_but_not_generated() -> None:
@@ -475,7 +521,7 @@ def test_file_hash_covers_endpoint_and_overlap_configuration() -> None:
         for index, direction in enumerate(directions)
     )
     first = lower_vector_assignment(VectorAssignment(cycle, choices, overlap_layout="same_start"))
-    second = lower_vector_assignment(VectorAssignment(cycle, choices, overlap_layout="high_partial"))
+    second = lower_vector_assignment(VectorAssignment(cycle, choices, overlap_layout="contained"))
     changed = list(choices)
     changed[1] = _amo_choice(directions[1], "maxu", "d", "rl")
     third = lower_vector_assignment(VectorAssignment(cycle, tuple(changed)))
@@ -510,7 +556,7 @@ def test_all_scalar_vector_width_pairs_and_overlap_shapes_remain_aligned() -> No
     for scalar_width, vector_sew, layout in product(
         ("b", "h", "w", "d"),
         ("e8", "e16", "e32", "e64"),
-        ("same_start", "contained", "low_partial", "high_partial"),
+        ("same_start", "contained"),
     ):
         choices = (
             _vector_choice(directions[0], vector_sew),

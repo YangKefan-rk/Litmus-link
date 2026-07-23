@@ -10,7 +10,7 @@ from litmus_link.fusion_layout import (
 )
 
 
-@pytest.mark.parametrize("shape", FUSION_OVERLAP_LAYOUTS[:-1])
+@pytest.mark.parametrize("shape", ("same_start", "contained"))
 def test_fusion_layouts_keep_every_transaction_naturally_aligned(shape: str) -> None:
     footprints = [
         EndpointFootprint(0, 8, frozenset(range(8))),
@@ -25,7 +25,7 @@ def test_fusion_layouts_keep_every_transaction_naturally_aligned(shape: str) -> 
     assert layout.footprints[1] & layout.footprints[2]
 
 
-def test_high_partial_matches_nanhu_mixed_width_example() -> None:
+def test_contained_matches_nanhu_mixed_width_example() -> None:
     layout = synthesize_address_layout(
         [
             EndpointFootprint(0, 8, frozenset(range(8))),
@@ -33,9 +33,25 @@ def test_high_partial_matches_nanhu_mixed_width_example() -> None:
             EndpointFootprint(2, 2, frozenset(range(2))),
         ],
         [(0, 1, 2)],
-        "high_partial",
+        "contained",
     )
-    assert layout.offsets == {0: 0, 1: 4, 2: 6}
+    assert layout.offsets == {0: 0, 1: 4, 2: 4}
+
+
+@pytest.mark.parametrize("shape", ("low_partial", "high_partial"))
+def test_naturally_aligned_power_of_two_accesses_cannot_partially_overlap(
+    shape: str,
+) -> None:
+    with pytest.raises(FusionLayoutError) as error:
+        synthesize_address_layout(
+            [
+                EndpointFootprint(0, 8, frozenset(range(8))),
+                EndpointFootprint(1, 4, frozenset(range(4))),
+            ],
+            [(0, 1)],
+            shape,
+        )
+    assert error.value.reason == "excluded_unsatisfiable_value_layout"
 
 
 def test_non_same_start_layout_rejects_equal_footprints() -> None:
@@ -104,3 +120,24 @@ def test_e8_vector_element_has_no_misaligned_placement() -> None:
             frozenset({0}),
             "misalign_cross64",
         )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["low_partial", "high_partial"],
+)
+def test_misaligned_partial_layout_is_oriented_to_vector_endpoint(
+    shape: str,
+) -> None:
+    layout = synthesize_address_layout(
+        [
+            EndpointFootprint(0, 4, frozenset(range(4)), "misalign_same16"),
+            EndpointFootprint(1, 4, frozenset(range(4))),
+        ],
+        [(0, 1)],
+        shape,
+    )
+    vector = layout.footprints[0]
+    common = vector & layout.footprints[1]
+    assert (min(common) == min(vector)) is (shape == "low_partial")
+    assert (max(common) == max(vector)) is (shape == "high_partial")

@@ -417,7 +417,7 @@ def test_vector_case_detail_explains_transactions_relations_and_values() -> None
             "amo_ops": ["add"],
             "amo_widths": ["d"],
             "amo_orderings": ["aqrl"],
-            "overlap_layouts": ["high_partial"],
+            "overlap_layouts": ["contained"],
             "forms": ["unit_load", "unit_store"],
             "sew": ["e16"],
             "lmul": ["m1"],

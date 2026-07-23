@@ -31,6 +31,7 @@ from .fusion_layout import (
     VECTOR_ALIGNMENT_MODES,
     FusionAddressLayout,
     FusionLayoutError,
+    _select_group_layout,
     synthesize_address_layout,
 )
 from .fusion_values import FusionValuePlan, synthesize_fusion_values
@@ -269,225 +270,68 @@ def _fusion_layout_result(
 
 
 @lru_cache(maxsize=16_384)
-def _misaligned_group_layout_valid(
-    vector_mask: int,
-    widths: tuple[int, ...],
+def _weighted_group_layout_breakdown(
+    categories: tuple[str, ...],
+    width_count_signatures: tuple[tuple[tuple[int, int], ...], ...],
     alignment: str,
     layout: str,
-) -> bool:
-    """Return layout feasibility for one normalized abstract location group."""
+) -> tuple[int, int, int]:
+    """Count target, neutral, and invalid geometries for one location group.
 
-    anchor = {
-        "misalign_same16": 7,
-        "misalign_cross16": 15,
-        "misalign_cross64": 63,
-    }[alignment]
-    candidates: list[tuple[int, ...]] = []
-    for vertex, width in enumerate(widths):
-        placement = alignment if vector_mask & (1 << vertex) else "aligned"
-        if placement != "aligned" and width == 1:
-            return False
-        values = _counting_placement_candidates(
-            width,
-            placement,
-            anchor,
-        )
-        if not values:
-            return False
-        candidates.append(values)
-    if layout == "same_start":
-        return bool(set.intersection(*(set(values) for values in candidates)))
-    for offsets in product(*candidates):
-        intervals = tuple(
-            (offset, offset + width - 1)
-            for offset, width in zip(offsets, widths)
-        )
-        if max(start for start, _end in intervals) > min(
-            end for _start, end in intervals
-        ):
-            continue
-        if len(set(intervals)) == 1:
-            continue
-        if layout == "contained" and not any(
-            (left[0] >= right[0] and left[1] <= right[1] and left != right)
-            or (right[0] >= left[0] and right[1] <= left[1] and left != right)
-            for index, left in enumerate(intervals)
-            for right in intervals[index + 1 :]
-        ):
-            continue
-        return True
-    return False
+    Endpoint choices collapse to at most four byte widths. Enumerating that
+    compact weighted domain keeps audit counts exact and prevents a second,
+    subtly different implementation of overlap legality.
+    """
 
-
-@lru_cache(maxsize=256)
-def _counting_placement_candidates(
-    width: int,
-    placement: str,
-    anchor: int,
-) -> tuple[int, ...]:
-    focus = {anchor, anchor + 1}
-    values = []
-    for offset in range(max(anchor - 16, 0), anchor + 17):
-        naturally_aligned = offset % width == 0
-        if placement == "aligned":
-            accepted = naturally_aligned
-        else:
-            end = offset + width - 1
-            boundary = (
-                "cross64"
-                if offset // 64 != end // 64
-                else "cross16"
-                if offset // 16 != end // 16
-                else "same16"
-            )
-            accepted = not naturally_aligned and boundary == {
-                "misalign_same16": "same16",
-                "misalign_cross16": "cross16",
-                "misalign_cross64": "cross64",
-            }[placement]
-        if accepted and any(offset <= byte < offset + width for byte in focus):
-            values.append(offset)
-    return tuple(
-        sorted(
-            values,
-            key=lambda offset: (
-                abs((2 * offset + width - 1) - 2 * anchor),
-                offset,
-            ),
-        )[:8]
+    target = 0
+    neutral = 0
+    invalid = 0
+    domains = tuple(tuple(signature) for signature in width_count_signatures)
+    geometry_alignment = (
+        "misalign_same16" if alignment != "aligned" else "aligned"
     )
+    for selections in product(*domains):
+        widths = tuple(width for width, _count in selections)
+        weight = _product(count for _width, count in selections)
+        # The three supported boundaries are translations of the same finite
+        # interval geometry. Production placement still uses the requested
+        # boundary; counting reuses the canonical within-16B classification.
+        status = _group_layout_status(
+            categories, widths, geometry_alignment, layout
+        )
+        if status < 0:
+            invalid += weight
+            continue
+        if status:
+            target += weight
+        else:
+            neutral += weight
+    return target, neutral, invalid
 
 
 @lru_cache(maxsize=65_536)
-def _weighted_misaligned_group_count(
+def _group_layout_status(
     categories: tuple[str, ...],
-    width_count_signatures: tuple[tuple[tuple[int, int], ...], ...],
+    widths: tuple[int, ...],
+    alignment: str,
     layout: str,
 ) -> int:
-    """Count legal endpoint choices for one location group.
+    """Return -1 for invalid, 0 for neutral, and 1 for target geometry."""
 
-    The three supported misalignment boundaries are translations of the same
-    interval problem around byte 7, 15, or 63.  Count with the canonical
-    within-16B placement once and reuse it for every requested boundary.
-    """
-
-    counts_by_vertex = tuple(dict(signature) for signature in width_count_signatures)
-    if layout == "same_start":
-        # Track the set of bases still shared by every endpoint.  This handles
-        # cases such as an aligned 16-bit scalar and a misaligned 32-bit Vector
-        # element both starting at byte 6 without enumerating endpoint tuples.
-        common_states: dict[frozenset[int] | None, int] = {None: 1}
-        for category, counts in zip(categories, counts_by_vertex):
-            placement = (
-                "misalign_same16" if category == "vector" else "aligned"
+    try:
+        members = tuple(
+            EndpointFootprint(
+                vertex,
+                width,
+                frozenset(range(width)),
+                alignment if category == "vector" else "aligned",
             )
-            next_common: dict[frozenset[int], int] = {}
-            for common, state_weight in common_states.items():
-                for width, choice_weight in counts.items():
-                    candidates = frozenset(
-                        _counting_placement_candidates(width, placement, 7)
-                    )
-                    if not candidates:
-                        continue
-                    intersection = candidates if common is None else common & candidates
-                    if not intersection:
-                        continue
-                    next_common[intersection] = (
-                        next_common.get(intersection, 0)
-                        + state_weight * choice_weight
-                    )
-            common_states = next_common
-        return sum(common_states.values())
-
-    # For partial/contained layouts every supported endpoint type has an
-    # interval containing the low anchor and another containing the high
-    # anchor.  The group is therefore legal exactly when at least one selected
-    # endpoint pair can realize the requested strict relationship.  Track the
-    # selected type set and repeated types, capping the state at two uses.
-    states: dict[tuple[int, int], int] = {(0, 0): 1}
-    for category, counts in zip(categories, counts_by_vertex):
-        options = tuple(
-            (_misaligned_endpoint_type(category, width), count)
-            for width, count in counts.items()
-            if not (category == "vector" and width == 1)
+            for vertex, (category, width) in enumerate(zip(categories, widths))
         )
-        next_states: dict[tuple[int, int], int] = {}
-        for (used, repeated), state_weight in states.items():
-            for endpoint_type, choice_weight in options:
-                bit = 1 << endpoint_type
-                key = (
-                    used | bit,
-                    repeated | (bit if used & bit else 0),
-                )
-                next_states[key] = (
-                    next_states.get(key, 0) + state_weight * choice_weight
-                )
-        states = next_states
-    return sum(
-        weight
-        for (used, repeated), weight in states.items()
-        if _misaligned_type_state_has_relation(used, repeated, layout)
-    )
-
-
-def _misaligned_endpoint_type(category: str, width: int) -> int:
-    if category == "scalar" and width in {1, 2, 4, 8}:
-        return {1: 0, 2: 1, 4: 2, 8: 3}[width]
-    if category == "vector" and width in {2, 4, 8}:
-        return {2: 4, 4: 5, 8: 6}[width]
-    raise ValueError(f"unsupported misaligned endpoint type: {category}/{width}")
-
-
-def _misaligned_endpoint_descriptor(endpoint_type: int) -> tuple[str, int]:
-    values = (
-        ("scalar", 1),
-        ("scalar", 2),
-        ("scalar", 4),
-        ("scalar", 8),
-        ("vector", 2),
-        ("vector", 4),
-        ("vector", 8),
-    )
-    return values[endpoint_type]
-
-
-@lru_cache(maxsize=128)
-def _misaligned_type_pair_has_relation(
-    left_type: int,
-    right_type: int,
-    layout: str,
-) -> bool:
-    left_category, left_width = _misaligned_endpoint_descriptor(left_type)
-    right_category, right_width = _misaligned_endpoint_descriptor(right_type)
-    vector_mask = int(left_category == "vector") | (
-        int(right_category == "vector") << 1
-    )
-    return _misaligned_group_layout_valid(
-        vector_mask,
-        (left_width, right_width),
-        "misalign_same16",
-        layout,
-    )
-
-
-@lru_cache(maxsize=512)
-def _misaligned_type_state_has_relation(
-    used: int,
-    repeated: int,
-    layout: str,
-) -> bool:
-    selected = tuple(index for index in range(7) if used & (1 << index))
-    if any(
-        repeated & (1 << endpoint_type)
-        and _misaligned_type_pair_has_relation(endpoint_type, endpoint_type, layout)
-        for endpoint_type in selected
-    ):
-        return True
-    return any(
-        _misaligned_type_pair_has_relation(left, right, layout)
-        for index, left in enumerate(selected)
-        for right in selected[index + 1 :]
-    )
+        _selected, _placed, realized = _select_group_layout(members, layout)
+    except (FusionLayoutError, ValueError):
+        return -1
+    return int(realized)
 
 
 @lru_cache(maxsize=None)
@@ -826,73 +670,57 @@ class VectorNativeDomain:
             for alignment in self.alignments:
                 for layout in self.overlap_layouts:
                     raw += endpoint_count
-                    # Aligned layouts retain the fast analytical count used by
-                    # the large complete domain.  Misaligned layouts have only
-                    # four possible endpoint widths, so enumerate that compact
-                    # width domain and weight each result by its choice count.
-                    if alignment == "aligned":
-                        amo_mask = sum(
-                            1 << vertex
-                            for vertex, category in enumerate(categories)
-                            if category == "amo"
-                        )
-                        if (
-                            not _amo_mask_satisfiable(cycle, amo_mask)
-                            or layout == "disjoint_control"
-                        ):
-                            excluded["excluded_unsatisfiable_value_layout"] += endpoint_count
-                            continue
-                        locations = location_ids(cycle.edges)
-                        all_locations_uniform = 1
-                        for location in sorted(set(locations)):
-                            vertices = tuple(
-                                vertex
-                                for vertex, actual in enumerate(locations)
-                                if actual == location
-                            )
-                            uniform = sum(
-                                _product(
-                                    width_counts[vertex].get(width, 0)
-                                    for vertex in vertices
-                                )
-                                for width in (1, 2, 4, 8)
-                            )
-                            all_locations_uniform *= uniform
-                        eligible = (
-                            endpoint_count
-                            if layout == "same_start"
-                            else endpoint_count - all_locations_uniform
-                        )
-                        generated += eligible
-                        excluded["excluded_unsatisfiable_value_layout"] += endpoint_count - eligible
+                    amo_mask = sum(
+                        1 << vertex
+                        for vertex, category in enumerate(categories)
+                        if category == "amo"
+                    )
+                    if alignment != "aligned" and amo_mask:
+                        excluded[
+                            "excluded_unsupported_misaligned_amo_fusion"
+                        ] += endpoint_count
                         continue
-
-                    if "amo" in categories:
-                        excluded["excluded_unsupported_misaligned_amo_fusion"] += endpoint_count
+                    if not _amo_mask_satisfiable(cycle, amo_mask):
+                        excluded["excluded_unsatisfiable_value_layout"] += endpoint_count
                         continue
                     if layout == "disjoint_control":
                         excluded["excluded_unsatisfiable_value_layout"] += endpoint_count
                         continue
+
                     locations = location_ids(cycle.edges)
-                    valid = 1
+                    all_feasible = 1
+                    all_neutral = 1
+                    all_target = 1
                     for location in sorted(set(locations)):
                         vertices = tuple(
                             vertex
                             for vertex, actual in enumerate(locations)
                             if actual == location
                         )
-                        group_counts = tuple(width_counts[vertex] for vertex in vertices)
-                        group_valid = _weighted_misaligned_group_count(
+                        target, neutral, _invalid = _weighted_group_layout_breakdown(
                             tuple(categories[vertex] for vertex in vertices),
                             tuple(
-                                tuple(sorted(counts.items()))
-                                for counts in group_counts
+                                tuple(sorted(width_counts[vertex].items()))
+                                for vertex in vertices
                             ),
+                            alignment,
                             layout,
                         )
-                        valid *= group_valid
-                    generated += valid
-                    excluded["excluded_unsatisfiable_misaligned_layout"] += endpoint_count - valid
+                        all_target *= target
+                        all_neutral *= neutral
+                        all_feasible *= target + neutral
+                    eligible = (
+                        all_target
+                        if layout == "same_start"
+                        else all_feasible - all_neutral
+                    )
+                    generated += eligible
+                    reason = (
+                        "excluded_unsatisfiable_misaligned_layout"
+                        if alignment != "aligned"
+                        else "excluded_unsatisfiable_value_layout"
+                    )
+                    excluded[reason] += endpoint_count - eligible
         return {
             "raw": raw,
             "generated": generated,

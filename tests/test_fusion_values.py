@@ -57,7 +57,7 @@ def _plan(operation: str = "add"):
     layout = synthesize_address_layout(
         [endpoint_footprint(vertex, choice) for vertex, choice in enumerate(choices)],
         groups,
-        "high_partial",
+        "contained",
     )
     names = {location: "xyz"[location] for location in set(locations)}
     return cycle, choices, layout, synthesize_fusion_values(
