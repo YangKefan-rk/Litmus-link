@@ -23,10 +23,10 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .amo import AMO_OPERATIONS, AMO_ORDERINGS, AmoSpec
 from .fusion_layout import (
+    EndpointFootprint,
     FUSION_OVERLAP_LAYOUTS,
     FusionAddressLayout,
     FusionLayoutError,
-    endpoint_footprint,
     synthesize_address_layout,
 )
 from .fusion_values import FusionValuePlan, synthesize_fusion_values
@@ -103,6 +103,37 @@ VECTOR_SAMPLING_LABELS = {
     VECTOR_GENERATE_ALL: "exhaustive-deterministic-enumeration",
 }
 
+VECTOR_VERIFICATION_EFFORTS = ("interactive", "balanced", "thorough")
+VECTOR_VERIFICATION_LIMITS: Mapping[str, Mapping[str, Any]] = {
+    "interactive": {
+        "max_candidates": 5_000,
+        "timeout_seconds": 0.05,
+        "max_search_steps": 25_000,
+        "max_memory_events": 24,
+        "external_max_projections": 2,
+        "external_timeout": 3,
+        "external_case_limit": 4,
+    },
+    "balanced": {
+        "max_candidates": 50_000,
+        "timeout_seconds": 0.5,
+        "max_search_steps": 250_000,
+        "max_memory_events": 48,
+        "external_max_projections": 16,
+        "external_timeout": 10,
+        "external_case_limit": 32,
+    },
+    "thorough": {
+        "max_candidates": 100_000,
+        "timeout_seconds": 10.0,
+        "max_search_steps": 1_000_000,
+        "max_memory_events": None,
+        "external_max_projections": 64,
+        "external_timeout": 30,
+        "external_case_limit": None,
+    },
+}
+
 
 def _amo_mask_satisfiable(cycle: NativeCycle, amo_mask: int) -> bool:
     """Return whether AMO read facets admit a coherent writer order.
@@ -132,6 +163,71 @@ def _cycle_structure_key(
             for edge in cycle.edges
         ),
     )
+
+
+def _cached_fusion_layout(
+    structure: tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
+    categories: tuple[str, ...],
+    widths: tuple[int, ...],
+    layout: str,
+) -> FusionAddressLayout:
+    result, reason, detail = _fusion_layout_result(
+        structure,
+        categories,
+        widths,
+        layout,
+    )
+    if result is None:
+        raise FusionLayoutError(reason, detail)
+    return result
+
+
+@lru_cache(maxsize=65_536)
+def _fusion_layout_result(
+    structure: tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
+    categories: tuple[str, ...],
+    widths: tuple[int, ...],
+    layout: str,
+) -> tuple[FusionAddressLayout | None, str, str]:
+    directions, locations, relations = structure
+    if len(categories) != len(directions) or len(widths) != len(directions):
+        return (
+            None,
+            "excluded_unsatisfiable_value_layout",
+            "endpoint categories and widths do not match the relation cycle",
+        )
+    amo_mask = sum(
+        1 << vertex
+        for vertex, category in enumerate(categories)
+        if category == "amo"
+    )
+    if not _amo_structure_satisfiable(
+        directions,
+        locations,
+        relations,
+        amo_mask,
+    ):
+        return (
+            None,
+            "excluded_unsatisfiable_value_layout",
+            "AMO read facets cannot realize the cycle's rf/fr/co witness",
+        )
+    groups = tuple(
+        tuple(
+            vertex
+            for vertex, actual in enumerate(locations)
+            if actual == location
+        )
+        for location in sorted(set(locations))
+    )
+    footprints = tuple(
+        EndpointFootprint(vertex, width, frozenset(range(width)))
+        for vertex, width in enumerate(widths)
+    )
+    try:
+        return synthesize_address_layout(footprints, groups, layout), "", ""
+    except FusionLayoutError as exc:
+        return None, exc.reason, str(exc)
 
 
 @lru_cache(maxsize=None)
@@ -656,44 +752,16 @@ class VectorNativeDomain:
             for name in self.compositions
         )
 
-    def _assignment_structure_allowed(
-        self,
-        cycle: NativeCycle,
-        choices: Sequence[EndpointChoice],
-    ) -> bool:
-        amo_mask = sum(
-            1 << vertex
-            for vertex, choice in enumerate(choices)
-            if choice.category == "amo"
-        )
-        return _amo_mask_satisfiable(cycle, amo_mask)
-
     def _layout_for(
         self,
         cycle: NativeCycle,
         choices: Sequence[EndpointChoice],
         layout: str,
     ) -> FusionAddressLayout:
-        if not self._assignment_structure_allowed(cycle, choices):
-            raise FusionLayoutError(
-                "excluded_unsatisfiable_value_layout",
-                "AMO read facets cannot realize the cycle's rf/fr/co witness",
-            )
-        locations = location_ids(cycle.edges)
-        groups = [
-            tuple(
-                vertex
-                for vertex, actual in enumerate(locations)
-                if actual == location
-            )
-            for location in sorted(set(locations))
-        ]
-        return synthesize_address_layout(
-            [
-                endpoint_footprint(vertex, choice)
-                for vertex, choice in enumerate(choices)
-            ],
-            groups,
+        return _cached_fusion_layout(
+            _cycle_structure_key(cycle),
+            tuple(choice.category for choice in choices),
+            tuple(choice.width_bytes for choice in choices),
             layout,
         )
 
@@ -1032,20 +1100,10 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         location: case.event_map()[f"v{vertex}"].location
         for vertex, location in enumerate(locations)
     }
-    groups = [
-        tuple(
-            vertex
-            for vertex, actual in enumerate(locations)
-            if actual == location
-        )
-        for location in sorted(set(locations))
-    ]
-    address_layout = synthesize_address_layout(
-        [
-            endpoint_footprint(vertex, choice)
-            for vertex, choice in enumerate(assignment.choices)
-        ],
-        groups,
+    address_layout = _cached_fusion_layout(
+        _cycle_structure_key(assignment.cycle),
+        tuple(choice.category for choice in assignment.choices),
+        tuple(choice.width_bytes for choice in assignment.choices),
         assignment.overlap_layout,
     )
     value_plan = synthesize_fusion_values(
@@ -1311,8 +1369,11 @@ def sample_vector_cases(
     compute_verdicts: bool,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[GeneratedCase], dict[str, Any]]:
+    if progress_callback is not None:
+        progress_callback(0, 0, "Building the selected relation and endpoint domain")
     domain = VectorNativeDomain.from_payload(payload)
     solver_backend = _vector_solver_backend(payload)
+    effort, solver_limits, external_case_limit = _vector_verification_settings(payload)
     limit = int(payload.get("sample_limit", 1000))
     seed = int(payload.get("random_seed", 1))
     sampling = str(payload.get("preview_sampling", VECTOR_SAMPLE_BALANCED))
@@ -1321,21 +1382,71 @@ def sample_vector_cases(
             f"unknown Vector preview sampling mode: {sampling}; "
             f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
         )
+    if progress_callback is not None:
+        progress_callback(
+            0,
+            0,
+            f"Selecting up to {limit:,} reproducible cases from {domain.total_cases:,} legal combinations",
+        )
     assignments = domain.random_assignments(limit, seed, sampling)
+    if progress_callback is not None:
+        progress_callback(
+            0,
+            max(len(assignments), 1),
+            (
+                f"Selected {len(assignments):,} cases; starting outcome verification"
+                if compute_verdicts
+                else f"Selected {len(assignments):,} cases; building preview records"
+            ),
+        )
     cases: list[GeneratedCase] = []
     total = max(len(assignments), 1)
+    solver_statuses: Counter[str] = Counter()
+    external_statuses: Counter[str] = Counter()
+    external_attempts = 0
     for index, assignment in enumerate(assignments, start=1):
         case = lower_vector_assignment(assignment)
         if compute_verdicts:
+            request_external = solver_backend == "crosscheck" and (
+                external_case_limit is None
+                or external_attempts < external_case_limit
+            )
             solver = solve_generated_case(
                 case,
-                vector_external_check=solver_backend == "crosscheck",
+                vector_external_check=request_external,
+                vector_solver_limits=solver_limits,
             ).to_json()
+            external_status = _solver_external_status(solver)
+            if request_external and external_status != "not_run":
+                external_attempts += 1
+            elif (
+                solver_backend == "crosscheck"
+                and not request_external
+                and solver.get("status") == "verified"
+            ):
+                solver = _mark_external_batch_skipped(
+                    solver,
+                    external_case_limit,
+                )
         else:
             solver = _unchecked_solver()
+        status = str(solver.get("status", "unknown") or "unknown")
+        external_status = _solver_external_status(solver)
+        solver_statuses[status] += 1
+        external_statuses[external_status] += 1
         cases.append(replace(case, solver=solver))
         if progress_callback is not None:
-            progress_callback(index, total, f"Sampled {index:,}/{len(assignments):,} random Vector cases")
+            progress_callback(
+                index,
+                total,
+                _verification_progress(
+                    "Verified" if compute_verdicts else "Sampled",
+                    index,
+                    len(assignments),
+                    solver_statuses,
+                    external_statuses,
+                ),
+            )
     audit = domain.audit()
     audit.update(
         {
@@ -1345,6 +1456,13 @@ def sample_vector_cases(
             "sampling_mode": sampling,
             "sampling": VECTOR_SAMPLING_LABELS[sampling],
             "solver_backend": solver_backend,
+            "verification_effort": effort,
+            "verification_limits": {
+                **solver_limits,
+                "external_case_limit": external_case_limit,
+            },
+            "solver_status": dict(sorted(solver_statuses.items())),
+            "external_status": dict(sorted(external_statuses.items())),
         }
     )
     return cases, audit
@@ -1356,6 +1474,8 @@ def generate_vector_cases(
     *,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    if progress_callback is not None:
+        progress_callback(0, 0, "Building the selected relation and endpoint domain")
     domain = VectorNativeDomain.from_payload(payload)
     generation_mode = str(payload.get("generation_mode", VECTOR_SAMPLE_BALANCED))
     if generation_mode not in VECTOR_GENERATION_MODES:
@@ -1372,30 +1492,54 @@ def generate_vector_cases(
         requested = int(payload.get("generate_limit", 10000))
         if requested < 1:
             raise ValueError("generate_limit must be positive for sampled generation")
+        if progress_callback is not None:
+            progress_callback(
+                0,
+                0,
+                f"Selecting up to {requested:,} reproducible cases from {domain.total_cases:,} legal combinations",
+            )
         sampled = domain.random_assignments(requested, seed, generation_mode)
         assignments = sampled
         target = len(sampled)
     out_dir.mkdir(parents=True, exist_ok=True)
     judge = bool(payload.get("compute_verdicts", True))
     solver_backend = _vector_solver_backend(payload)
+    effort, solver_limits, external_case_limit = _vector_verification_settings(payload)
     generated_count = 0
     solver_statuses: dict[str, int] = {}
     solver_verdicts: dict[str, int] = {}
     external_statuses: dict[str, int] = {}
+    external_attempts = 0
     seen_file_identities: dict[str, Mapping[str, Any]] = {}
     atfile_tmp = out_dir / "@all.tmp"
     try:
         with atfile_tmp.open("w", encoding="utf-8") as atfile:
             for index, assignment in enumerate(assignments, start=1):
                 case = lower_vector_assignment(assignment)
-                solver = (
-                    solve_generated_case(
+                if judge:
+                    request_external = solver_backend == "crosscheck" and (
+                        external_case_limit is None
+                        or external_attempts < external_case_limit
+                    )
+                    solver = solve_generated_case(
                         case,
-                        vector_external_check=solver_backend == "crosscheck",
+                        vector_external_check=request_external,
+                        vector_solver_limits=solver_limits,
                     ).to_json()
-                    if judge
-                    else _unchecked_solver()
-                )
+                    external = _solver_external_status(solver)
+                    if request_external and external != "not_run":
+                        external_attempts += 1
+                    elif (
+                        solver_backend == "crosscheck"
+                        and not request_external
+                        and solver.get("status") == "verified"
+                    ):
+                        solver = _mark_external_batch_skipped(
+                            solver,
+                            external_case_limit,
+                        )
+                else:
+                    solver = _unchecked_solver()
                 case = replace(case, solver=solver)
                 _claim_vector_file_identity(out_dir, case, seen_file_identities)
                 litmus_path = out_dir / case.file_name
@@ -1418,7 +1562,14 @@ def generate_vector_cases(
                     progress_callback(
                         index,
                         max(target, 1),
-                        f"Generated {index:,}/{target:,}: {case.file_name}",
+                        _verification_progress(
+                            "Generated",
+                            index,
+                            target,
+                            solver_statuses,
+                            external_statuses,
+                            file_name=case.file_name,
+                        ),
                     )
     except Exception:
         atfile_tmp.unlink(missing_ok=True)
@@ -1440,6 +1591,11 @@ def generate_vector_cases(
         "solver_verdict": solver_verdicts,
         "external_status": external_statuses,
         "solver_backend": solver_backend,
+        "verification_effort": effort,
+        "verification_limits": {
+            **solver_limits,
+            "external_case_limit": external_case_limit,
+        },
         "output": str(out_dir),
         "atfile": str(out_dir / "@all"),
         "audit": audit,
@@ -1530,7 +1686,7 @@ def _fusion_request_audit(
     categories: Sequence[str],
     requested_alignments: Sequence[str],
 ) -> tuple[dict[str, int], bool]:
-    """Classify requests outside the fixed Nanhu aligned fusion scope."""
+    """Classify requests outside the currently implemented fusion scope."""
 
     excluded: Counter[str] = Counter()
     supported_scope = True
@@ -1597,10 +1753,10 @@ def _fusion_request_audit(
 
     if payload.get("pma_atomic") is False:
         excluded["excluded_unsupported_pma_nonatomic_request"] += 1
-        # The aligned-fusion workflow has one fixed Nanhu formal target:
-        # PMA atomic=true.  Treat an explicit ``false`` request like the
+        # The current aligned-fusion implementation requires PMA atomic=true.
+        # Treat an explicit ``false`` request like the
         # unsupported members of the attribute/PBMT axes: account for it in
-        # the audit, then keep the supported fixed target instead of clearing
+        # the audit, then keep the supported current target instead of clearing
         # an otherwise valid aligned domain.
 
     return (
@@ -1879,3 +2035,81 @@ def _vector_solver_backend(payload: Mapping[str, Any]) -> str:
             "Vector solver_backend must be 'embedded' or 'crosscheck'"
         )
     return backend
+
+
+def _vector_verification_settings(
+    payload: Mapping[str, Any],
+) -> tuple[str, dict[str, Any], int | None]:
+    # Library/CLI callers retain the historical deep-search behavior unless
+    # they explicitly select a batch effort. The Qt GUI sends "interactive".
+    effort = str(payload.get("verification_effort", "thorough"))
+    if effort not in VECTOR_VERIFICATION_EFFORTS:
+        raise ValueError(
+            f"unknown Vector verification effort: {effort}; expected one of "
+            + ", ".join(VECTOR_VERIFICATION_EFFORTS)
+        )
+    selected = dict(VECTOR_VERIFICATION_LIMITS[effort])
+    external_case_limit = selected.pop("external_case_limit")
+    return effort, selected, external_case_limit
+
+
+def _solver_external_status(solver: Mapping[str, Any]) -> str:
+    vector = solver.get("vector")
+    if isinstance(vector, Mapping):
+        external = vector.get("external")
+        if isinstance(external, Mapping):
+            return str(external.get("status", "external_unsupported") or "external_unsupported")
+    return str(solver.get("cross_check", "not_run") or "not_run")
+
+
+def _mark_external_batch_skipped(
+    solver: Mapping[str, Any],
+    limit: int | None,
+) -> dict[str, Any]:
+    out = dict(solver)
+    out["cross_check"] = "batch_limit_skipped"
+    vector = out.get("vector")
+    if isinstance(vector, Mapping):
+        vector_payload = dict(vector)
+        vector_payload["external"] = {
+            "schema": "litmus-link.vector-herd-reference.v1",
+            "status": "batch_limit_skipped",
+            "verdict": "unknown",
+            "allowed": None,
+            "reason": (
+                "The selected verification effort limits herd7 projection "
+                f"cross-checks to {limit} cases in this batch."
+            ),
+            "results": [],
+        }
+        out["vector"] = vector_payload
+    return out
+
+
+def _verification_progress(
+    verb: str,
+    current: int,
+    total: int,
+    solver_statuses: Mapping[str, int],
+    external_statuses: Mapping[str, int],
+    *,
+    file_name: str = "",
+) -> str:
+    counts = ", ".join(
+        f"{status}={count}"
+        for status, count in sorted(solver_statuses.items())
+        if count
+    ) or "pending"
+    external_checked = sum(
+        count
+        for status, count in external_statuses.items()
+        if status not in {"not_run", "batch_limit_skipped"}
+    )
+    external_skipped = int(external_statuses.get("batch_limit_skipped", 0))
+    external = f"herd={external_checked}"
+    if external_skipped:
+        external += f", herd-skipped={external_skipped}"
+    suffix = f" | {file_name}" if file_name else ""
+    return (
+        f"{verb} {current:,}/{total:,} | {counts} | {external}{suffix}"
+    )

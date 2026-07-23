@@ -881,7 +881,7 @@ class _LitmusLinkQtWindow:
         self.vector_complete.setChecked(True)
         self.vector_complete.setToolTip(
             "Include every supported relation cycle, endpoint category, width, Vector form, "
-            "AMO variant, and aligned overlap layout. Clear it to edit the axes below."
+            "AMO variant, and overlap layout. Clear it to edit the axes below."
         )
         self.vector_out = QtWidgets.QLineEdit("out/qt-vector")
         self.vector_out.textChanged.connect(lambda _text: self._update_output_hint())
@@ -907,6 +907,16 @@ class _LitmusLinkQtWindow:
         self.vector_solver_backend.addItem(
             "Cross-check with herd7 scalar projection", "crosscheck"
         )
+        self.vector_solver_backend.setCurrentIndex(0)
+        self.vector_verification_effort = QtWidgets.QComboBox()
+        self.vector_verification_effort.addItem("Interactive (fast preview)", "interactive")
+        self.vector_verification_effort.addItem("Balanced", "balanced")
+        self.vector_verification_effort.addItem("Thorough (deep search)", "thorough")
+        self.vector_verification_effort.setCurrentIndex(0)
+        self.vector_verification_effort.setToolTip(
+            "Controls the per-case search budget and the number of herd7 projections. "
+            "A budget limit returns inconclusive, never a guessed forbidden verdict."
+        )
         form.addRow("Generation scope", self.vector_complete)
         form.addRow("Output directory", self.vector_out)
         form.addRow("Random preview cases", self.vector_preview_limit)
@@ -915,25 +925,8 @@ class _LitmusLinkQtWindow:
         form.addRow("Generation mode", self.vector_generation_mode)
         form.addRow("Maximum generated cases", self.vector_generate_limit)
         form.addRow("Vector solver backend", self.vector_solver_backend)
+        form.addRow("Verification effort", self.vector_verification_effort)
         layout.addLayout(form)
-
-        scope = QtWidgets.QGroupBox("Fixed Nanhu formal scope")
-        scope.setObjectName("VectorScopeGroup")
-        scope.setProperty("axis_role", "scope")
-        scope_layout = QtWidgets.QHBoxLayout(scope)
-        scope_layout.setContentsMargins(10, 8, 10, 8)
-        for text in (
-            "PBMT=0",
-            "Cacheable main memory",
-            "Naturally aligned",
-            "PMA atomic=true",
-        ):
-            chip = QtWidgets.QLabel(text)
-            chip.setObjectName("ScopeChip")
-            chip.setAlignment(_align_center(self.QtCore))
-            scope_layout.addWidget(chip)
-        scope_layout.addStretch(1)
-        layout.addWidget(scope)
 
         scroll = QtWidgets.QScrollArea()
         scroll.setObjectName("VectorAxesScroll")
@@ -976,7 +969,6 @@ class _LitmusLinkQtWindow:
             ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2, _mask_label),
             ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4, _tail_label),
             ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4, _vl_label),
-            ("Element alignment", "alignments", self.options["vector_native"]["alignments"], 2, _alignment_label),
         ]
         for title, key, values, columns, labeler in parameter_groups:
             filter_layout.addWidget(
@@ -1385,7 +1377,11 @@ class _LitmusLinkQtWindow:
                 "generation_mode": generation_mode,
                 "random_seed": self.vector_random_seed.value(),
                 "solver_backend": str(self.vector_solver_backend.currentData()),
+                "verification_effort": str(self.vector_verification_effort.currentData()),
                 "compute_verdicts": not self.defer_solver.isChecked(),
+                # Current backend capability, retained in metadata/audit without
+                # presenting it as a permanent GUI product constraint.
+                "alignments": list(self.options["vector_native"]["alignments"]),
                 **{
                     key: self._selected(checks)
                     for key, checks in self.vector_checks.items()
@@ -1695,6 +1691,13 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
         lines.append(f"Profile: {result['profile']}")
     if "source" in result and result["source"]:
         lines.append(f"Source: {result['source']}")
+    audit = result.get("audit") if isinstance(result.get("audit"), dict) else {}
+    verification_effort = counts.get(
+        "verification_effort",
+        audit.get("verification_effort"),
+    )
+    if verification_effort:
+        lines.append(f"Verification effort: {verification_effort}")
     lines.extend(
         [
             f"Output directory: {out_dir}",
@@ -2545,10 +2548,6 @@ def _vl_label(value: str) -> str:
     return "VLMAX" if value == "vlmax" else value.upper()
 
 
-def _alignment_label(value: str) -> str:
-    return {"aligned": "Naturally aligned"}.get(value, value)
-
-
 def _text_relaxations(text: str) -> list[str]:
     """Split GUI relaxation text on newlines/top-level commas.
 
@@ -2708,7 +2707,6 @@ def _stylesheet() -> str:
     QLabel#FlowTitle { color: #111827; font-weight: 700; }
     QLabel#OutputHint { color: #5b6778; }
     QLabel#AxisSectionHeader { color: #0f4c5c; font-size: 14px; font-weight: 700; padding: 7px 2px 2px 2px; }
-    QLabel#ScopeChip { background: #d1fae5; color: #064e3b; border: 1px solid #6ee7b7; border-radius: 5px; padding: 5px 9px; font-weight: 700; }
     QLabel#FlowArrow { color: #64748b; font-size: 18px; font-weight: 700; }
     QLabel#SectionTitle { color: #111827; font-size: 17px; font-weight: 700; }
     QLabel#DialogFileName { color: #475569; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
@@ -2725,7 +2723,6 @@ def _stylesheet() -> str:
     QGroupBox#VectorFilterGroup[axis_role="core"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#VectorFilterGroup[axis_role="parameter"][group_state="active"] { border: 1px solid #2563eb; background: #eff6ff; }
     QGroupBox#VectorFilterGroup[dependency_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; color: #94a3b8; }
-    QGroupBox#VectorScopeGroup { border: 1px solid #6ee7b7; background: #f0fdf4; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QComboBox#VectorGenerationMode[exhaustive="true"] { border: 2px solid #b45309; background: #fff7ed; color: #9a3412; font-weight: 700; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }

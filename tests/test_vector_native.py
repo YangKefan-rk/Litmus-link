@@ -228,7 +228,12 @@ def test_vector_backend_only_requests_herd_projection_for_crosscheck(
 ) -> None:  # type: ignore[no-untyped-def]
     external_flags = []
 
-    def fake_solver(_case, *, vector_external_check=False):  # type: ignore[no-untyped-def]
+    def fake_solver(  # type: ignore[no-untyped-def]
+        _case,
+        *,
+        vector_external_check=False,
+        vector_solver_limits=None,
+    ):
         external_flags.append(vector_external_check)
         return SimpleNamespace(
             to_json=lambda: {
@@ -249,6 +254,62 @@ def test_vector_backend_only_requests_herd_projection_for_crosscheck(
         compute_verdicts=True,
     )
     assert external_flags == [False, True]
+
+
+def test_interactive_crosscheck_is_bounded_and_progress_is_classified(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    external_flags = []
+    received_limits = []
+
+    def fake_solver(  # type: ignore[no-untyped-def]
+        _case,
+        *,
+        vector_external_check=False,
+        vector_solver_limits=None,
+    ):
+        external_flags.append(vector_external_check)
+        received_limits.append(dict(vector_solver_limits or {}))
+        cross_check = "agree" if vector_external_check else "not_run"
+        external = (
+            {"status": "agree", "allowed": True, "verdict": "observable"}
+            if vector_external_check
+            else None
+        )
+        return SimpleNamespace(
+            to_json=lambda: {
+                "status": "verified",
+                "verdict": "allowed",
+                "allowed": True,
+                "cross_check": cross_check,
+                "vector": {"external": external},
+            }
+        )
+
+    monkeypatch.setattr(vector_native, "solve_generated_case", fake_solver)
+    progress = []
+    cases, audit = sample_vector_cases(
+        _small_payload(
+            sample_limit=6,
+            solver_backend="crosscheck",
+            verification_effort="interactive",
+        ),
+        compute_verdicts=True,
+        progress_callback=lambda current, total, message: progress.append(
+            (current, total, message)
+        ),
+    )
+
+    assert len(cases) == 6
+    assert external_flags == [True, True, True, True, False, False]
+    assert all(limits["max_memory_events"] == 24 for limits in received_limits)
+    assert all(limits["timeout_seconds"] == 0.05 for limits in received_limits)
+    assert audit["verification_effort"] == "interactive"
+    assert audit["external_status"] == {"agree": 4, "batch_limit_skipped": 2}
+    assert cases[-1].solver["cross_check"] == "batch_limit_skipped"
+    assert "verified=6" in progress[-1][2]
+    assert "herd=4" in progress[-1][2]
+    assert "herd-skipped=2" in progress[-1][2]
 
 
 def test_vector_candidate_limit_is_inconclusive_not_forbidden() -> None:

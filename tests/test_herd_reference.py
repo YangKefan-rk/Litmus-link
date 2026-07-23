@@ -12,6 +12,7 @@ from litmus_link.herd_reference import (
     build_scalar_projections,
     capability_for_scalar_case,
     crosscheck_vector_projection,
+    probe_case_herd_capabilities,
     probe_herd_capabilities,
 )
 from litmus_link.rvwmo_solver import EmbeddedVerdict
@@ -260,3 +261,32 @@ def test_scalar_case_capability_checks_required_amo_semantics() -> None:
     )
     assert not capability.supported
     assert capability.reason == "unsigned max unsupported"
+
+
+def test_interactive_capability_probe_only_checks_required_amo(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    case = _case(
+        endpoint_categories=["amo", "vector"],
+        endpoint_compositions=["vector_amo"],
+        amo_ops=["xor"],
+        amo_widths=["d"],
+        amo_orderings=["rl"],
+    )
+    probes = []
+
+    def fake_probe(source, variants=()):  # type: ignore[no-untyped-def]
+        probes.append((source, variants))
+        return HerdCapability(True, "probed", variants=variants)
+
+    monkeypatch.setattr(reference, "_probe", fake_probe)
+    capabilities = probe_case_herd_capabilities(
+        case.case_ir,
+        mixed_size=False,
+    )
+
+    assert capabilities.scalar.supported
+    assert set(capabilities.amo) == {"xor.d.rl"}
+    assert len(probes) == 2
+    assert any("amoxor.d.rl" in source for source, _variants in probes)
+    assert all(variants == () for _source, variants in probes)

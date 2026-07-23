@@ -200,7 +200,85 @@ exists (0:x2=0)
     )
 
 
+def probe_case_herd_capabilities(
+    case: LitmusCaseIR,
+    *,
+    mixed_size: bool,
+) -> HerdCapabilities:
+    """Probe only the herd features required by one scalar projection.
+
+    The full public capability report intentionally checks every supported AMO
+    combination. Doing that eagerly in an interactive preview is unnecessary:
+    one generated case can use only a small subset, and every probe starts a
+    separate herd7 process.
+    """
+
+    path = str(toolchain.HERD)
+    model = str(toolchain.RISCV_CAT)
+    version = toolchain.tool_version(path)
+    if not toolchain.HERD.exists() or not toolchain.RISCV_CAT.exists():
+        missing_parts = []
+        if not toolchain.HERD.exists():
+            missing_parts.append(f"herd7 ({toolchain.HERD})")
+        if not toolchain.RISCV_CAT.exists():
+            missing_parts.append(f"riscv.cat ({toolchain.RISCV_CAT})")
+        unsupported = HerdCapability(False, ", ".join(missing_parts))
+        return HerdCapabilities(
+            False,
+            unsupported,
+            unsupported,
+            unsupported,
+            {},
+            path,
+            version,
+            model,
+        )
+
+    scalar = _probe(_scalar_probe_source())
+    not_required = HerdCapability(False, "not required by this projection")
+    mixed = _probe(_mixed_probe_source(), variants=("mixed",)) if mixed_size else not_required
+    requirements = _case_amo_requirements(case)
+    amo = {
+        _amo_capability_key(operation, width, ordering): _probe(
+            _amo_probe_source(operation, width, ordering)
+        )
+        for operation, width, ordering in requirements
+    }
+    mixed_amo = (
+        _probe(_mixed_amo_probe_source(), variants=("mixed",))
+        if mixed_size and requirements and mixed.supported
+        else not_required
+    )
+    return HerdCapabilities(
+        scalar.supported,
+        scalar,
+        mixed,
+        mixed_amo,
+        amo,
+        path,
+        version,
+        model,
+    )
+
+
+def _scalar_probe_source() -> str:
+    return """RISCV LLProbeScalar
+{
+x=0;
+0:x1=x;
+}
+ P0;
+ lw x2,0(x1);
+exists (0:x2=0)
+"""
+
+
 def _probe(source: str, variants: tuple[str, ...] = ()) -> HerdCapability:
+    return _probe_cached(source, variants)
+
+
+@lru_cache(maxsize=256)
+def _probe_cached(source: str, variants: tuple[str, ...]) -> HerdCapability:
     try:
         verdict = toolchain.herd_judge(source, timeout=20, variants=variants)
     except (OSError, toolchain.ToolchainError) as exc:
@@ -794,9 +872,16 @@ def crosscheck_vector_projection(
     timeout: int = 30,
     capabilities: HerdCapabilities | None = None,
 ) -> dict[str, Any]:
-    caps = capabilities or probe_herd_capabilities()
     bundle = build_scalar_projections(
         case, expansion, max_projections=max_projections
+    )
+    caps = capabilities or (
+        probe_case_herd_capabilities(
+            case,
+            mixed_size=bundle.storage_mode == "mixed",
+        )
+        if bundle.status == "ready"
+        else _unprobed_case_capabilities(bundle.reason)
     )
     base = {
         "schema": "litmus-link.vector-herd-reference.v1",
@@ -831,11 +916,7 @@ def crosscheck_vector_projection(
             "results": [],
         }
 
-    amo_requirements = {
-        (event.amo_op, int(event.amo_width_bytes or 0), event.amo_ordering)
-        for event in case.events()
-        if event.kind == "amo"
-    }
+    amo_requirements = _case_amo_requirements(case)
     unsupported_amo = [
         (operation, width, ordering, caps.amo_capability(operation, width, ordering))
         for operation, width, ordering in sorted(amo_requirements)
@@ -938,6 +1019,41 @@ def crosscheck_vector_projection(
         "reason": reason,
         "results": results,
     }
+
+
+def _case_amo_requirements(
+    case: LitmusCaseIR,
+) -> tuple[tuple[str, int, str], ...]:
+    return tuple(
+        sorted(
+            {
+                (
+                    str(event.amo_op),
+                    int(event.amo_width_bytes or 0),
+                    str(event.amo_ordering),
+                )
+                for event in case.events()
+                if event.kind == "amo"
+            }
+        )
+    )
+
+
+def _unprobed_case_capabilities(reason: str) -> HerdCapabilities:
+    capability = HerdCapability(
+        False,
+        f"Capability probes skipped because no scalar projection was built: {reason}",
+    )
+    return HerdCapabilities(
+        False,
+        capability,
+        capability,
+        capability,
+        {},
+        str(toolchain.HERD),
+        toolchain.tool_version(str(toolchain.HERD)),
+        str(toolchain.RISCV_CAT),
+    )
 
 
 def _case_capabilities(

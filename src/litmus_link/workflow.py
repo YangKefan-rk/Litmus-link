@@ -65,6 +65,7 @@ from .vector_native import (
     VECTOR_ALIGNMENTS,
     VECTOR_GENERATION_MODES,
     VECTOR_SAMPLE_MODES,
+    VECTOR_VERIFICATION_EFFORTS,
     VectorNativeDomain,
     generate_vector_cases,
     sample_vector_cases,
@@ -121,6 +122,7 @@ def options_payload() -> Dict[str, Any]:
             "preview_sampling_modes": list(VECTOR_SAMPLE_MODES),
             "generation_modes": list(VECTOR_GENERATION_MODES),
             "solver_backends": ["embedded", "crosscheck"],
+            "verification_efforts": list(VECTOR_VERIFICATION_EFFORTS),
         },
     }
 
@@ -264,6 +266,8 @@ def _vector_native_preview_payload(
         "sampling": audit["sampling"],
         "random_seed": audit["sample_seed"],
         "relation_cycles": audit["relation_cycles"],
+        "solver_backend": audit["solver_backend"],
+        "verification_effort": audit["verification_effort"],
     }
     return {
         "profile": "vector-native",

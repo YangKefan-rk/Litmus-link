@@ -10,6 +10,7 @@ performed only after Litmus-link has constructed the complete test source.
 import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import islice, product
 from math import gcd
 from pathlib import Path
@@ -118,26 +119,10 @@ def native_template_cycles(
     reports: list[dict] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for name in selected_presets:
-        try:
-            preset = NATIVE_PRESETS[name]
-        except KeyError as exc:
-            raise NativeGenerationError(f"unknown native scalar preset: {name}") from exc
-        axes: list[NativeEdge | Sequence[NativeEdge]] = []
-        for token in preset.axes:
-            if token in {"RR", "RW", "WR", "WW"}:
-                alternatives = edges_for_shape(token, selected_mechanisms, include_same=include_same)
-                if not alternatives:
-                    raise NativeGenerationError(f"preset {name} has no legal alternatives for {token}")
-                axes.append(alternatives)
-            else:
-                axes.append(edge_by_label(token))
-        family_cycles, report = enumerate_template_cycles(
-            name,
-            axes,
-            max_procs=preset.nprocs,
-            exact_procs=True,
+        family_cycles, family_report = _native_preset_cycles(
+            name, selected_mechanisms, include_same
         )
-        reports.append({"family": name, **report.to_json()})
+        reports.append({"family": name, **family_report})
         for cycle in family_cycles:
             key = (name, cycle.canonical_key)
             if key not in seen:
@@ -160,6 +145,40 @@ def native_template_cycles(
         "families": reports,
     }
     return cycles, audit
+
+
+@lru_cache(maxsize=128)
+def _native_preset_cycles(
+    name: str,
+    mechanisms: tuple[str, ...],
+    include_same: bool,
+) -> tuple[tuple[NativeCycle, ...], dict]:
+    try:
+        preset = NATIVE_PRESETS[name]
+    except KeyError as exc:
+        raise NativeGenerationError(f"unknown native scalar preset: {name}") from exc
+    axes: list[NativeEdge | Sequence[NativeEdge]] = []
+    for token in preset.axes:
+        if token in {"RR", "RW", "WR", "WW"}:
+            alternatives = edges_for_shape(
+                token,
+                mechanisms,
+                include_same=include_same,
+            )
+            if not alternatives:
+                raise NativeGenerationError(
+                    f"preset {name} has no legal alternatives for {token}"
+                )
+            axes.append(alternatives)
+        else:
+            axes.append(edge_by_label(token))
+    family_cycles, report = enumerate_template_cycles(
+        name,
+        axes,
+        max_procs=preset.nprocs,
+        exact_procs=True,
+    )
+    return tuple(family_cycles), report.to_json()
 
 
 def native_template_audit(
