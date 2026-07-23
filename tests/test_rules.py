@@ -89,6 +89,60 @@ def test_vector_load_store_shape_must_match_memory_event() -> None:
     assert "vector_load" in store_as_load.reason
 
 
+def test_segment_nfields_and_register_groups_are_checked() -> None:
+    legal = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="segment_unit_load",
+            params={
+                "sew": "e32",
+                "lmul": "m4",
+                "mask": "unmasked",
+                "vl": "vl1",
+                "nf": "nf2",
+            },
+        )
+    )
+    reserved = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="segment_unit_load",
+            params={
+                "sew": "e32",
+                "lmul": "m4",
+                "mask": "unmasked",
+                "vl": "vl1",
+                "nf": "nf3",
+            },
+        )
+    )
+    ordinary_with_nf = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="unit_load",
+            params={"nf": "nf2"},
+        )
+    )
+
+    assert legal.status == GENERATED
+    assert reserved.status == EXCLUDED_ILLEGAL
+    assert "reserved" in reserved.reason
+    assert ordinary_with_nf.status == EXCLUDED_UNSUPPORTED
+    assert "only applies" in ordinary_with_nf.reason
+
+
 def test_cmo_shape_must_match_memory_event() -> None:
     decision = evaluate(Combination("test", "cmo", "MP", "scalar_pair", "cacheable", cmo="flush"))
     assert decision.status == EXCLUDED_UNSUPPORTED

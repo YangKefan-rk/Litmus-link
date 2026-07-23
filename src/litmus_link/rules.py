@@ -16,11 +16,14 @@ from .profiles import (
     VECTOR_INDEX_EEWS,
     VECTOR_LMULS,
     VECTOR_MASKS,
+    VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
     VECTOR_WIDTHS,
     VECTOR_ENDPOINTS,
     vector_same_line_footprint,
+    vector_memory_config_legal,
+    vector_nfields,
     vector_vlmax,
 )
 
@@ -33,7 +36,7 @@ NEGATIVE_TLBS = {"nonleaf_pbmt"}
 ILLEGAL_VECTOR_FORMS = {"fof_strided", "fof_indexed"}
 VECTOR_LOAD_OPS = {operation for operation in VECTOR_OPS if not operation.endswith("store")}
 VECTOR_STORE_OPS = {operation for operation in VECTOR_OPS if operation.endswith("store")}
-VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "index_eew", "vector_event"}
+VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "index_eew", "nf", "vector_event"}
 VM_PARAMS = {"vm", "shootdown", "pte"}
 
 
@@ -48,8 +51,8 @@ RULE_DESCRIPTIONS: Dict[str, str] = {
     "vector_fof_unit_only": "Fault-only-first is unit-stride LOAD only (incl. unit-stride segment); strided-FOF, indexed-FOF and FOF stores have no encoding (spike has only vle*ff.h; XiangShan VSplit.scala:156,518; DecodeUnit.scala:1061,1072).",
     "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
     "vector_memory_type": "The Nanhu target profile does not support vector accesses to MMIO/uncacheable or PBMT-tagged mappings; normal vector cases are restricted to cacheable memory.",
-    "vector_solver_scope": "The first vector-aware solver supports unit-stride, strided, and ordered/unordered indexed loads/stores with deterministic vl and mask semantics; fault, FOF, segment, restart, whole-register, and complex indexed-alias forms are deferred.",
-    "vector_ordering": "Vector memory follows RVWMO per active element; the vector-aware solver keeps unordered siblings at one instruction-order position and adds preserved element-order PPO only for ordered-indexed forms.",
+    "vector_solver_scope": "The vector-aware solver supports unit-stride, strided, indexed, and Segment loads/stores with deterministic vl/mask semantics; fault, FOF, restart, whole-register, cross-page, and complex indexed-alias forms are deferred.",
+    "vector_ordering": "Vector memory follows RVWMO per active element/field transaction; unordered siblings share one instruction-order position, and ordered-indexed Segment forms order different segment elements without ordering fields inside one element.",
     "vector_native_relation_cycle": "Multi-endpoint Vector cases are built from validated native relation cycles; endpoint ISA legality and formal solver scope are checked per generated case.",
     "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",
     "remote_sfence": "sfence.vma flushes the local hart only; remote shootdown is a software IPI and must be explicitly modeled (spike mmu.cc:61-64; XiangShan Fence.scala:67-74).",
@@ -478,6 +481,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             "tail": set(VECTOR_TAILS),
             "vl": set(VECTOR_LENGTHS),
             "index_eew": set(VECTOR_INDEX_EEWS),
+            "nf": set(VECTOR_NFIELDS),
         }
         for key, allowed in vector_domains.items():
             if key in combination.params and str(combination.params[key]) not in allowed:
@@ -521,6 +525,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
                 {"formal_forbidden_claim": "false", "vector_solver": "unsupported-endpoint"},
                 )
         index_eew = combination.params.get("index_eew")
+        nf = combination.params.get("nf")
         if index_eew is not None and "indexed" not in combination.vector:
             return Decision(
                 EXCLUDED_UNSUPPORTED,
@@ -543,12 +548,48 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
                 "vector",
                 {"formal_forbidden_claim": "false", "vector_solver": "unsupported-index-eew"},
             )
+        if nf is not None and not combination.vector.startswith("segment_"):
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "nf only applies to Vector Segment load/store forms.",
+                "platform-specific",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported-nf"},
+            )
+        if vector_nfields(combination.vector, nf) is None or not vector_memory_config_legal(
+            combination.vector,
+            sew,
+            lmul,
+            mask,
+            vl,
+            (
+                str(index_eew or "ei32")
+                if "indexed" in combination.vector
+                else None
+            ),
+            nf,
+        ):
+            return Decision(
+                EXCLUDED_ILLEGAL,
+                f"Vector register grouping is reserved for {combination.vector}, "
+                f"LMUL={lmul}, NFIELDS={nf or 'default'} or the selected index EEW.",
+                "negative-exception",
+                "negative-exception",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "reserved-register-group"},
+            )
         if str(combination.params.get("footprint", "same_line")) == "same_line" and not vector_same_line_footprint(
             combination.vector,
             sew,
             lmul,
             mask,
             vl,
+            nf,
         ):
             return Decision(
                 EXCLUDED_UNSUPPORTED,
@@ -680,6 +721,7 @@ _FORMAL_VECTOR_PARAM_VALUES = {
     "footprint": {"same_line"},
     "vl": set(VECTOR_LENGTHS),
     "index_eew": set(VECTOR_INDEX_EEWS),
+    "nf": set(VECTOR_NFIELDS),
     "stress": {"none"},
 }
 

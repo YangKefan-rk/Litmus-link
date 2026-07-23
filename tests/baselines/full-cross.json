@@ -1,11 +1,11 @@
 {
   "excluded_illegal": 0,
   "excluded_unsupported": 0,
-  "generated": 677550,
-  "generated_litmus": 2032640,
+  "generated": 609870,
+  "generated_litmus": 1829600,
   "hand_required": 29,
   "missing": 0,
   "profile": "full-cross",
   "schema": "litmus-link.audit-baseline.v1",
-  "total_combinations": 677579
+  "total_combinations": 609899
 }

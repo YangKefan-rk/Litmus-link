@@ -64,13 +64,64 @@ def test_preview_action_can_run_twice(qt_app) -> None:  # type: ignore[no-untype
     ui.window.show()
     try:
         for _ in range(2):
+            previous_items = ui.preview_items
             ui.preview_button.click()
+            assert previous_items == []
+            assert ui.preview_model.rowCount() == 0
             # A second click can arrive before the worker's started signal reaches
             # the GUI thread; it must be rejected without creating another thread.
             ui.preview_button.click()
             _process_until(app, lambda: ui.active_thread is None)
             assert ui.preview_items
             assert all(item["solver"]["status"] == "unchecked" for item in ui.preview_items)
+    finally:
+        ui.shutdown()
+        ui.window.close()
+        app.processEvents()
+
+
+def test_vector_verify_action_can_run_twice_with_compact_results(qt_app) -> None:  # type: ignore[no-untyped-def]
+    app, QtWidgets, QtCore, QtGui, binding = qt_app
+    ui = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
+    payload = {
+        "mode": "vector",
+        "skeletons": ["MP"],
+        "mechanisms": ["po"],
+        "endpoint_categories": ["vector"],
+        "endpoint_compositions": ["vector_only"],
+        "scalar_widths": ["w"],
+        "amo_ops": ["add"],
+        "amo_widths": ["d"],
+        "amo_orderings": ["relaxed"],
+        "overlap_layouts": ["same_start"],
+        "forms": ["unit_load", "unit_store"],
+        "sew": ["e32"],
+        "lmul": ["m1"],
+        "index_eew": ["ei16"],
+        "mask": ["unmasked"],
+        "tail": ["ta_ma"],
+        "vl": ["vl1"],
+        "alignments": ["aligned"],
+        "sample_limit": 2,
+        "random_seed": 3,
+        "solver_backend": "embedded",
+        "verification_effort": "interactive",
+        "solver_workers": 1,
+    }
+    ui._payload = lambda: dict(payload)  # type: ignore[method-assign]
+    ui.window.show()
+    try:
+        for _ in range(2):
+            previous_items = ui.preview_items
+            ui._run_action("verify", "Verify Preview")
+            assert previous_items == []
+            assert ui.preview_model.rowCount() == 0
+            _process_until(app, lambda: ui.active_thread is None, timeout=30.0)
+            assert len(ui.preview_items) == 2
+            assert all(
+                item["solver"]["vector"]["preview_compact"]
+                for item in ui.preview_items
+            )
     finally:
         ui.shutdown()
         ui.window.close()
@@ -185,6 +236,13 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
             "unit_load", "unit_store", "strided_load", "strided_store",
             "indexed_ordered_load", "indexed_ordered_store",
             "indexed_unordered_load", "indexed_unordered_store",
+            "segment_unit_load", "segment_unit_store",
+            "segment_strided_load", "segment_strided_store",
+            "segment_indexed_ordered_load", "segment_indexed_ordered_store",
+            "segment_indexed_unordered_load", "segment_indexed_unordered_store",
+        }
+        assert set(complete["nf"]) == {
+            "nf2", "nf3", "nf4", "nf5", "nf6", "nf7", "nf8"
         }
 
         ui.vector_complete.setChecked(False)
@@ -234,6 +292,10 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
             if "indexed" in str(check.property("axis_value")):
                 check.setChecked(False)
         assert not ui.vector_group_by_key["index_eew"].isEnabled()
+        for check in ui.vector_checks["forms"]:
+            if str(check.property("axis_value")).startswith("segment_"):
+                check.setChecked(False)
+        assert not ui.vector_group_by_key["nf"].isEnabled()
 
         ui.vector_complete.setChecked(True)
         restored = ui._payload()
@@ -248,6 +310,7 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         )
         ui.vector_complete.setChecked(False)
         assert ui.vector_group_by_key["index_eew"].isEnabled()
+        assert ui.vector_group_by_key["nf"].isEnabled()
 
         crosscheck = ui.vector_solver_backend.findData("crosscheck")
         ui.vector_solver_backend.setCurrentIndex(crosscheck)

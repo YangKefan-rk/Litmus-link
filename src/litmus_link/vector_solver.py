@@ -15,7 +15,14 @@ from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 from .litmus_ir import LitmusCaseIR, LitmusEvent, MemoryAccess
-from .profiles import NANHU_VLEN_BITS, VECTOR_INDEX_EEWS, VECTOR_LENGTHS, VECTOR_LMUL_FACTORS, vector_vlmax
+from .profiles import (
+    NANHU_VLEN_BITS,
+    VECTOR_INDEX_EEWS,
+    VECTOR_LENGTHS,
+    VECTOR_LMUL_FACTORS,
+    vector_nfields,
+    vector_vlmax,
+)
 from .rvwmo_solver import EmbeddedVerdict, OrderingOverrides, Pair, solve_rvwmo
 
 
@@ -29,6 +36,14 @@ SUPPORTED_VECTOR_FORMS = frozenset(
         "indexed_unordered_store",
         "indexed_ordered_load",
         "indexed_ordered_store",
+        "segment_unit_load",
+        "segment_unit_store",
+        "segment_strided_load",
+        "segment_strided_store",
+        "segment_indexed_unordered_load",
+        "segment_indexed_unordered_store",
+        "segment_indexed_ordered_load",
+        "segment_indexed_ordered_store",
     }
 )
 
@@ -56,6 +71,7 @@ class VectorConfig:
     base_offset_bytes: int
     alignment: str
     atomicity_model: str
+    nf: int
 
     @classmethod
     def from_case(cls, case: LitmusCaseIR) -> "VectorConfig":
@@ -82,6 +98,15 @@ class VectorConfig:
         lmul = str(raw.get("lmul", ""))
         if lmul not in VECTOR_LMUL_FACTORS:
             raise VectorSolverError(f"unsupported LMUL: {lmul}")
+        nf = vector_nfields(form, raw.get("nf"))
+        if nf is None:
+            raise VectorSolverError(
+                f"NFIELDS={raw.get('nf')!r} is invalid for Vector form {form}"
+            )
+        if VECTOR_LMUL_FACTORS[lmul] * nf > 8:
+            raise VectorSolverError(
+                f"EMUL*NFIELDS exceeds 8 for LMUL={lmul}, NFIELDS={nf}"
+            )
         vlmax = vector_vlmax(f"e{sew_bits}", lmul)
         if vlmax is None:
             raise VectorSolverError(f"illegal VLMAX for VLEN={vlen_bits}, SEW={sew_bits}, LMUL={lmul}")
@@ -121,7 +146,12 @@ class VectorConfig:
 
         index_pattern = raw.get("index_pattern")
         if "indexed" in form:
-            if index_pattern != "scaled-element-index":
+            expected_index_pattern = (
+                "scaled-segment-index"
+                if form.startswith("segment_indexed_")
+                else "scaled-element-index"
+            )
+            if index_pattern != expected_index_pattern:
                 raise VectorSolverError("complex indexed aliases are outside the current solver scope")
             index_eew = str(raw.get("index_eew", "ei32"))
             if index_eew not in VECTOR_INDEX_EEWS:
@@ -131,7 +161,9 @@ class VectorConfig:
         else:
             index_eew = None
 
-        ordered = form.startswith("indexed_ordered")
+        ordered = form.startswith("indexed_ordered") or form.startswith(
+            "segment_indexed_ordered"
+        )
         metadata_ordered = raw.get("ordered_elements", False)
         if not isinstance(metadata_ordered, bool):
             raise VectorSolverError("ordered_elements metadata must be boolean")
@@ -182,11 +214,13 @@ class VectorConfig:
             base_offset_bytes=base_offset_bytes,
             alignment=alignment,
             atomicity_model=atomicity_model,
+            nf=nf,
         )
         active_offsets = [
-            config.offset(index)
+            config.offset(index, field)
             for index in range(config.effective_vl)
             if config.active(index)
+            for field in range(config.nf)
         ]
         if not active_offsets:
             raise VectorSolverError("vector instruction has no active elements")
@@ -203,7 +237,26 @@ class VectorConfig:
     def active(self, index: int) -> bool:
         return index < self.effective_vl and (self.mask == "unmasked" or index % 2 == 0)
 
-    def offset(self, index: int) -> int:
+    @property
+    def segment(self) -> bool:
+        return self.form.startswith("segment_")
+
+    @property
+    def segment_bytes(self) -> int:
+        return self.element_bytes * self.nf
+
+    def offset(self, index: int, field: int = 0) -> int:
+        if field < 0 or field >= self.nf:
+            raise VectorSolverError(
+                f"field index {field} is outside NFIELDS={self.nf}"
+            )
+        if self.form.startswith("segment_unit_"):
+            return index * self.segment_bytes + field * self.element_bytes
+        if self.form.startswith("segment_strided_"):
+            assert self.stride_bytes is not None
+            return index * self.stride_bytes + field * self.element_bytes
+        if self.form.startswith("segment_indexed_"):
+            return index * self.segment_bytes + field * self.element_bytes
         if self.form.startswith("unit_"):
             return index * self.element_bytes
         if self.form.startswith("strided_"):
@@ -234,6 +287,7 @@ class VectorConfig:
             "base_offset_bytes": self.base_offset_bytes,
             "alignment": self.alignment,
             "atomicity_model": self.atomicity_model,
+            "nf": self.nf,
             "vstart": 0,
         }
 
@@ -244,6 +298,7 @@ class VectorElement:
     event_id: str
     hart: int
     index: int
+    field_index: int | None
     within_vl: bool
     mask_enabled: bool
     active: bool
@@ -259,6 +314,7 @@ class VectorElement:
             "event_id": self.event_id,
             "hart": self.hart,
             "index": self.index,
+            "field_index": self.field_index,
             "within_vl": self.within_vl,
             "mask_enabled": self.mask_enabled,
             "active": self.active,
@@ -282,13 +338,18 @@ class VectorInstruction:
     def active_elements(self) -> tuple[VectorElement, ...]:
         return tuple(element for element in self.elements if element.active)
 
+    @property
+    def active_segment_count(self) -> int:
+        return len({element.index for element in self.active_elements})
+
     def to_json(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "hart": self.hart,
             "form": self.form,
             "instruction_order": self.instruction_order,
-            "active_element_count": len(self.active_elements),
+            "active_element_count": self.active_segment_count,
+            "active_transaction_count": len(self.active_elements),
             "elements": [element.to_json() for element in self.elements],
         }
 
@@ -303,7 +364,7 @@ class VectorExpansion:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema": "litmus-link.vector-element-ir.v1",
+            "schema": "litmus-link.vector-element-ir.v2",
             "config": self.config.to_json(),
             "configs": {
                 event_id: config.to_json()
@@ -341,7 +402,7 @@ class VectorSolverVerdict:
                 else "litmus-link-vector-rvwmo"
             ),
             "model": "riscv.cat+rvv-elements",
-            "model_revision": "rvv-element-order-v1",
+            "model_revision": "rvv-element-field-order-v2",
             "reason": self.reason,
             "vector_ir": self.expansion.to_json() if self.expansion else None,
             "embedded": self.embedded.to_json() if self.embedded else None,
@@ -387,62 +448,82 @@ def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
                     f"vector memory event {event.event_id} has no per-instruction configuration"
                 ) from exc
             elements: list[VectorElement] = []
-            active_ids: list[str] = []
+            active_ids_by_element: list[list[str]] = []
             for index in range(config.vlmax):
                 within_vl = index < config.effective_vl
                 mask_enabled = config.mask == "unmasked" or index % 2 == 0
                 active = config.active(index)
-                offset = config.base_offset_bytes + config.offset(index)
-                location = _offset_location(event.location, offset)
-                event_id = f"{event.event_id}.e{index}"
-                element = VectorElement(
-                    parent_event=event.event_id,
-                    event_id=event_id,
-                    hart=hart_id,
-                    index=index,
-                    within_vl=within_vl,
-                    mask_enabled=mask_enabled,
-                    active=active,
-                    offset_bytes=offset,
-                    size_bytes=config.element_bytes,
-                    location=location,
-                    read=event.kind == "load",
-                    write=event.kind == "store",
-                )
-                elements.append(element)
-                if not active:
-                    continue
-                active_ids.append(event_id)
-                expanded_event = LitmusEvent(
-                    event_id=event_id,
-                    hart=hart_id,
-                    kind=event.kind,
-                    instruction=_scalar_element_instruction(event.kind, config.sew_bits),
-                    location=location,
-                    register="x28" if event.kind == "load" else "x5",
-                    value=event.value if event.kind == "store" or index == 0 else "",
-                    role=f"vector-element-active:{index}",
-                    memory_access=MemoryAccess.create(
-                        event.location,
-                        offset,
-                        config.element_bytes,
-                        config.atomicity_model,
-                        transaction_kind="vector_element",
-                        parent_instruction=event.event_id,
-                        element_index=index,
-                    ),
-                )
-                expanded_hart.append(expanded_event)
-                order_by_event[event_id] = instruction_order
-                instruction_by_event[event_id] = event.event_id
+                active_ids: list[str] = []
+                for field in range(config.nf):
+                    offset = config.base_offset_bytes + config.offset(index, field)
+                    location = _offset_location(event.location, offset)
+                    event_id = (
+                        f"{event.event_id}.e{index}.f{field}"
+                        if config.segment
+                        else f"{event.event_id}.e{index}"
+                    )
+                    element = VectorElement(
+                        parent_event=event.event_id,
+                        event_id=event_id,
+                        hart=hart_id,
+                        index=index,
+                        field_index=field if config.segment else None,
+                        within_vl=within_vl,
+                        mask_enabled=mask_enabled,
+                        active=active,
+                        offset_bytes=offset,
+                        size_bytes=config.element_bytes,
+                        location=location,
+                        read=event.kind == "load",
+                        write=event.kind == "store",
+                    )
+                    elements.append(element)
+                    if not active:
+                        continue
+                    active_ids.append(event_id)
+                    expanded_event = LitmusEvent(
+                        event_id=event_id,
+                        hart=hart_id,
+                        kind=event.kind,
+                        instruction=_scalar_element_instruction(event.kind, config.sew_bits),
+                        location=location,
+                        register="x28" if event.kind == "load" else "x5",
+                        value=(
+                            event.value
+                            if event.kind == "store" or (index == 0 and field == 0)
+                            else ""
+                        ),
+                        role=(
+                            f"vector-segment-field-active:{index}:{field}"
+                            if config.segment
+                            else f"vector-element-active:{index}"
+                        ),
+                        memory_access=MemoryAccess.create(
+                            event.location,
+                            offset,
+                            config.element_bytes,
+                            config.atomicity_model,
+                            transaction_kind="vector_element",
+                            parent_instruction=event.event_id,
+                            element_index=index,
+                            field_index=field if config.segment else None,
+                        ),
+                    )
+                    expanded_hart.append(expanded_event)
+                    order_by_event[event_id] = instruction_order
+                    instruction_by_event[event_id] = event.event_id
+                if active_ids:
+                    active_ids_by_element.append(active_ids)
 
-            if not active_ids:
+            if not active_ids_by_element:
                 raise VectorSolverError(f"vector instruction {event.event_id} has no active elements")
             if config.ordered_elements:
                 preserved.update(
                     (left, right)
-                    for left_index, left in enumerate(active_ids)
-                    for right in active_ids[left_index + 1 :]
+                    for left_index, left_group in enumerate(active_ids_by_element)
+                    for right_group in active_ids_by_element[left_index + 1 :]
+                    for left in left_group
+                    for right in right_group
                 )
             instructions.append(
                 VectorInstruction(
@@ -535,7 +616,19 @@ def solve_vector_case(
         max_search_steps=max_search_steps,
         ordering=expansion.ordering,
     )
-    if external_check and embedded.status == "verified":
+    segment_case = any(config.segment for config in expansion.configs.values())
+    if external_check and embedded.status == "verified" and segment_case:
+        external = {
+            "schema": "litmus-link.vector-herd-reference.v1",
+            "status": "external_unsupported",
+            "verdict": "unknown",
+            "allowed": None,
+            "reason": (
+                "Stock herd7 cannot represent one Segment instruction as unordered "
+                "field transactions without introducing artificial scalar program order."
+            ),
+        }
+    elif external_check and embedded.status == "verified":
         from .herd_reference import crosscheck_vector_projection
 
         external = crosscheck_vector_projection(
@@ -557,8 +650,8 @@ def solve_vector_case(
         verdict = embedded.verdict
         allowed = embedded.allowed
         reason = (
-            "Active RVV elements were solved as one instruction-level event set under RVWMO; "
-            "mask/vl/address generation and ordered-indexed element PPO are explicit in vector_ir. "
+            "Active RVV element/field transactions were solved as one instruction-level event set under RVWMO; "
+            "mask/vl/address generation, unordered Segment fields, and ordered-indexed element PPO are explicit in vector_ir. "
             f"External reference status: {external.get('status', 'not_run') if external is not None else 'not_run'}."
         )
     else:
@@ -632,11 +725,12 @@ def _validate_aligned_mixed_size_scope(
         for index in range(config.effective_vl):
             if not config.active(index):
                 continue
-            offset = config.base_offset_bytes + config.offset(index)
-            if offset % config.element_bytes:
-                raise VectorSolverError(
-                    f"Vector event {event_id} element {index} is not naturally aligned"
-                )
+            for field in range(config.nf):
+                offset = config.base_offset_bytes + config.offset(index, field)
+                if offset % config.element_bytes:
+                    raise VectorSolverError(
+                        f"Vector event {event_id} element {index} field {field} is not naturally aligned"
+                    )
     for event in case.events():
         if event.kind != "amo" or event.memory_access is None:
             continue

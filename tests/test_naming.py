@@ -123,3 +123,30 @@ def test_vector_native_name_separates_relation_map_and_file_identity() -> None:
     assert re.fullmatch(r"LLV-MP-[0-9a-f]{64}", identity["machine_name"])
     assert identity["file_name"] == identity["machine_name"] + ".litmus"
     assert repeated == identity
+
+
+def test_segment_nfields_is_visible_and_part_of_file_identity() -> None:
+    def identity(nf: str):
+        return vector_native_case_identity(
+            "R",
+            {"family": "R", "labels": ["Rfe", "PodRR", "Fre", "PodWW"]},
+            ["Rfe", "PodRR", "Fre", "PodWW"],
+            [
+                {
+                    "choice_id": f"vector:segment_unit_load:e32:m1:{nf}",
+                    "category": "vector",
+                    "direction": "R",
+                    "annotation": "P",
+                    "vector_form": "segment_unit_load",
+                    "params": {"sew": "e32", "lmul": "m1", "nf": nf},
+                }
+            ],
+            "aligned",
+        )
+
+    nf2 = identity("nf2")
+    nf3 = identity("nf3")
+
+    assert "E0:VLSEG2E32" in nf2["display_name"]
+    assert "E0:VLSEG3E32" in nf3["display_name"]
+    assert nf2["machine_name"] != nf3["machine_name"]

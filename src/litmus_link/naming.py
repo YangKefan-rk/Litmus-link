@@ -24,6 +24,14 @@ _VECTOR_FORMS = {
     "indexed_unordered_load": "vluxei{index}.v-E{sew}",
     "indexed_ordered_store": "vsoxei{index}.v-E{sew}",
     "indexed_unordered_store": "vsuxei{index}.v-E{sew}",
+    "segment_unit_load": "vlseg{nf}e{sew}.v",
+    "segment_unit_store": "vsseg{nf}e{sew}.v",
+    "segment_strided_load": "vlsseg{nf}e{sew}.v",
+    "segment_strided_store": "vssseg{nf}e{sew}.v",
+    "segment_indexed_ordered_load": "vloxseg{nf}ei{index}.v-E{sew}",
+    "segment_indexed_unordered_load": "vluxseg{nf}ei{index}.v-E{sew}",
+    "segment_indexed_ordered_store": "vsoxseg{nf}ei{index}.v-E{sew}",
+    "segment_indexed_unordered_store": "vsuxseg{nf}ei{index}.v-E{sew}",
 }
 
 _VECTOR_EVENT_FORMS = {
@@ -35,6 +43,14 @@ _VECTOR_EVENT_FORMS = {
     "indexed_unordered_load": "VLUXEI{index}/E{sew}",
     "indexed_ordered_store": "VSOXEI{index}/E{sew}",
     "indexed_unordered_store": "VSUXEI{index}/E{sew}",
+    "segment_unit_load": "VLSEG{nf}E{sew}",
+    "segment_unit_store": "VSSEG{nf}E{sew}",
+    "segment_strided_load": "VLSSEG{nf}E{sew}",
+    "segment_strided_store": "VSSSEG{nf}E{sew}",
+    "segment_indexed_ordered_load": "VLOXSEG{nf}EI{index}/E{sew}",
+    "segment_indexed_unordered_load": "VLUXSEG{nf}EI{index}/E{sew}",
+    "segment_indexed_ordered_store": "VSOXSEG{nf}EI{index}/E{sew}",
+    "segment_indexed_unordered_store": "VSUXSEG{nf}EI{index}/E{sew}",
 }
 
 _VECTOR_ALIGNMENT_NAMES = {
@@ -273,8 +289,9 @@ def _vector_event_name(choice: Mapping[str, Any], alignment: str) -> str:
     values = params if isinstance(params, Mapping) else {}
     sew = str(values.get("sew", "e32")).removeprefix("e")
     index = str(values.get("index_eew", "ei32")).removeprefix("ei")
+    nf = str(values.get("nf", "nf2")).removeprefix("nf")
     template = _VECTOR_EVENT_FORMS.get(form, _token(form).upper())
-    name = template.format(sew=sew, index=index)
+    name = template.format(sew=sew, index=index, nf=nf)
     alignment_name = _VECTOR_ALIGNMENT_NAMES.get(alignment)
     return f"{name}/{alignment_name}" if alignment_name else name
 
@@ -312,7 +329,10 @@ def _vector_tokens(
 ) -> list[str]:
     sew = str(params.get("sew", "e32")).removeprefix("e")
     index = str(params.get("index_eew", "ei32")).removeprefix("ei")
-    mnemonic = _VECTOR_FORMS.get(form, _token(form)).format(sew=sew, index=index)
+    nf = str(params.get("nf", "nf2")).removeprefix("nf")
+    mnemonic = _VECTOR_FORMS.get(form, _token(form)).format(
+        sew=sew, index=index, nf=nf
+    )
     endpoint_value = params.get("vector_event")
     if endpoint_value is None:
         endpoint_value = _DEFAULT_VECTOR_ENDPOINTS.get(skeleton, {}).get(memory_event)

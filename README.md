@@ -201,7 +201,7 @@ litmus-link qt-gui --check
 
 The Qt window opens on the machine where the command runs. On a server, use X forwarding or a remote desktop session. The GUI does not open a network socket.
 
-The Qt application intentionally contains only two configuration pages: `Scalar Litmus` and `Vector Litmus`. `Scalar Litmus` is backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. `Vector Litmus` uses the same relation-cycle engine. Its core axes select skeletons, relation mechanisms, endpoint categories (`Vector`, `Scalar`, `AMO`), endpoint compositions (`V only`, `V+S`, `V+A`, `V+S+A`), and all supported RVV forms. Parameter axes independently select scalar B/H/W/D, AMO opcode/W-D/relaxed-aq-rl-aqrl, overlap layout, SEW/LMUL/EEW/mask/tail/VL. The currently implemented verification scope is recorded in each case's metadata and audit report rather than presented as a permanent GUI constraint; future PBMT, alignment, CMO, and TLB axes can be added as their models become available. `Random preview cases` is a reproducible sample from the full finite domain, keyed by `Random seed`; it is not the first N Cartesian-product rows. `Balanced skeleton coverage` assigns near-equal quotas to selected skeleton families before covering endpoint, Vector-form, alignment, and relation-mechanism strata. `Domain-weighted random` instead preserves the natural cardinality of the complete case space. Generation independently offers balanced sampling, domain-weighted sampling, or `All legal combinations`. Exhaustive mode streams every legal assignment under the current filters, ignores the sampled-generation limit, and requires an explicit warning confirmation because a broad configuration can contain an astronomical number of files. The browser uses a virtual table model, supports text/family/status/verdict filters, and does not allocate widgets or PNG images per case. `Preview Cases` is the fast unchecked path; `Verify Preview` runs the selected embedded or herd projection backend where it is applicable. The Vector page's `Basic configuration` section controls the requested solver process count; Embedded batches use 16 local processes by default and accept up to 64. Set `LITMUS_LINK_SOLVER_WORKERS=<n>` to impose a lower hard cap on a shared machine. The verification-effort selector bounds interactive searches; hitting a budget produces `inconclusive`, never a guessed `forbidden` verdict. Double-clicking a case renders its PNG on demand and scales the complete diagram to the detail window. Actions run in the background and update determinate progress whenever the generator has a finite work count.
+The Qt application intentionally contains only two configuration pages: `Scalar Litmus` and `Vector Litmus`. `Scalar Litmus` is backed by the native generator. Named-family mode exhausts the selected skeleton/mechanism/annotation domain; relation-cycle mode ignores family names and enumerates every canonical cycle within the selected size/hart bounds; diy-compatible mode exposes safe/relax/reject lists and the cycle policy. `Vector Litmus` uses the same relation-cycle engine. Its core axes select skeletons, relation mechanisms, endpoint categories (`Vector`, `Scalar`, `AMO`), endpoint compositions (`V only`, `V+S`, `V+A`, `V+S+A`), and all supported RVV forms. Parameter axes independently select scalar B/H/W/D, AMO opcode/W-D/relaxed-aq-rl-aqrl, overlap layout, SEW/LMUL/index EEW/Segment NFIELDS/mask/tail/VL. NFIELDS is active only for Segment forms and illegal `EMUL * NFIELDS > 8` register groups are filtered before generation. The currently implemented verification scope is recorded in each case's metadata and audit report rather than presented as a permanent GUI constraint; future PBMT, alignment, CMO, and TLB axes can be added as their models become available. `Random preview cases` is a reproducible sample from the full finite domain, keyed by `Random seed`; it is not the first N Cartesian-product rows. `Balanced skeleton coverage` assigns near-equal quotas to selected skeleton families before covering endpoint, Vector-form, alignment, and relation-mechanism strata. `Domain-weighted random` instead preserves the natural cardinality of the complete case space. Generation independently offers balanced sampling, domain-weighted sampling, or `All legal combinations`. Exhaustive mode streams every legal assignment under the current filters, ignores the sampled-generation limit, and requires an explicit warning confirmation because a broad configuration can contain an astronomical number of files. The browser uses a virtual table model, supports text/family/status/verdict filters, and does not allocate widgets or PNG images per case. `Preview Cases` is the fast unchecked path; `Verify Preview` runs the selected embedded or herd projection backend where it is applicable. The Vector page's `Basic configuration` section controls the requested solver process count; Embedded batches use 16 local processes by default and accept up to 64. Set `LITMUS_LINK_SOLVER_WORKERS=<n>` to impose a lower hard cap on a shared machine. The verification-effort selector bounds interactive searches; hitting a budget produces `inconclusive`, never a guessed `forbidden` verdict. Double-clicking a case renders its PNG on demand and scales the complete diagram to the detail window. Actions run in the background and update determinate progress whenever the generator has a finite work count.
 
 ## Naming
 
@@ -211,8 +211,8 @@ family first and appending semantic modifiers with `+`. Scalar examples are
 direction where it is needed to distinguish thread roles, for example
 `MP+po.RR+po.WW`. Relation-cycle Vector cases separate their human-readable
 name from their file identity. The display form is
-`Family+{relation>ring}+V{event:instruction,...}`; for example,
-`MP+{PodWW>Rfe>PodRR>Fre}+V{E0:VSE16,E3:VLOXEI32/E16}`. Cycle labels therefore
+`Family+{relation>ring}+E{event:instruction,...}`; for example,
+`MP+{PodWW>Rfe>PodRR>Fre}+E{E0:VSE16,E3:VLOXEI32/E16}`. Cycle labels therefore
 remain short relation tokens, while the event map shows exactly which cycle
 vertices use Vector memory instructions. Vector misalignment appends `U16`,
 `X16`, or `X64` to the affected event. Files use
@@ -293,26 +293,30 @@ Verification is split by semantic scope:
   `herd7` backend.
 - **The Vector-aware embedded frontend** expands active RVV elements into an
   explicit execution graph and reuses the RVWMO axiom engine. The supported
-  scope is unit-stride, strided, indexed-unordered, and indexed-ordered
-  loads/stores on cacheable memory, with `SEW`, `LMUL`, deterministic
+  scope is unit-stride, strided, indexed-unordered, indexed-ordered, and their
+  non-FOF Segment load/store forms on cacheable memory, with `SEW`, `LMUL`, deterministic
   `vl1/vl2/vl4/vl8/vl16/vl32/vl64/vlmax`, indexed `EEW=ei8/ei16/ei32/ei64`,
-  and an explicit even-element mask. Nanhu `VLEN=128` is
-  part of the model. Unordered siblings share one instruction-order position;
-  ordered-indexed siblings add preserved element-order PPO.
+  Segment `NFIELDS=2..8`, and an explicit even-element mask. Nanhu `VLEN=128`
+  is part of the model. Segment instructions expand to `eN.fM` transactions;
+  a mask disables all fields of a segment element. Fields within one element
+  remain unordered, while ordered-indexed Segment forms order every field of an
+  earlier element before every field of a later element.
   The legacy built-in `vector_mem` profile covers all ten named scalar skeletons,
   every load/store endpoint, all 8 supported load/store forms, legal
   `SEW`/`LMUL` pairs, all four indexed EEWs, `unmasked/masked`, and the finite
   `vl` boundary domain above. Combinations
   whose active footprint crosses 64B are excluded from this same-line formal
   profile. The current domain also covers all four legal tail policies and
-  contains 677,520 combinations and 2,032,560 files after the three ordering
+  contains 609,840 combinations and 1,829,520 files after the three ordering
   variants are expanded. The Qt `Vector Litmus` workflow supersedes that
   one-endpoint profile with multi-endpoint relation-cycle generation.
 - **Vector external checking uses scalar element projections.** Stock
   `herd7/riscv.cat` never receives RVV syntax. `VL=1` projections and bounded
   unordered-element permutations are exact differential oracles; multi-element
   ordered-indexed projections are advisory because ordinary scalar `po` is
-  stronger than isolated Vector sibling order. Unsupported mixed-size or AMO
+  stronger than isolated Vector sibling order. Segment projection is reported
+  as `external_unsupported`, because scalar program order would incorrectly
+  order fields from one instruction. Unsupported mixed-size or AMO
   capabilities retain the embedded result and report `external_unsupported`.
   FOF/fault trimming, segment partial
   completion, nonzero `vstart`/restart, whole-register transfer, complex

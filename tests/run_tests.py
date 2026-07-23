@@ -58,8 +58,8 @@ def test_generation() -> None:
         for key in ["profile", "total_combinations", "generated", "excluded_illegal", "excluded_unsupported", "hand_required", "missing"]:
             check(full[key] == baseline[key], f"full-cross audit changed from baseline for {key}")
         rows, vector = audit_profile("vector_mem")
-        check(rows and vector["generated"] == 677520, "vector profile should cover all formal endpoints and configurations")
-        check(vector["generated_litmus"] == 2032560, "vector profile should expand three ordering variants per combination")
+        check(rows and vector["generated"] == 609840, "vector profile should cover every ISA-legal formal endpoint and configuration")
+        check(vector["generated_litmus"] == 1829520, "vector profile should expand three ordering variants per legal combination")
         check(vector["excluded_illegal"] == 0, "vector profile should not include illegal memory types")
         check(vector["excluded_unsupported"] == 0, "vector profile should not include unsupported memory types")
         stress = audit_summary("stress-large", profile_combinations("stress-large"))

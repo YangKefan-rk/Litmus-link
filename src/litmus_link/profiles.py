@@ -72,7 +72,18 @@ VECTOR_OPS = [
     "indexed_unordered_load",
     "indexed_ordered_store",
     "indexed_unordered_store",
+    "segment_unit_load",
+    "segment_unit_store",
+    "segment_strided_load",
+    "segment_strided_store",
+    "segment_indexed_ordered_load",
+    "segment_indexed_unordered_load",
+    "segment_indexed_ordered_store",
+    "segment_indexed_unordered_store",
 ]
+
+SEGMENT_VECTOR_OPS = [operation for operation in VECTOR_OPS if operation.startswith("segment_")]
+PROFILE_VECTOR_OPS = [operation for operation in VECTOR_OPS if operation not in SEGMENT_VECTOR_OPS]
 
 # Known RVV forms deliberately outside the first vector-aware solver scope.
 # They are not exposed by profiles/GUI, but rules recognize them so old rule
@@ -145,6 +156,32 @@ VECTOR_FOOTPRINTS = ["same_line", "cross_line", "cross_page", "misalign", "parti
 # cache-line boundary cases for e8/e16/e32.  vlmax remains a separate
 # architectural setting (vsetvli with rs1=x0).
 VECTOR_LENGTHS = ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
+VECTOR_NFIELDS = [f"nf{value}" for value in range(2, 9)]
+
+
+def vector_nfields(vector: str, nf: str | int | None = None) -> int | None:
+    """Return the architectural field count for one Vector memory form."""
+
+    segment = vector in SEGMENT_VECTOR_OPS
+    if not segment:
+        if nf is None:
+            return 1
+        text = str(nf).lower()
+        if text.startswith("nf"):
+            text = text[2:]
+        # Generated case_ir records the normalized architectural value even
+        # for non-Segment instructions.  Accept that internal round-trip while
+        # rules.py continues to reject a user-selected NF axis on these forms.
+        return 1 if text == "1" else None
+    if nf is None:
+        return 2
+    text = str(nf).lower()
+    if text.startswith("nf"):
+        text = text[2:]
+    if not text.isdigit():
+        return None
+    parsed = int(text)
+    return parsed if 2 <= parsed <= 8 else None
 
 
 def vector_vlmax(sew: str, lmul: str) -> int | None:
@@ -173,6 +210,7 @@ def vector_same_line_footprint(
     lmul: str,
     mask: str,
     vl: str,
+    nf: str | int | None = None,
 ) -> bool:
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None or mask not in VECTOR_MASKS:
@@ -185,8 +223,19 @@ def vector_same_line_footprint(
     if not active:
         return False
     element_bytes = int(sew[1:]) // 8
-    stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
-    return max(active) * stride + element_bytes <= 64
+    nfields = vector_nfields(vector, nf)
+    if nfields is None:
+        return False
+    segment_bytes = element_bytes * nfields
+    if vector.startswith("segment_unit_"):
+        stride = segment_bytes
+    elif vector.startswith("segment_strided_"):
+        stride = segment_bytes * 2
+    elif vector.startswith("segment_indexed_"):
+        stride = segment_bytes
+    else:
+        stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
+    return max(active) * stride + segment_bytes <= 64
 
 
 def vector_memory_config_legal(
@@ -196,6 +245,7 @@ def vector_memory_config_legal(
     mask: str,
     vl: str,
     index_eew: str | None = None,
+    nf: str | int | None = None,
 ) -> bool:
     """Check the register-group and finite-memory axes used by this target."""
 
@@ -205,10 +255,21 @@ def vector_memory_config_legal(
     data_lmul = VECTOR_LMUL_FACTORS.get(lmul)
     if data_lmul is None:
         return False
+    nfields = vector_nfields(vector, nf)
+    if nfields is None or data_lmul * nfields > 8:
+        return False
+    registers_per_field = int(data_lmul) if data_lmul >= 1 else 1
     if data_lmul >= 1:
-        group = int(data_lmul)
-        if 8 % group or 8 + group > 32:
+        if data_lmul.denominator != 1 or 8 % registers_per_field:
             return False
+    data_registers: set[int] = set()
+    for field in range(nfields):
+        start = 8 + field * registers_per_field
+        if data_lmul >= 1 and start % registers_per_field:
+            return False
+        data_registers.update(range(start, start + registers_per_field))
+    if data_registers and max(data_registers) > 31:
+        return False
     if "indexed" in vector:
         if index_eew not in VECTOR_INDEX_EEWS:
             return False
@@ -221,9 +282,8 @@ def vector_memory_config_legal(
             group = int(index_emul)
             if index_emul.denominator != 1 or 16 % group or 16 + group > 32:
                 return False
-            data_registers = set(range(8, 8 + int(data_lmul))) if data_lmul >= 1 else {8}
             index_registers = set(range(16, 16 + group))
-            if data_registers & index_registers:
+            if vector.endswith("load") and data_registers & index_registers:
                 return False
     elif index_eew is not None:
         return False
@@ -238,6 +298,7 @@ def vector_footprint_kind(
     vl: str,
     *,
     base_offset: int = 0,
+    nf: str | int | None = None,
 ) -> str | None:
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None or mask not in VECTOR_MASKS:
@@ -250,8 +311,19 @@ def vector_footprint_kind(
     if not active:
         return None
     element_bytes = int(sew.removeprefix("e")) // 8
-    stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
-    end = base_offset + max(active) * stride + element_bytes
+    nfields = vector_nfields(vector, nf)
+    if nfields is None:
+        return None
+    segment_bytes = element_bytes * nfields
+    if vector.startswith("segment_unit_"):
+        stride = segment_bytes
+    elif vector.startswith("segment_strided_"):
+        stride = segment_bytes * 2
+    elif vector.startswith("segment_indexed_"):
+        stride = segment_bytes
+    else:
+        stride = element_bytes * 2 if vector.startswith("strided_") else element_bytes
+    end = base_offset + max(active) * stride + segment_bytes
     if end > 4096:
         return "cross_page"
     return "cross_line" if base_offset // 64 != (end - 1) // 64 else "same_line"
@@ -340,8 +412,11 @@ def _rvwmo_base(profile: str) -> List[Combination]:
     return [Combination(profile, "rvwmo_base", skeleton, "scalar_pair", "cacheable") for skeleton in SKELETONS]
 
 
-def _vector_mem(profile: str) -> List[Combination]:
-    return vector_combinations(profile)
+def _vector_mem(profile: str) -> Iterable[Combination]:
+    # Keep the historical profile/audit corpus reproducible. Segment's NF axis
+    # belongs to the relation-cycle generator used by the current CLI/Qt Vector
+    # workflow; explicit rule files may also request Segment forms directly.
+    return vector_combinations(profile, vectors=PROFILE_VECTOR_OPS)
 
 
 def vector_combinations(
@@ -355,8 +430,9 @@ def vector_combinations(
     tails: Iterable[str] = VECTOR_TAILS,
     lengths: Iterable[str] = VECTOR_LENGTHS,
     index_eews: Iterable[str] = VECTOR_INDEX_EEWS,
+    nfields: Iterable[str] = VECTOR_NFIELDS,
     endpoint_scope: str = "all",
-) -> List[Combination]:
+) -> Iterable[Combination]:
     """Build the canonical formal Vector domain, optionally with GUI filters."""
     if endpoint_scope not in {"all", "first"}:
         raise ValueError("endpoint_scope must be 'all' or 'first'")
@@ -368,7 +444,7 @@ def vector_combinations(
     tails = tuple(tails)
     lengths = tuple(lengths)
     index_eews = tuple(index_eews)
-    combos = []
+    nfields = tuple(nfields)
     for skeleton, vector, sew, lmul, mask, tail, vl in product(
         skeletons,
         vectors,
@@ -380,15 +456,24 @@ def vector_combinations(
     ):
         if vector_vlmax(sew, lmul) is None:
             continue
-        if not vector_same_line_footprint(vector, sew, lmul, mask, vl):
-            continue
         endpoint_kind = "store" if vector.endswith("store") else "load"
         memory_event = f"vector_{endpoint_kind}"
         selected_index_eews = index_eews if "indexed" in vector else [None]
+        selected_nfields = nfields if vector.startswith("segment_") else [None]
         endpoints = VECTOR_ENDPOINTS[skeleton][endpoint_kind]
         if endpoint_scope == "first":
             endpoints = endpoints[:1]
-        for index_eew, endpoint in product(selected_index_eews, endpoints):
+        for index_eew, nf, endpoint in product(
+            selected_index_eews, selected_nfields, endpoints
+        ):
+            if not vector_memory_config_legal(
+                vector, sew, lmul, mask, vl, index_eew, nf
+            ):
+                continue
+            if not vector_same_line_footprint(
+                vector, sew, lmul, mask, vl, nf
+            ):
+                continue
             params = dict(
                 sew=sew,
                 lmul=lmul,
@@ -400,18 +485,17 @@ def vector_combinations(
             )
             if index_eew is not None:
                 params["index_eew"] = index_eew
-            combos.append(
-                Combination(
-                    profile,
-                    "vector_mem",
-                    skeleton,
-                    memory_event,
-                    NANHU_VECTOR_ATTRIBUTES[0],
-                    vector=vector,
-                    params=_params(**params),
-                )
+            if nf is not None:
+                params["nf"] = nf
+            yield Combination(
+                profile,
+                "vector_mem",
+                skeleton,
+                memory_event,
+                NANHU_VECTOR_ATTRIBUTES[0],
+                vector=vector,
+                params=_params(**params),
             )
-    return combos
 
 
 def _cmo_pbmt(profile: str) -> List[Combination]:
@@ -491,7 +575,7 @@ def _stress_vector(
     attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, attribute, config, footprint, stressor in product(
         SKELETONS,
-        VECTOR_OPS,
+        PROFILE_VECTOR_OPS,
         attributes,
         configs,
         footprints,
@@ -573,7 +657,7 @@ def _stress_vector_cmo_pbmt(
     stressors: Iterable[str] = ("none", "store_buffer_full"),
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS,
 ) -> Iterable[Combination]:
-    vectors = list(VECTOR_OPS)
+    vectors = list(PROFILE_VECTOR_OPS)
     cmos = ["clean", "flush", "inval", "zero"]
     attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, cmo, attribute, config, footprint, sync, alias, stressor in product(
@@ -606,7 +690,7 @@ def _stress_vector_tlb(
     stressors: Iterable[str] = ("none", "load_queue_replay"),
     configs: Iterable[Mapping[str, str]] = STRESS_CROSS_VECTOR_CONFIGS[:3],
 ) -> Iterable[Combination]:
-    vectors = list(VECTOR_OPS)
+    vectors = list(PROFILE_VECTOR_OPS)
     attributes = list(NANHU_VECTOR_ATTRIBUTES)
     for skeleton, vector, tlb, attribute, config, footprint, vm, shootdown, pte_state, stressor in product(
         SKELETONS,

@@ -42,6 +42,7 @@ from .litmus_ir import (
     _vector_instruction,
     _vector_metadata,
     _vector_setup,
+    _vector_store_broadcast_events,
 )
 from .models import Combination, Decision, GENERATED, GeneratedCase
 from .naming import vector_native_case_identity
@@ -58,6 +59,7 @@ from .profiles import (
     VECTOR_LENGTHS,
     VECTOR_LMULS,
     VECTOR_MASKS,
+    VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
     VECTOR_WIDTHS,
@@ -1177,17 +1179,20 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             setup, extra_init = _vector_setup(combination, hart_id, f"{event.event_id}_vector")
             large_avl = str((choice.params or {}).get("vl")) in {"vl32", "vl64"}
             strided = "strided" in choice.vector_form
+            scale_register = strided or choice.vector_form.startswith(
+                "segment_indexed_"
+            )
             temporary_registers = iter(
                 _free_temp_registers(
                     sequence,
-                    1 + int(large_avl) + int(strided) + int(offset != 0),
+                    1 + int(large_avl) + int(scale_register) + int(offset != 0),
                 )
             )
             config_register = next(temporary_registers)
             register_map = {"x10": config_register}
             if large_avl:
                 register_map["x11"] = next(temporary_registers)
-            if strided:
+            if scale_register:
                 register_map["x20"] = next(temporary_registers)
             setup = [
                 replace(setup_event, instruction=_replace_registers(setup_event.instruction, register_map))
@@ -1219,13 +1224,19 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                 "aligned_atomic",
             )
             if event.kind == "store":
-                expanded.append(
-                    LitmusEvent(
-                        f"{event.event_id}_broadcast",
+                expanded.extend(
+                    replace(
+                        broadcast,
+                        instruction=_replace_registers(
+                            broadcast.instruction,
+                            register_map,
+                        ),
+                    )
+                    for broadcast in _vector_store_broadcast_events(
+                        combination,
                         hart_id,
-                        "setup",
-                        f"vmv.v.x v8,{data_register}",
-                        role="vector-broadcast",
+                        event.event_id,
+                        data_register,
                     )
                 )
                 expanded.append(
@@ -1269,6 +1280,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                 str((choice.params or {}).get("mask", "unmasked")),
                 str((choice.params or {}).get("vl", "vl1")),
                 base_offset=offset,
+                nf=(choice.params or {}).get("nf"),
             )
             metadata.update(
                 {
@@ -1407,6 +1419,83 @@ def _embedded_solver_worker(
     ).to_json()
 
 
+def _embedded_preview_solver_worker(
+    job: tuple[GeneratedCase, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Solve one case without returning duplicated expansion data to the GUI.
+
+    Process-pool results are pickled before they reach the parent process.  A
+    normal solver result contains both case_ir's architectural events and a
+    second, fully expanded Vector/event representation.  Returning the compact
+    form here avoids materializing that duplicate payload in the GUI process.
+    """
+
+    return _compact_preview_solver(_embedded_solver_worker(job))
+
+
+def _compact_preview_external(external: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: value
+        for key, value in external.items()
+        if key not in {"raw", "raw_output", "stdout", "stderr"}
+    }
+    projection = compact.get("projection")
+    if isinstance(projection, Mapping):
+        compact["projection"] = {
+            key: value
+            for key, value in projection.items()
+            if key not in {"raw", "raw_output", "stdout", "stderr", "litmus"}
+        }
+    return compact
+
+
+def _compact_preview_solver(solver: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the formal result and witness needed by the case inspector.
+
+    ``case_ir`` already records parent instructions, endpoint values and
+    Vector configuration.  Preview rows therefore do not need another copy of
+    every expanded Vector element or every embedded MemoryEvent.  The compact
+    execution witness is retained so byte-level rf/co/fr and PPO remain
+    inspectable.  Full generation still uses the normal serializer and writes
+    complete ``.solver.json`` files.
+    """
+
+    compact = {
+        key: value
+        for key, value in solver.items()
+        if key not in {"raw_output", "edges", "vector"}
+    }
+    compact["raw_output"] = ""
+    compact["edges"] = []
+    vector = solver.get("vector")
+    if not isinstance(vector, Mapping):
+        return compact
+
+    compact_vector = {
+        key: value
+        for key, value in vector.items()
+        if key not in {"vector_ir", "embedded", "external"}
+    }
+    embedded = vector.get("embedded")
+    if isinstance(embedded, Mapping):
+        compact_vector["embedded"] = {
+            key: value
+            for key, value in embedded.items()
+            if key != "events"
+        }
+    else:
+        compact_vector["embedded"] = embedded
+    external = vector.get("external")
+    compact_vector["external"] = (
+        _compact_preview_external(external)
+        if isinstance(external, Mapping)
+        else external
+    )
+    compact_vector["preview_compact"] = True
+    compact["vector"] = compact_vector
+    return compact
+
+
 def _parallel_solver_workers(
     case_count: int,
     requested_workers: object | None = None,
@@ -1447,6 +1536,7 @@ def sample_vector_cases(
     payload: Mapping[str, Any],
     *,
     compute_verdicts: bool,
+    compact_solver_results: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[GeneratedCase], dict[str, Any]]:
     if progress_callback is not None:
@@ -1510,9 +1600,14 @@ def sample_vector_cases(
             max_workers=parallel_workers,
             mp_context=context,
         ) as executor:
+            worker = (
+                _embedded_preview_solver_worker
+                if compact_solver_results
+                else _embedded_solver_worker
+            )
             futures = {
                 executor.submit(
-                    _embedded_solver_worker,
+                    worker,
                     (case, solver_limits),
                 ): index
                 for index, case in enumerate(lowered)
@@ -1557,6 +1652,8 @@ def sample_vector_cases(
                     vector_external_check=request_external,
                     vector_solver_limits=solver_limits,
                 ).to_json()
+                if compact_solver_results:
+                    solver = _compact_preview_solver(solver)
                 external_status = _solver_external_status(solver)
                 if request_external and external_status != "not_run":
                     external_attempts += 1
@@ -2049,6 +2146,7 @@ def _vector_choices_with_audit(
     sews = _selected(payload, "sew", VECTOR_WIDTHS)
     lmuls = _selected(payload, "lmul", VECTOR_LMULS)
     index_eews = _selected(payload, "index_eew", VECTOR_INDEX_EEWS)
+    nfields = _selected(payload, "nf", VECTOR_NFIELDS)
     masks = _selected(payload, "mask", VECTOR_MASKS)
     tails = _selected(payload, "tail", VECTOR_TAILS)
     vls = _selected(payload, "vl", VECTOR_LENGTHS)
@@ -2065,11 +2163,14 @@ def _vector_choices_with_audit(
             raise ValueError(f"select at least one {label}")
     if any("indexed" in form for form in forms) and not index_eews:
         raise ValueError("select at least one indexed offset EEW")
+    if any(form.startswith("segment_") for form in forms) and not nfields:
+        raise ValueError("select at least one Segment NFIELDS value")
     validators = (
         ("Vector form", forms, VECTOR_OPS),
         ("SEW", sews, VECTOR_WIDTHS),
         ("LMUL", lmuls, VECTOR_LMULS),
         ("index EEW", index_eews, VECTOR_INDEX_EEWS),
+        ("Segment NFIELDS", nfields, VECTOR_NFIELDS),
         ("mask mode", masks, VECTOR_MASKS),
         ("tail policy", tails, VECTOR_TAILS),
         ("Vector length", vls, VECTOR_LENGTHS),
@@ -2085,15 +2186,18 @@ def _vector_choices_with_audit(
         forms, sews, lmuls, masks, tails, vls
     ):
         selected_indexes: Sequence[str | None] = index_eews if "indexed" in form else (None,)
-        for index_eew in selected_indexes:
+        selected_nfields: Sequence[str | None] = (
+            nfields if form.startswith("segment_") else (None,)
+        )
+        for index_eew, nf in product(selected_indexes, selected_nfields):
             raw += 1
             if not vector_memory_config_legal(
-                form, sew, lmul, mask, vl, index_eew
+                form, sew, lmul, mask, vl, index_eew, nf
             ):
                 excluded["excluded_illegal_vector_config"] += 1
                 continue
             footprint = vector_footprint_kind(
-                form, sew, lmul, mask, vl
+                form, sew, lmul, mask, vl, nf=nf
             )
             if footprint not in {"same_line", "cross_line"}:
                 excluded["excluded_unsupported_cross_page"] += 1
@@ -2108,9 +2212,20 @@ def _vector_choices_with_audit(
             }
             if index_eew is not None:
                 params["index_eew"] = index_eew
+            if nf is not None:
+                params["nf"] = nf
             direction = WRITE if form.endswith("store") else READ
             choice_id = "vector:" + ":".join(
-                [form, sew, lmul, str(index_eew or "-"), mask, tail, vl]
+                [
+                    form,
+                    sew,
+                    lmul,
+                    str(index_eew or "-"),
+                    str(nf or "-"),
+                    mask,
+                    tail,
+                    vl,
+                ]
             )
             out.append(EndpointChoice(choice_id, "vector", direction, "P", form, params))
     return tuple(out), {

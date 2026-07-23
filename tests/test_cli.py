@@ -29,6 +29,8 @@ def test_cli_list_features(capsys) -> None:  # type: ignore[no-untyped-def]
     out = capsys.readouterr().out
     assert "vector" in out
     assert "pbmt_nc" in out
+    assert "segment_indexed_ordered_load" in out
+    assert "NFIELDS" in out
 
 
 def test_cli_scalar_catalog_and_tools(capsys) -> None:  # type: ignore[no-untyped-def]
@@ -147,7 +149,9 @@ def test_gui_options_expose_only_scalar_and_vector_workflows() -> None:
     options = options_payload()
     assert set(options) == {"axes", "param_axes", "native_scalar", "vector_native"}
     assert set(options["axes"]) == {"skeleton", "vector"}
-    assert set(options["param_axes"]) == {"sew", "lmul", "index_eew", "mask", "tail", "vl"}
+    assert set(options["param_axes"]) == {
+        "sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"
+    }
     assert set(options["axes"]["vector"]) == {
         "none",
         "unit_load",
@@ -158,10 +162,19 @@ def test_gui_options_expose_only_scalar_and_vector_workflows() -> None:
         "indexed_unordered_store",
         "indexed_ordered_load",
         "indexed_ordered_store",
+        "segment_unit_load",
+        "segment_unit_store",
+        "segment_strided_load",
+        "segment_strided_store",
+        "segment_indexed_unordered_load",
+        "segment_indexed_unordered_store",
+        "segment_indexed_ordered_load",
+        "segment_indexed_ordered_store",
     }
     assert "elem_order" not in options["param_axes"]
     assert options["param_axes"]["vl"] == ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
     assert options["param_axes"]["index_eew"] == ["ei8", "ei16", "ei32", "ei64"]
+    assert options["param_axes"]["nf"] == ["nf2", "nf3", "nf4", "nf5", "nf6", "nf7", "nf8"]
     with pytest.raises(ValueError, match="only scalar and vector"):
         preview_payload({"mode": "profile", "profile": "smoke"})
     with pytest.raises(ValueError, match="only scalar and vector"):

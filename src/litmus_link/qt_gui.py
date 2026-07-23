@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
+from .profiles import vector_effective_vl
 from .workflow import (
     PARAM_AXIS_VALUES,
     audit_payload,
@@ -979,6 +981,7 @@ class _LitmusLinkQtWindow:
             ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4, _sew_label),
             ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4, _axis_label),
             ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4, _index_eew_label),
+            ("Segment NFIELDS", "nf", PARAM_AXIS_VALUES["nf"], 4, _nf_label),
             ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2, _mask_label),
             ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4, _tail_label),
             ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4, _vl_label),
@@ -1111,15 +1114,23 @@ class _LitmusLinkQtWindow:
             and "indexed" in str(check.property("axis_value"))
             for check in self.vector_checks.get("forms", [])
         )
-        group = self.vector_group_by_key.get("index_eew")
-        if group is None:
-            return
-        active = indexed and self.vector_filter_widget.isEnabled()
-        group.setEnabled(active)
-        group.setProperty("dependency_state", "active" if indexed else "inactive")
-        for check in self.vector_checks.get("index_eew", []):
-            check.setEnabled(active)
-        self._refresh_widget_style(group)
+        segment = any(
+            check.isChecked()
+            and str(check.property("axis_value")).startswith("segment_")
+            for check in self.vector_checks.get("forms", [])
+        )
+        for key, selected in (("index_eew", indexed), ("nf", segment)):
+            group = self.vector_group_by_key.get(key)
+            if group is None:
+                continue
+            active = selected and self.vector_filter_widget.isEnabled()
+            group.setEnabled(active)
+            group.setProperty(
+                "dependency_state", "active" if selected else "inactive"
+            )
+            for check in self.vector_checks.get(key, []):
+                check.setEnabled(active)
+            self._refresh_widget_style(group)
 
     def _update_vector_scope(self, complete: bool) -> None:
         if not hasattr(self, "vector_filter_widget"):
@@ -1429,9 +1440,25 @@ class _LitmusLinkQtWindow:
             self._append_log("Exhaustive generation cancelled")
             return
 
+        if action in {"preview", "verify", "generate"}:
+            self._release_preview_results()
         self.active_thread = self.action_thread
         self.active_worker = self.action_worker
         self.action_bus.request.emit(action, label, payload)
+
+    def _release_preview_results(self) -> None:
+        """Drop the previous preview before a memory-intensive action starts."""
+
+        self.preview_filter_timer.stop()
+        self.preview_table.clearSelection()
+        self.preview_model.set_items(())
+        self.preview_items.clear()
+        self.preview_stats.clear()
+        self.preview_stats_label.setText("Preview classification: loading...")
+        self.preview_filter_count.setText("0 cases")
+        self.raw_json.clear()
+        self.summary_view.clear()
+        gc.collect()
 
     def _confirm_exhaustive_generation(self) -> bool:
         message_box = self.QtWidgets.QMessageBox
@@ -1630,6 +1657,7 @@ class _LitmusLinkQtWindow:
             "sew": "Vector SEW",
             "lmul": "Vector LMUL",
             "index_eew": "Indexed EEW",
+            "nf": "Segment NFIELDS",
             "mask": "Vector mask",
             "tail": "Vector tail policy",
             "vl": "Vector VL",
@@ -1885,6 +1913,7 @@ def _format_value(value: Any) -> str:
 def _transaction_detail_text(item: Dict[str, Any]) -> str:
     embedded = _embedded_solver_payload(item)
     events = embedded.get("events") if isinstance(embedded, dict) else None
+    case_ir = item.get("case_ir") or {}
     lines = ["Architectural memory transactions", ""]
     if isinstance(events, list):
         visible = [event for event in events if not bool(event.get("initial"))]
@@ -1915,16 +1944,32 @@ def _transaction_detail_text(item: Dict[str, Any]) -> str:
                 )
             lines.append("")
     else:
-        case_ir = item.get("case_ir") or {}
         for hart in case_ir.get("harts", []) if isinstance(case_ir, dict) else []:
             for event in hart:
                 access = event.get("memory_access") if isinstance(event, dict) else None
                 if not isinstance(access, dict):
                     continue
+                kind = str(access.get("transaction_kind", "scalar_plain"))
+                lines.append(f"{event.get('event_id', '?')}  {kind}")
                 lines.append(
-                    f"{event.get('event_id', '?')}  {access.get('transaction_kind', 'scalar_plain')}  "
+                    f"  bytes={access.get('size_bytes', '?')}  "
+                    f"offset={access.get('offset_bytes', '-')}  "
                     f"footprint={access.get('covered_bytes', [])}"
                 )
+                if event.get("read_value") is not None:
+                    lines.append(f"  read={_format_value(event.get('read_value'))}")
+                if event.get("write_value") is not None:
+                    lines.append(f"  write={_format_value(event.get('write_value'))}")
+                if event.get("kind") == "amo":
+                    lines.append(
+                        "  AMO "
+                        f"op={event.get('amo_op')} "
+                        f"ordering={event.get('amo_ordering')} "
+                        f"old={_format_value(event.get('read_value'))} "
+                        f"operand={_format_value(event.get('amo_operand'))} "
+                        f"new={_format_value(event.get('write_value'))}"
+                    )
+                lines.append("")
 
     vector = _vector_solver_payload(item)
     vector_ir = vector.get("vector_ir") if isinstance(vector, dict) else None
@@ -1946,7 +1991,12 @@ def _transaction_detail_text(item: Dict[str, Any]) -> str:
                 if element.get("active")
             ]
             offsets = ", ".join(
-                f"e{element.get('index')}@+{element.get('offset_bytes')}"
+                (
+                    f"e{element.get('index')}.f{element.get('field_index')}"
+                    if element.get("field_index") is not None
+                    else f"e{element.get('index')}"
+                )
+                + f"@+{element.get('offset_bytes')}"
                 for element in active
             )
             parent = str(instruction.get("event_id", "?"))
@@ -1961,6 +2011,35 @@ def _transaction_detail_text(item: Dict[str, Any]) -> str:
             lines.append(f"  {offsets or 'no active elements'}")
             for relation in preserved_by_parent.get(parent, []):
                 lines.append(f"  order: {relation}")
+    elif isinstance(case_ir, dict):
+        metadata = case_ir.get("metadata", {})
+        vectors = metadata.get("vectors", {}) if isinstance(metadata, dict) else {}
+        if isinstance(vectors, dict) and vectors:
+            lines.extend(["", "Vector element execution", ""])
+            for parent, config in sorted(vectors.items()):
+                if not isinstance(config, dict):
+                    continue
+                sew_bits = int(config.get("sew_bits", 0) or 0)
+                sew = f"e{sew_bits}" if sew_bits else "e32"
+                lmul = str(config.get("lmul", "m1"))
+                avl = str(config.get("avl", "vl1"))
+                active_count = vector_effective_vl(sew, lmul, avl)
+                if active_count is not None and config.get("mask") == "masked":
+                    active_count = (active_count + 1) // 2
+                policy = (
+                    "ordered siblings"
+                    if config.get("ordered_elements")
+                    else "unordered siblings"
+                )
+                lines.append(
+                    f"{parent}: {config.get('form', 'vector')}  "
+                    f"active segments={active_count if active_count is not None else '?'}  "
+                    f"NFIELDS={config.get('nf', 1)}  {policy}"
+                )
+                lines.append(
+                    f"  SEW={sew_bits or '?'}  LMUL={lmul}  AVL={avl}  "
+                    f"mask={config.get('mask', 'unmasked')}"
+                )
     return "\n".join(lines).rstrip() or "No transaction metadata is available."
 
 
@@ -2514,6 +2593,14 @@ def _vector_form_label(value: str) -> str:
         "indexed_unordered_store": "Indexed-unordered store",
         "indexed_ordered_load": "Indexed-ordered load",
         "indexed_ordered_store": "Indexed-ordered store",
+        "segment_unit_load": "Segment unit-stride load",
+        "segment_unit_store": "Segment unit-stride store",
+        "segment_strided_load": "Segment strided load",
+        "segment_strided_store": "Segment strided store",
+        "segment_indexed_unordered_load": "Segment indexed-unordered load",
+        "segment_indexed_unordered_store": "Segment indexed-unordered store",
+        "segment_indexed_ordered_load": "Segment indexed-ordered load",
+        "segment_indexed_ordered_store": "Segment indexed-ordered store",
     }.get(value, value)
 
 
@@ -2554,6 +2641,10 @@ def _sew_label(value: str) -> str:
 
 def _index_eew_label(value: str) -> str:
     return value.upper()
+
+
+def _nf_label(value: str) -> str:
+    return value.removeprefix("nf") + " fields"
 
 
 def _mask_label(value: str) -> str:

@@ -6,7 +6,13 @@ from typing import Any, Iterable, Mapping
 
 from .models import Combination, Decision
 from .naming import case_display_name, case_name
-from .profiles import NANHU_VLEN_BITS, VECTOR_ENDPOINTS, VECTOR_INDEX_EEWS
+from .profiles import (
+    NANHU_VLEN_BITS,
+    VECTOR_ENDPOINTS,
+    VECTOR_INDEX_EEWS,
+    VECTOR_LMUL_FACTORS,
+    vector_nfields,
+)
 
 
 DEFAULT_SCALAR_VARIANTS = [
@@ -52,6 +58,7 @@ class MemoryAccess:
     transaction_kind: str = "scalar_plain"
     parent_instruction: str = ""
     element_index: int | None = None
+    field_index: int | None = None
 
     def __post_init__(self) -> None:
         if self.size_bytes not in {1, 2, 4, 8}:
@@ -79,10 +86,14 @@ class MemoryAccess:
             raise ValueError("vector_element transactions require parent_instruction")
         if self.transaction_kind != "vector_element" and self.element_index is not None:
             raise ValueError("element_index is valid only for vector_element transactions")
+        if self.field_index is not None and self.transaction_kind != "vector_element":
+            raise ValueError("field_index is valid only for vector_element transactions")
         if self.transaction_kind == "amo_rmw" and not self.natural_aligned:
             raise ValueError("amo_rmw transactions must be naturally aligned")
         if self.element_index is not None and self.element_index < 0:
             raise ValueError("element_index must be non-negative")
+        if self.field_index is not None and self.field_index < 0:
+            raise ValueError("field_index must be non-negative")
         if self.boundary != _access_boundary(self.offset_bytes, self.size_bytes):
             raise ValueError("memory access boundary does not match its byte range")
 
@@ -97,6 +108,7 @@ class MemoryAccess:
         transaction_kind: str = "scalar_plain",
         parent_instruction: str = "",
         element_index: int | None = None,
+        field_index: int | None = None,
     ) -> "MemoryAccess":
         aligned = offset_bytes % size_bytes == 0
         return cls(
@@ -114,6 +126,7 @@ class MemoryAccess:
             transaction_kind=transaction_kind,
             parent_instruction=parent_instruction,
             element_index=element_index,
+            field_index=field_index,
         )
 
     @classmethod
@@ -131,6 +144,11 @@ class MemoryAccess:
             element_index=(
                 int(data["element_index"])
                 if data.get("element_index") is not None
+                else None
+            ),
+            field_index=(
+                int(data["field_index"])
+                if data.get("field_index") is not None
                 else None
             ),
         )
@@ -154,6 +172,7 @@ class MemoryAccess:
             "transaction_kind": self.transaction_kind,
             "parent_instruction": self.parent_instruction or None,
             "element_index": self.element_index,
+            "field_index": self.field_index,
         }
 
 
@@ -435,7 +454,7 @@ def _vector_variant_ids(combination: Combination) -> list[str]:
 
 
 def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
-    events = [_event(f"{prefix}_vset", hart, "setup", _vector_vset_instruction(combination))]
+    events: list[LitmusEvent] = []
     extra_init: list[str] = []
     vl = str(combination.params.get("vl", "vlmax"))
     if vl in {"vl32", "vl64"}:
@@ -443,6 +462,44 @@ def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[lis
         # vsetvli with an initialized scalar register, keeping the emitted
         # instruction architecturally legal rather than silently clamping it.
         extra_init.append(f"{hart}:x11={int(vl[2:])};")
+    if "indexed" in combination.vector:
+        events.append(
+            _event(
+                f"{prefix}_index_vset",
+                hart,
+                "setup",
+                _vector_index_vset_instruction(combination),
+            )
+        )
+        events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v16"))
+        scale = _vector_element_bytes(combination) * _vector_nf(combination)
+        if scale & (scale - 1):
+            extra_init.append(f"{hart}:x20={scale};")
+            events.append(
+                _event(
+                    f"{prefix}_index_scale",
+                    hart,
+                    "setup",
+                    "vmul.vx v16,v16,x20",
+                )
+            )
+        else:
+            shift = scale.bit_length() - 1
+            if shift:
+                events.append(
+                    _event(
+                        f"{prefix}_index_scale",
+                        hart,
+                        "setup",
+                        f"vsll.vi v16,v16,{shift}",
+                    )
+                )
+    # The memory instruction and all data/mask register setup use the data
+    # vtype. Indexed forms temporarily use EEW/EMUL for the index register and
+    # must restore SEW/LMUL before continuing.
+    events.append(
+        _event(f"{prefix}_vset", hart, "setup", _vector_vset_instruction(combination))
+    )
     if combination.params.get("mask") == "masked":
         events.extend(
             [
@@ -451,11 +508,6 @@ def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[lis
                 _event(f"{prefix}_mask", hart, "setup", "vmseq.vi v0,v24,0"),
             ]
         )
-    if "indexed" in combination.vector:
-        events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v16"))
-        shift = _vector_element_bytes(combination).bit_length() - 1
-        if shift:
-            events.append(_event(f"{prefix}_index_scale", hart, "setup", f"vsll.vi v16,v16,{shift}"))
     if "strided" in combination.vector:
         extra_init.append(f"{hart}:x20={_vector_stride_bytes(combination)};")
     return events, extra_init
@@ -523,13 +575,12 @@ def _vector_case(combination: Combination, variant: str, name: str) -> LitmusCas
             expanded.extend(setup)
             vector_instruction = _rebase_vector(_vector_instruction(combination), base_register)
             if event.kind == "store":
-                expanded.append(
-                    _event(
-                        f"{target_id}_broadcast",
+                expanded.extend(
+                    _vector_store_broadcast_events(
+                        combination,
                         hart_id,
-                        "setup",
-                        f"vmv.v.x v8,{data_register}",
-                        role="vector-broadcast",
+                        target_id,
+                        data_register,
                     )
                 )
                 expanded.append(
@@ -1165,6 +1216,7 @@ def _vector_instruction(combination: Combination) -> str:
     index_eew = str(combination.params.get("index_eew", "ei32"))
     if index_eew not in VECTOR_INDEX_EEWS:
         index_eew = "ei32"
+    nf = _vector_nf(combination)
     table = {
         "unit_load": f"vle{width}.v v8,(x6){mask}",
         "unit_store": f"vse{width}.v v8,(x6){mask}",
@@ -1174,6 +1226,14 @@ def _vector_instruction(combination: Combination) -> str:
         "indexed_unordered_load": f"vlux{index_eew}.v v8,(x6),v16{mask}",
         "indexed_ordered_store": f"vsox{index_eew}.v v8,(x6),v16{mask}",
         "indexed_unordered_store": f"vsux{index_eew}.v v8,(x6),v16{mask}",
+        "segment_unit_load": f"vlseg{nf}e{width}.v v8,(x6){mask}",
+        "segment_unit_store": f"vsseg{nf}e{width}.v v8,(x6){mask}",
+        "segment_strided_load": f"vlsseg{nf}e{width}.v v8,(x6),x20{mask}",
+        "segment_strided_store": f"vssseg{nf}e{width}.v v8,(x6),x20{mask}",
+        "segment_indexed_ordered_load": f"vloxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
+        "segment_indexed_unordered_load": f"vluxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
+        "segment_indexed_ordered_store": f"vsoxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
+        "segment_indexed_unordered_store": f"vsuxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
     }
     return table.get(combination.vector, f"vle{width}.v v8,(x6){mask}")
 
@@ -1185,6 +1245,43 @@ def _vector_width(combination: Combination) -> str:
 
 def _vector_element_bytes(combination: Combination) -> int:
     return int(_vector_width(combination)) // 8
+
+
+def _vector_nf(combination: Combination) -> int:
+    parsed = vector_nfields(combination.vector, combination.params.get("nf"))
+    if parsed is None:
+        raise ValueError(
+            f"invalid NFIELDS={combination.params.get('nf')!r} for {combination.vector}"
+        )
+    return parsed
+
+
+def _vector_field_registers(combination: Combination) -> tuple[str, ...]:
+    lmul = VECTOR_LMUL_FACTORS[str(combination.params.get("lmul", "m1"))]
+    registers_per_field = int(lmul) if lmul >= 1 else 1
+    return tuple(
+        f"v{8 + field * registers_per_field}"
+        for field in range(_vector_nf(combination))
+    )
+
+
+def _vector_store_broadcast_events(
+    combination: Combination,
+    hart: int,
+    prefix: str,
+    data_register: str,
+) -> tuple[LitmusEvent, ...]:
+    segment = combination.vector.startswith("segment_")
+    return tuple(
+        _event(
+            f"{prefix}_broadcast_f{field}" if segment else f"{prefix}_broadcast",
+            hart,
+            "setup",
+            f"vmv.v.x {register},{data_register}",
+            role=f"vector-broadcast-field:{field}" if segment else "vector-broadcast",
+        )
+        for field, register in enumerate(_vector_field_registers(combination))
+    )
 
 
 def _vector_scalar_load(combination: Combination, destination: str, base: str) -> str:
@@ -1201,7 +1298,7 @@ def _vector_stride_bytes(combination: Combination) -> int:
     configured = combination.params.get("stride_bytes")
     if configured is not None:
         return int(str(configured), 0)
-    return _vector_element_bytes(combination) * 2
+    return _vector_element_bytes(combination) * _vector_nf(combination) * 2
 
 
 def _vector_metadata(combination: Combination) -> dict[str, Any]:
@@ -1213,14 +1310,24 @@ def _vector_metadata(combination: Combination) -> dict[str, Any]:
         "sew_bits": int(_vector_width(combination)),
         "lmul": str(combination.params.get("lmul", "m1")),
         "index_eew": str(combination.params.get("index_eew", "ei32")) if "indexed" in form else None,
+        "nf": _vector_nf(combination),
         "avl": str(combination.params.get("vl", "vlmax")),
         "mask": str(combination.params.get("mask", "unmasked")),
         "mask_pattern": "even-elements" if combination.params.get("mask") == "masked" else "all-elements",
         "tail_policy": str(combination.params.get("tail", "ta_ma")),
         "footprint": str(combination.params.get("footprint", "same_line")),
         "stride_bytes": _vector_stride_bytes(combination) if "strided" in form else None,
-        "index_pattern": "scaled-element-index" if "indexed" in form else None,
-        "ordered_elements": form.startswith("indexed_ordered"),
+        "index_pattern": (
+            "scaled-segment-index"
+            if form.startswith("segment_indexed_")
+            else "scaled-element-index"
+            if "indexed" in form
+            else None
+        ),
+        "ordered_elements": (
+            form.startswith("indexed_ordered")
+            or form.startswith("segment_indexed_ordered")
+        ),
         "vector_event": str(
             combination.params.get(
                 "vector_event",
@@ -1256,6 +1363,25 @@ def _vector_vset_instruction(combination: Combination) -> str:
     if vl in {"vl32", "vl64"}:
         return f"vsetvli x10,x11,{sew},{lmul},{policy}"
     return f"vsetvli x10,x0,{sew},{lmul},{policy}"
+
+
+def _vector_index_vset_instruction(combination: Combination) -> str:
+    data_sew = int(_vector_width(combination))
+    data_lmul = VECTOR_LMUL_FACTORS[str(combination.params.get("lmul", "m1"))]
+    index_eew = str(combination.params.get("index_eew", "ei32"))
+    index_bits = int(index_eew.removeprefix("ei"))
+    index_emul = data_lmul * index_bits / data_sew
+    lmul_by_factor = {factor: name for name, factor in VECTOR_LMUL_FACTORS.items()}
+    try:
+        index_lmul = lmul_by_factor[index_emul]
+    except KeyError as exc:
+        raise ValueError(
+            f"indexed EEW={index_bits}, SEW={data_sew}, LMUL={data_lmul} "
+            "does not produce an encodable index EMUL"
+        ) from exc
+    params = dict(combination.params)
+    params.update({"sew": f"e{index_bits}", "lmul": index_lmul})
+    return _vector_vset_instruction(replace(combination, params=params))
 
 
 def _vector_mask_suffix(combination: Combination) -> str:

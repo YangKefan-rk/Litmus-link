@@ -657,7 +657,9 @@ def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: s
     )
     transaction_kind = access.transaction_kind if access is not None else "scalar_plain"
     if event.kind == "load":
-        if value is None and not event.role.startswith("vector-element"):
+        if value is None and not event.role.startswith(
+            ("vector-element", "vector-segment-field")
+        ):
             raise RvwmoSolverError(f"load {event.event_id} has no target read value")
         return MemoryEvent(
             event.event_id, hart, order, event.location, True, False, value, None,

@@ -11,7 +11,7 @@ from .amo import amo_read_result, apply_amo
 from .fusion_layout import FusionAddressLayout, FusionLayoutError
 from .native_cycles import NativeCycle, location_ids, vertex_directions
 from .native_edges import READ, WRITE
-from .profiles import vector_effective_vl
+from .profiles import vector_effective_vl, vector_nfields
 
 
 @dataclass(frozen=True)
@@ -412,16 +412,29 @@ def _write_footprints(
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None:
         return ()
-    stride = width * 2 if str(getattr(choice, "vector_form", "")).startswith("strided_") else width
+    form = str(getattr(choice, "vector_form", ""))
+    nf = vector_nfields(form, params.get("nf"))
+    if nf is None:
+        return ()
+    if form.startswith("segment_unit_") or form.startswith("segment_indexed_"):
+        stride = width * nf
+    elif form.startswith("segment_strided_"):
+        stride = width * nf * 2
+    else:
+        stride = width * 2 if form.startswith("strided_") else width
     return tuple(
         (
-            index,
+            index * nf + field,
             frozenset(
-                range(base_offset + index * stride, base_offset + index * stride + width)
+                range(
+                    base_offset + index * stride + field * width,
+                    base_offset + index * stride + (field + 1) * width,
+                )
             ),
         )
         for index in range(effective_vl)
         if mask == "unmasked" or index % 2 == 0
+        for field in range(nf)
     )
 
 
@@ -442,12 +455,22 @@ def _all_memory_footprint(choice: object, base_offset: int) -> frozenset[int]:
     )
     if effective_vl is None:
         return frozenset()
-    stride = width * 2 if str(getattr(choice, "vector_form", "")).startswith("strided_") else width
+    form = str(getattr(choice, "vector_form", ""))
+    nf = vector_nfields(form, params.get("nf"))
+    if nf is None:
+        return frozenset()
+    if form.startswith("segment_unit_") or form.startswith("segment_indexed_"):
+        stride = width * nf
+    elif form.startswith("segment_strided_"):
+        stride = width * nf * 2
+    else:
+        stride = width * 2 if form.startswith("strided_") else width
     mask = str(params.get("mask", "unmasked"))
     return frozenset(
-        base_offset + index * stride + byte
+        base_offset + index * stride + field * width + byte
         for index in range(effective_vl)
         if mask == "unmasked" or index % 2 == 0
+        for field in range(nf)
         for byte in range(width)
     )
 

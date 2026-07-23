@@ -23,6 +23,7 @@ from litmus_link.vector_native import (
     VectorAssignment,
     VectorNativeDomain,
     _amo_mask_satisfiable,
+    _compact_preview_solver,
     generate_vector_cases,
     lower_vector_assignment,
     sample_vector_cases,
@@ -330,6 +331,40 @@ def test_embedded_preview_uses_parallel_solver_workers(monkeypatch) -> None:  # 
     assert all(case.solver["status"] in {"verified", "inconclusive"} for case in cases)
 
 
+def test_preview_solver_payload_omits_duplicate_vector_expansion() -> None:
+    full_cases, _audit = sample_vector_cases(
+        _small_payload(sample_limit=1, solver_backend="embedded"),
+        compute_verdicts=True,
+    )
+    full = dict(full_cases[0].solver or {})
+    compact = _compact_preview_solver(full)
+
+    assert compact["status"] == full["status"]
+    assert compact["verdict"] == full["verdict"]
+    assert compact["allowed"] == full["allowed"]
+    assert compact["vector"]["preview_compact"] is True
+    assert "vector_ir" not in compact["vector"]
+    assert "events" not in compact["vector"]["embedded"]
+    assert compact["vector"]["embedded"]["execution"] == full["vector"]["embedded"]["execution"]
+    assert compact["raw_output"] == ""
+    assert compact["edges"] == []
+
+
+def test_sample_preview_requests_compact_parallel_results(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("LITMUS_LINK_SOLVER_WORKERS", "2")
+    monkeypatch.setattr(vector_native, "_PARALLEL_SOLVER_THRESHOLD", 2)
+    cases, audit = sample_vector_cases(
+        _small_payload(sample_limit=2, solver_backend="embedded"),
+        compute_verdicts=True,
+        compact_solver_results=True,
+    )
+
+    assert audit["solver_workers"] == 2
+    assert all(case.solver["vector"]["preview_compact"] for case in cases)
+    assert all("vector_ir" not in case.solver["vector"] for case in cases)
+    assert all("events" not in case.solver["vector"]["embedded"] for case in cases)
+
+
 def test_payload_worker_request_and_environment_cap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(vector_native, "_PARALLEL_SOLVER_THRESHOLD", 1)
     cases, audit = sample_vector_cases(
@@ -530,6 +565,76 @@ def test_every_generated_vector_endpoint_has_aligned_active_elements() -> None:
         assert all((index * stride) % width == 0 for index in active)
 
 
+def test_segment_native_cycle_lowers_all_fields_and_is_formally_solved() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["segment_unit_load", "segment_unit_store"],
+            sew=["e32"],
+            lmul=["m1"],
+            nf=["nf3"],
+            vl=["vl2"],
+        )
+    )
+    case = lower_vector_assignment(next(domain.assignments()))
+    expansion = expand_vector_case(case.case_ir)
+    result = solve_vector_case(case.case_ir)
+
+    assert "vlseg3e32.v" in case.litmus
+    assert "vsseg3e32.v" in case.litmus
+    assert all(config.nf == 3 for config in expansion.configs.values())
+    assert all(instruction.active_segment_count == 2 for instruction in expansion.instructions)
+    assert all(len(instruction.active_elements) == 6 for instruction in expansion.instructions)
+    assert all(
+        {element.field_index for element in instruction.active_elements} == {0, 1, 2}
+        for instruction in expansion.instructions
+    )
+    assert result.status == "verified"
+    assert result.verdict in {"observable", "forbidden"}
+
+
+def test_segment_endpoint_audit_counts_reserved_emul_nfields_combinations() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["segment_unit_load", "segment_unit_store"],
+            sew=["e32"],
+            lmul=["m4"],
+            nf=["nf2", "nf3"],
+            vl=["vl1"],
+        )
+    )
+    vector_audit = domain.audit()["endpoint_domain"]["vector"]
+
+    assert vector_audit["raw_configurations"] == 4
+    assert vector_audit["generated_endpoint_choices"] == 2
+    assert vector_audit["excluded"] == {"excluded_illegal_vector_config": 2}
+    assert {
+        str((choice.params or {}).get("nf"))
+        for choice in (*domain.read_choices, *domain.write_choices)
+    } == {"nf2"}
+
+
+def test_non_segment_forms_do_not_duplicate_over_the_nfields_axis() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["unit_load", "unit_store"],
+            nf=["nf2", "nf3", "nf8"],
+        )
+    )
+
+    assert len(domain.read_choices) == 1
+    assert len(domain.write_choices) == 1
+    assert all("nf" not in (choice.params or {}) for choice in (*domain.read_choices, *domain.write_choices))
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     [
@@ -556,6 +661,13 @@ def test_indexed_form_requires_an_index_eew() -> None:
     with pytest.raises(ValueError, match="indexed offset EEW"):
         VectorNativeDomain.from_payload(
             _small_payload(forms=["indexed_ordered_load"], index_eew=[])
+        )
+
+
+def test_segment_form_requires_nfields() -> None:
+    with pytest.raises(ValueError, match="Segment NFIELDS"):
+        VectorNativeDomain.from_payload(
+            _small_payload(forms=["segment_unit_load"], nf=[])
         )
 
 

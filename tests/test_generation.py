@@ -95,9 +95,9 @@ def test_summary_only_audit_skips_detail_json(tmp_path: Path) -> None:
 
 def test_vector_profile_contains_only_nanhu_supported_memory_types() -> None:
     rows, report = audit_profile("vector_mem")
-    assert report["total_combinations"] == 677520
-    assert report["generated"] == 677520
-    assert report["generated_litmus"] == 2032560
+    assert report["total_combinations"] == 609840
+    assert report["generated"] == 609840
+    assert report["generated_litmus"] == 1829520
     assert report["excluded_illegal"] == 0
     assert report["excluded_unsupported"] == 0
     assert report["hand_required"] == 0

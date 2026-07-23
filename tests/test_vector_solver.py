@@ -6,7 +6,11 @@ import pytest
 
 from litmus_link.litmus_ir import LitmusCaseIR
 from litmus_link.models import Combination, EXCLUDED_UNSUPPORTED, GENERATED
-from litmus_link.profiles import FORMAL_VECTOR_SKELETONS, VECTOR_ENDPOINTS
+from litmus_link.profiles import (
+    FORMAL_VECTOR_SKELETONS,
+    VECTOR_ENDPOINTS,
+    vector_memory_config_legal,
+)
 from litmus_link.renderer import render_cases
 from litmus_link.rules import evaluate
 from litmus_link.solver import solve_generated_case
@@ -15,14 +19,8 @@ from litmus_link.vector_solver import SUPPORTED_VECTOR_FORMS, expand_vector_case
 
 
 FORM_EVENTS = {
-    "unit_load": "vector_load",
-    "unit_store": "vector_store",
-    "strided_load": "vector_load",
-    "strided_store": "vector_store",
-    "indexed_unordered_load": "vector_load",
-    "indexed_unordered_store": "vector_store",
-    "indexed_ordered_load": "vector_load",
-    "indexed_ordered_store": "vector_store",
+    form: "vector_store" if form.endswith("store") else "vector_load"
+    for form in SUPPORTED_VECTOR_FORMS
 }
 
 
@@ -35,7 +33,10 @@ def _case(
     vl: str = "vl4",
     mask: str = "unmasked",
     index_eew: str | None = None,
+    nf: str | None = None,
 ):
+    if form.startswith("segment_") and nf is None:
+        nf = "nf2"
     combination = Combination(
         "test",
         "vector_mem",
@@ -52,6 +53,7 @@ def _case(
             "tail": "ta_ma",
             "footprint": "same_line",
             **({"index_eew": index_eew} if index_eew is not None else {}),
+            **({"nf": nf} if nf is not None else {}),
         },
     )
     decision = evaluate(combination)
@@ -141,6 +143,130 @@ def test_vector_address_functions_use_real_byte_offsets(form: str, offsets: list
 
 
 @pytest.mark.parametrize(
+    ("form", "offsets"),
+    [
+        ("segment_unit_load", [0, 4, 8, 12, 16, 20]),
+        ("segment_strided_load", [0, 4, 8, 24, 28, 32]),
+        ("segment_indexed_unordered_load", [0, 4, 8, 12, 16, 20]),
+        ("segment_indexed_ordered_load", [0, 4, 8, 12, 16, 20]),
+    ],
+)
+def test_segment_address_functions_expand_element_field_transactions(
+    form: str,
+    offsets: list[int],
+) -> None:
+    result = solve_generated_case(_case(form, vl="vl2", nf="nf3"))
+    elements = _instruction(result)["elements"]
+    active = [element for element in elements if element["active"]]
+
+    assert [element["event_id"] for element in active] == [
+        f"p1_rx.e{element}.f{field}"
+        for element in range(2)
+        for field in range(3)
+    ]
+    assert [element["offset_bytes"] for element in active] == offsets
+    assert [element["field_index"] for element in active] == [0, 1, 2, 0, 1, 2]
+    assert _instruction(result)["active_element_count"] == 2
+    assert _instruction(result)["active_transaction_count"] == 6
+
+
+@pytest.mark.parametrize(
+    ("form", "mnemonic"),
+    [
+        ("segment_unit_load", "vlseg3e32.v v8,(x8)"),
+        ("segment_unit_store", "vsseg3e32.v v8,(x6)"),
+        ("segment_strided_load", "vlsseg3e32.v v8,(x8),x20"),
+        ("segment_strided_store", "vssseg3e32.v v8,(x6),x20"),
+        ("segment_indexed_ordered_load", "vloxseg3ei32.v v8,(x8),v16"),
+        ("segment_indexed_unordered_load", "vluxseg3ei32.v v8,(x8),v16"),
+        ("segment_indexed_ordered_store", "vsoxseg3ei32.v v8,(x6),v16"),
+        ("segment_indexed_unordered_store", "vsuxseg3ei32.v v8,(x6),v16"),
+    ],
+)
+def test_segment_forms_render_architectural_mnemonics(
+    form: str,
+    mnemonic: str,
+) -> None:
+    case = _case(
+        form,
+        vl="vl1",
+        nf="nf3",
+        index_eew="ei32" if "indexed" in form else None,
+    )
+    assert mnemonic in case.litmus
+
+
+def test_segment_mask_disables_every_field_in_an_inactive_segment() -> None:
+    result = solve_generated_case(
+        _case("segment_unit_load", vl="vl4", mask="masked", nf="nf3")
+    )
+    elements = _instruction(result)["elements"]
+    active = {(element["index"], element["field_index"]) for element in elements if element["active"]}
+    inactive = {
+        (element["index"], element["field_index"])
+        for element in elements
+        if element["within_vl"] and not element["active"]
+    }
+
+    assert active == {(index, field) for index in (0, 2) for field in range(3)}
+    assert inactive == {(index, field) for index in (1, 3) for field in range(3)}
+
+
+def test_ordered_segment_orders_elements_but_not_fields_within_an_element() -> None:
+    ordered = solve_vector_case(
+        _case("segment_indexed_ordered_load", vl="vl2", nf="nf2").case_ir
+    )
+    unordered = solve_vector_case(
+        _case("segment_indexed_unordered_load", vl="vl2", nf="nf2").case_ir
+    )
+
+    assert ordered.expansion is not None
+    assert unordered.expansion is not None
+    assert ordered.expansion.ordering.preserved_order == frozenset(
+        {
+            (f"p1_rx.e0.f{left}", f"p1_rx.e1.f{right}")
+            for left in range(2)
+            for right in range(2)
+        }
+    )
+    assert unordered.expansion.ordering.preserved_order == frozenset()
+    assert ("p1_rx.e0.f0", "p1_rx.e0.f1") not in ordered.expansion.ordering.preserved_order
+
+
+def test_segment_herd_projection_is_explicitly_external_unsupported() -> None:
+    result = solve_vector_case(
+        _case("segment_unit_load", vl="vl1", nf="nf2").case_ir,
+        external_check=True,
+    )
+
+    assert result.status == "verified"
+    assert result.external is not None
+    assert result.external["status"] == "external_unsupported"
+    assert "artificial scalar program order" in str(result.external["reason"])
+
+
+def test_segment_register_group_legality_enforces_emul_times_nfields() -> None:
+    assert vector_memory_config_legal(
+        "segment_unit_load", "e32", "m4", "unmasked", "vl1", nf="nf2"
+    )
+    assert not vector_memory_config_legal(
+        "segment_unit_load", "e32", "m4", "unmasked", "vl1", nf="nf3"
+    )
+    assert vector_memory_config_legal(
+        "segment_unit_load", "e32", "m1", "unmasked", "vl1", nf="nf8"
+    )
+    assert not vector_memory_config_legal(
+        "segment_indexed_ordered_load",
+        "e32",
+        "m2",
+        "unmasked",
+        "vl1",
+        index_eew="ei32",
+        nf="nf8",
+    )
+
+
+@pytest.mark.parametrize(
     ("sew", "load_mnemonic", "store_mnemonic"),
     [("e8", "lb", "sb"), ("e16", "lh", "sh"), ("e32", "lw", "sw"), ("e64", "ld", "sd")],
 )
@@ -207,6 +333,49 @@ def test_parent_dependency_lifts_to_all_active_vector_elements() -> None:
         (f"{dependency.src}.e{source}", f"{dependency.dst}.e{target}")
         for source in range(2)
         for target in range(2)
+    }
+    actual = set().union(
+        result.embedded.execution.ppo_rules["r9"],
+        result.embedded.execution.ppo_rules["r10"],
+        result.embedded.execution.ppo_rules["r11"],
+    )
+    assert expected <= actual
+
+
+def test_parent_dependency_lifts_to_all_segment_element_fields() -> None:
+    domain = VectorNativeDomain.from_payload(
+        {
+            "skeletons": ["LB"],
+            "mechanisms": ["po", "dependency"],
+            "endpoint_categories": ["vector"],
+            "endpoint_compositions": ["vector_only"],
+            "overlap_layouts": ["same_start"],
+            "forms": ["segment_unit_load", "segment_unit_store"],
+            "sew": ["e32"],
+            "lmul": ["m1"],
+            "index_eew": ["ei16"],
+            "nf": ["nf2"],
+            "mask": ["unmasked"],
+            "tail": ["ta_ma"],
+            "vl": ["vl2"],
+            "alignments": ["aligned"],
+        }
+    )
+    assignment = next(
+        assignment
+        for assignment in domain.assignments()
+        if any(label.startswith("Dp") for label in assignment.cycle.labels)
+    )
+    case = lower_vector_assignment(assignment).case_ir
+    result = solve_vector_case(case)
+    assert result.embedded is not None and result.embedded.execution is not None
+    dependency = next(relation for relation in case.relations if relation.kind == "dependency")
+    expected = {
+        (f"{dependency.src}.e{source}.f{source_field}", f"{dependency.dst}.e{target}.f{target_field}")
+        for source in range(2)
+        for source_field in range(2)
+        for target in range(2)
+        for target_field in range(2)
     }
     actual = set().union(
         result.embedded.execution.ppo_rules["r9"],
@@ -303,6 +472,32 @@ def test_indexed_vector_data_sew_and_index_eew_are_independent(index_eew: str) -
     assert config["sew_bits"] == 64
     assert config["index_eew"] == index_eew
     assert f"vlox{index_eew}.v" in case.litmus
+
+
+@pytest.mark.parametrize(
+    ("index_eew", "index_lmul"),
+    [("ei8", "mf8"), ("ei16", "mf4"), ("ei32", "mf2"), ("ei64", "m1")],
+)
+def test_index_vector_is_initialized_under_its_architectural_eew_emul(
+    index_eew: str,
+    index_lmul: str,
+) -> None:
+    case = _case(
+        "segment_indexed_ordered_load",
+        sew="e64",
+        lmul="m1",
+        vl="vl2",
+        index_eew=index_eew,
+        nf="nf2",
+    )
+    index_vset = f"vsetivli x10,2,e{index_eew[2:]},{index_lmul},ta,ma"
+    data_vset = "vsetivli x10,2,e64,m1,ta,ma"
+
+    assert index_vset in case.litmus
+    index_setup = case.litmus.index(index_vset)
+    vid = case.litmus.index("vid.v v16", index_setup)
+    data_restore = case.litmus.index(data_vset, vid)
+    assert index_setup < vid < data_restore
 
 
 def test_register_avl_values_are_emitted_as_legal_vsetvli() -> None:

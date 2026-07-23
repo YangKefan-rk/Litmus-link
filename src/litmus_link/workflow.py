@@ -44,6 +44,7 @@ from .profiles import (
     VECTOR_LENGTHS,
     VECTOR_LMULS,
     VECTOR_MASKS,
+    VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
     VECTOR_WIDTHS,
@@ -75,6 +76,7 @@ from .vector_native import (
 PARAM_AXIS_VALUES: Dict[str, list[str]] = {
     "sew": list(VECTOR_WIDTHS),
     "index_eew": list(VECTOR_INDEX_EEWS),
+    "nf": list(VECTOR_NFIELDS),
     "lmul": list(VECTOR_LMULS),
     "mask": list(VECTOR_MASKS),
     "tail": list(VECTOR_TAILS),
@@ -234,6 +236,7 @@ def _vector_native_preview_payload(
     cases, audit = sample_vector_cases(
         payload,
         compute_verdicts=compute_verdicts,
+        compact_solver_results=True,
         progress_callback=progress_callback,
     )
     sample = [
@@ -599,6 +602,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         "sew": Counter(),
         "lmul": Counter(),
         "index_eew": Counter(),
+        "nf": Counter(),
         "mask": Counter(),
         "tail": Counter(),
         "vl": Counter(),
@@ -625,7 +629,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
             groups[key][_count_value(combination.get(key), "none")] += 1
         params = combination.get("params", {}) or {}
-        for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
+        for key in ("sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"):
             if key in params:
                 groups[key][_count_value(params.get(key), "default")] += 1
         case_ir = item.get("case_ir", {}) or {}
@@ -645,7 +649,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if choice.get("category") == "vector":
                 groups["vector_event_form"][_count_value(choice.get("vector_form"), "vector")] += 1
                 groups["alignment"][_count_value(choice_params.get("alignment"), "aligned")] += 1
-                for key in ("sew", "lmul", "index_eew", "mask", "tail", "vl"):
+                for key in ("sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"):
                     if key in choice_params:
                         groups[key][
                             _count_value(choice_params.get(key), "default")
