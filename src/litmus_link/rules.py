@@ -54,7 +54,7 @@ RULE_DESCRIPTIONS: Dict[str, str] = {
     "vector_fof_unit_only": "Fault-only-first is unit-stride LOAD only (incl. unit-stride segment); strided-FOF, indexed-FOF and FOF stores have no encoding (spike has only vle*ff.h; XiangShan VSplit.scala:156,518; DecodeUnit.scala:1061,1072).",
     "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
     "vector_memory_type": "The Nanhu target profile does not support vector accesses to MMIO/uncacheable or PBMT-tagged mappings; normal vector cases are restricted to cacheable memory.",
-    "vector_solver_scope": "The vector-aware solver supports unit-stride, strided, indexed, Segment, and whole-register loads/stores; fault, FOF, restart, cross-page, and complex indexed-alias forms are deferred.",
+    "vector_solver_scope": "The vector-aware solver supports aligned and byte-level no-MAG misaligned unit-stride, strided, indexed, Segment, and whole-register loads/stores; fault, FOF, restart, cross-page, and complex indexed-alias forms are deferred.",
     "vector_ordering": "Vector memory follows RVWMO per active element/field transaction; unordered siblings share one instruction-order position, and ordered-indexed Segment forms order different segment elements without ordering fields inside one element.",
     "vector_native_relation_cycle": "Multi-endpoint Vector cases are built from validated native relation cycles; endpoint ISA legality and formal solver scope are checked per generated case.",
     "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",

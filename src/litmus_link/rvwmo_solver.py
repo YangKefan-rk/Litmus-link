@@ -354,11 +354,15 @@ def solve_rvwmo(
         selected_ordering = ordering or OrderingOverrides()
         events = _memory_events(case, selected_ordering)
         budget.checkpoint(max(1, len(events)))
+        preserved_order = _lift_preserved_order(
+            events,
+            selected_ordering.preserved_order,
+        )
         final_values = _final_values(case.exists)
         static = _static_relations(
             case,
             events,
-            selected_ordering.preserved_order,
+            preserved_order,
             budget,
         )
         invariant_ppo_rules = _ppo_invariant_relations(events, static, budget)
@@ -595,11 +599,18 @@ def _classify_events(
                 f"byte-level no-MAG access {event.event_id} must be a plain load/store"
             )
         value = _integer(event.value, f"event {event.event_id} value") if event.value else None
-        if value is None:
+        if value is None and (
+            event.kind == "store"
+            or not event.role.startswith(("vector-element", "vector-segment-field"))
+        ):
             raise RvwmoSolverError(f"memory event {event.event_id} has no target value")
         out: list[MemoryEvent] = []
         for byte_index, absolute_byte in enumerate(access.covered_bytes):
-            byte_value = (value >> (8 * byte_index)) & 0xFF
+            byte_value = (
+                (value >> (8 * byte_index)) & 0xFF
+                if value is not None
+                else None
+            )
             out.append(
                 MemoryEvent(
                     event_id=f"{event.event_id}.b{byte_index}",
@@ -630,6 +641,46 @@ def _classify_events(
             )
         return tuple(out)
     return (_classify_event(event, hart, order, instruction_id),)
+
+
+def _lift_preserved_order(
+    events: Sequence[MemoryEvent],
+    preserved_order: Iterable[Pair],
+) -> frozenset[Pair]:
+    """Lift frontend sub-event order over no-MAG byte components.
+
+    Ordered-indexed RVV supplies order between element transaction IDs before
+    the generic solver classifies those transactions.  A misaligned element is
+    then represented by multiple byte component operations, so every component
+    of the earlier element must precede every component of the later element.
+    Aligned transactions pass through as a one-to-one mapping.
+    """
+
+    event_ids = tuple(event.event_id for event in events if not event.initial)
+
+    def members(event_id: str) -> tuple[str, ...]:
+        byte_prefix = f"{event_id}.b"
+        return tuple(
+            actual
+            for actual in event_ids
+            if actual == event_id or actual.startswith(byte_prefix)
+        )
+
+    lifted: set[Pair] = set()
+    for left, right in preserved_order:
+        left_members = members(left)
+        right_members = members(right)
+        if not left_members or not right_members:
+            # Retain the original edge so _static_relations emits its normal,
+            # precise unknown-event diagnostic instead of silently dropping it.
+            lifted.add((left, right))
+            continue
+        lifted.update(
+            (left_member, right_member)
+            for left_member in left_members
+            for right_member in right_members
+        )
+    return frozenset(lifted)
 
 
 def _classify_event(event: LitmusEvent, hart: int, order: int, instruction_id: str) -> MemoryEvent:

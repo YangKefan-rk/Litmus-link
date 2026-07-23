@@ -978,6 +978,7 @@ class _LitmusLinkQtWindow:
             ("AMO width", "amo_widths", self.options["vector_native"]["amo_widths"], 2, _amo_width_label),
             ("AMO ordering", "amo_orderings", self.options["vector_native"]["amo_orderings"], 2, _amo_ordering_label),
             ("Overlap layout", "overlap_layouts", self.options["vector_native"]["overlap_layouts"], 2, _overlap_layout_label),
+            ("Vector element alignment", "alignments", self.options["vector_native"]["alignments"], 2, _vector_alignment_label),
             ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4, _sew_label),
             ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4, _axis_label),
             ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4, _index_eew_label),
@@ -1423,9 +1424,6 @@ class _LitmusLinkQtWindow:
                 "verification_effort": str(self.vector_verification_effort.currentData()),
                 "solver_workers": self.vector_solver_workers.value(),
                 "compute_verdicts": not self.defer_solver.isChecked(),
-                # Current backend capability, retained in metadata/audit without
-                # presenting it as a permanent GUI product constraint.
-                "alignments": list(self.options["vector_native"]["alignments"]),
                 **{
                     key: self._selected(checks)
                     for key, checks in self.vector_checks.items()
@@ -2654,6 +2652,15 @@ def _overlap_layout_label(value: str) -> str:
         "low_partial": "Low-side overlap",
         "high_partial": "High-side overlap",
         "disjoint_control": "Disjoint control",
+    }.get(value, value)
+
+
+def _vector_alignment_label(value: str) -> str:
+    return {
+        "aligned": "Naturally aligned",
+        "misalign_same16": "Misaligned within 16B",
+        "misalign_cross16": "Misaligned crossing 16B",
+        "misalign_cross64": "Misaligned crossing 64B",
     }.get(value, value)
 
 

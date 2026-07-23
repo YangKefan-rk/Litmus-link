@@ -219,9 +219,9 @@ def _solve_vector_generated_case(
         verdict=verdict,
         allowed=result.allowed,
         model=(
-            "riscv.cat+rvv-elements+herd-scalar-projection"
+            f"{payload['model']}+herd-scalar-projection"
             if external_status in {"agree", "conflict"}
-            else "riscv.cat+rvv-elements"
+            else str(payload["model"])
         ),
         tool=(
             "litmus-link-vector-rvwmo+herd7"

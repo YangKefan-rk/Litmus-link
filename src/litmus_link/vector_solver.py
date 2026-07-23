@@ -430,6 +430,13 @@ class VectorSolverVerdict:
     external: Mapping[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
+        no_mag = bool(
+            self.expansion
+            and any(
+                config.atomicity_model == "byte_level_no_mag"
+                for config in self.expansion.configs.values()
+            )
+        )
         return {
             "schema": "litmus-link.vector-solver.v1",
             "status": self.status,
@@ -445,8 +452,16 @@ class VectorSolverVerdict:
                 if self.external is not None
                 else "litmus-link-vector-rvwmo"
             ),
-            "model": "riscv.cat+rvv-elements",
-            "model_revision": "rvv-element-field-order-v2",
+            "model": (
+                "riscv.cat+rvv-elements+byte-level-no-mag"
+                if no_mag
+                else "riscv.cat+rvv-elements"
+            ),
+            "model_revision": (
+                "rvv-element-field-order-no-mag-v3"
+                if no_mag
+                else "rvv-element-field-order-v2"
+            ),
             "reason": self.reason,
             "vector_ir": self.expansion.to_json() if self.expansion else None,
             "embedded": self.embedded.to_json() if self.embedded else None,
@@ -462,7 +477,7 @@ def is_vector_case(case: LitmusCaseIR) -> bool:
 
 def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
     config_by_event = _vector_configs(case)
-    _validate_aligned_mixed_size_scope(case, config_by_event)
+    _validate_vector_memory_scope(case, config_by_event)
     harts: list[list[LitmusEvent]] = []
     order_by_event: dict[str, int] = {}
     instruction_by_event: dict[str, str] = {}
@@ -599,12 +614,24 @@ def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
         "schema": "litmus-link.vector-solver-expansion.v1",
         "source_case": case.name,
     }
+    no_mag = any(
+        config.atomicity_model == "byte_level_no_mag"
+        for config in config_by_event.values()
+    )
     expanded_case = replace(
         case,
         name=f"{case.name}__vector_elements",
-        model="rvwmo-vector-elements",
+        model=(
+            "rvwmo-vector-elements-byte-level-no-mag"
+            if no_mag
+            else "rvwmo-vector-elements"
+        ),
         harts=harts,
-        description="Vector element execution graph for the supported Nanhu RVV subset.",
+        description=(
+            "Vector element/byte-component execution graph for the supported Nanhu RVV subset."
+            if no_mag
+            else "Vector element execution graph for the supported Nanhu RVV subset."
+        ),
         metadata=metadata,
     )
     return VectorExpansion(
@@ -645,8 +672,14 @@ def solve_vector_case(
         )
 
     memory_event_count = sum(
-        event.kind in {"load", "store", "amo"}
+        (
+            event.memory_access.size_bytes
+            if event.memory_access is not None
+            and event.memory_access.atomicity_model == "byte_level_no_mag"
+            else 1
+        )
         for event in expansion.case.events()
+        if event.kind in {"load", "store", "amo"}
     )
     if max_memory_events is not None and memory_event_count > max_memory_events:
         return VectorSolverVerdict(
@@ -670,11 +703,27 @@ def solve_vector_case(
         max_search_steps=max_search_steps,
         ordering=expansion.ordering,
     )
+    misaligned_vector_case = any(
+        config.atomicity_model == "byte_level_no_mag"
+        for config in expansion.configs.values()
+    )
     compound_vector_case = any(
         config.segment or config.whole_register
         for config in expansion.configs.values()
     )
-    if external_check and embedded.status == "verified" and compound_vector_case:
+    if external_check and embedded.status == "verified" and misaligned_vector_case:
+        external = {
+            "schema": "litmus-link.vector-herd-reference.v1",
+            "status": "external_unsupported",
+            "verdict": "unknown",
+            "allowed": None,
+            "reason": (
+                "Stock herd7 has no projection that preserves one misaligned RVV "
+                "element as unordered byte component operations without adding "
+                "artificial scalar program order."
+            ),
+        }
+    elif external_check and embedded.status == "verified" and compound_vector_case:
         external = {
             "schema": "litmus-link.vector-herd-reference.v1",
             "status": "external_unsupported",
@@ -772,29 +821,63 @@ def _scalar_element_instruction(kind: str, sew_bits: int) -> str:
     return f"{mnemonic} {register},0(x31)"
 
 
-def _validate_aligned_mixed_size_scope(
+def _validate_vector_memory_scope(
     case: LitmusCaseIR,
     configs: Mapping[str, VectorConfig],
 ) -> None:
+    any_misaligned = False
     for event_id, config in configs.items():
-        if config.atomicity_model != "aligned_atomic" or config.alignment != "aligned":
+        aligned_mode = config.alignment == "aligned"
+        expected_atomicity = "aligned_atomic" if aligned_mode else "byte_level_no_mag"
+        if config.atomicity_model != expected_atomicity:
             raise VectorSolverError(
-                f"Vector event {event_id} is misaligned; aligned Vector/scalar/AMO fusion only"
+                f"Vector event {event_id} alignment and atomicity model disagree"
             )
+        if not aligned_mode:
+            any_misaligned = True
+            if config.element_bytes == 1:
+                raise VectorSolverError("an 8-bit Vector element cannot be misaligned")
         for index in range(config.effective_vl):
             if not config.active(index):
                 continue
             for field in range(config.nf):
                 offset = config.base_offset_bytes + config.offset(index, field)
-                if offset % config.element_bytes:
+                naturally_aligned = offset % config.element_bytes == 0
+                if aligned_mode and not naturally_aligned:
                     raise VectorSolverError(
                         f"Vector event {event_id} element {index} field {field} is not naturally aligned"
                     )
+                if not aligned_mode and naturally_aligned:
+                    raise VectorSolverError(
+                        f"Vector event {event_id} element {index} field {field} is unexpectedly aligned"
+                    )
+        element_zero_boundary = MemoryAccess.create(
+            "vector_alignment_probe",
+            config.base_offset_bytes,
+            config.element_bytes,
+            config.atomicity_model,
+        ).boundary
+        expected_boundary = {
+            "aligned": "same16",
+            "misalign_same16": "same16",
+            "misalign_cross16": "cross16_same_line",
+            "misalign_cross64": "cross64",
+        }[config.alignment]
+        if element_zero_boundary != expected_boundary:
+            raise VectorSolverError(
+                f"Vector event {event_id} boundary {element_zero_boundary} does not match {config.alignment}"
+            )
     for event in case.events():
-        if event.kind != "amo" or event.memory_access is None:
+        if event.kind not in {"load", "store", "amo"} or _is_vector_memory(event):
             continue
-        if not event.memory_access.natural_aligned:
-            raise VectorSolverError(f"AMO event {event.event_id} is not naturally aligned")
+        if event.memory_access is not None and not event.memory_access.natural_aligned:
+            raise VectorSolverError(
+                f"scalar/AMO event {event.event_id} is not naturally aligned"
+            )
+        if any_misaligned and event.kind == "amo":
+            raise VectorSolverError(
+                "misaligned Vector and AMO endpoint fusion is outside the current formal scope"
+            )
 
 
 def _integer(value: object, field: str) -> int:

@@ -766,7 +766,7 @@ def test_audit_accounts_for_illegal_vector_configs_and_nanhu_amo_widths() -> Non
     assert all(choice.width_bytes == 4 for choice in domain.read_choices if choice.category == "amo")
 
 
-def test_scope_audit_excludes_misaligned_amo_and_pbmt_requests() -> None:
+def test_scope_audit_generates_vector_misalignment_and_excludes_amo_members() -> None:
     domain = VectorNativeDomain.from_payload(
         _small_payload(
             alignments=["aligned", "misalign_cross64"],
@@ -777,7 +777,6 @@ def test_scope_audit_excludes_misaligned_amo_and_pbmt_requests() -> None:
     )
     audit = domain.audit()
     assert audit["request_exclusions"] == {
-        "excluded_illegal_misaligned_amo_request": 1,
         "excluded_illegal_pbmt_reserved_request": 1,
         "excluded_unsupported_pma_nonatomic_request": 1,
         "excluded_unsupported_pbmt_nc_io_request": 4,
@@ -786,12 +785,22 @@ def test_scope_audit_excludes_misaligned_amo_and_pbmt_requests() -> None:
         "pbmt": 0,
         "attribute": "cacheable",
         "pma_atomic": True,
-        "natural_alignment": True,
+        "vector_alignment": ["aligned", "misalign_cross64"],
+        "misaligned_atomicity": "byte_level_no_mag",
+        "scalar_alignment": "natural",
+        "amo_alignment": "natural",
     }
-    assert domain.alignments == ("aligned",)
+    assert domain.alignments == ("aligned", "misalign_cross64")
+    assert audit["excluded"]["excluded_unsupported_misaligned_amo_fusion"] > 0
+    misaligned = [
+        assignment
+        for assignment in domain.assignments()
+        if assignment.alignment == "misalign_cross64"
+    ]
+    assert misaligned
     assert all(
-        assignment.alignment == "aligned"
-        for assignment in domain.random_assignments(10, 7)
+        all(choice.category != "amo" for choice in assignment.choices)
+        for assignment in misaligned
     )
 
 
@@ -814,6 +823,102 @@ def test_domain_count_matches_complete_small_enumeration() -> None:
     )
     assert domain.total_cases == sum(1 for _ in domain.assignments())
     assert sum(domain.audit()["family_cases"].values()) == domain.total_cases
+
+
+def test_misaligned_domain_count_matches_complete_small_enumeration() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["scalar", "vector"],
+            endpoint_compositions=["vector_only", "vector_scalar"],
+            scalar_widths=["h", "w"],
+            sew=["e16", "e32"],
+            alignments=[
+                "aligned",
+                "misalign_same16",
+                "misalign_cross16",
+                "misalign_cross64",
+            ],
+            overlap_layouts=["same_start", "contained"],
+        )
+    )
+    audit = domain.audit()
+    assert domain.total_cases == sum(1 for _ in domain.assignments())
+    assert audit["raw_combinations"] == (
+        domain.total_cases + sum(audit["excluded"].values())
+    )
+
+
+@pytest.mark.parametrize(
+    "forms",
+    [
+        ["unit_load", "unit_store"],
+        ["strided_load", "strided_store"],
+        ["indexed_unordered_load", "indexed_unordered_store"],
+        ["indexed_ordered_load", "indexed_ordered_store"],
+        ["segment_unit_load", "segment_unit_store"],
+        ["whole_register_load", "unit_store"],
+    ],
+)
+@pytest.mark.parametrize(
+    ("alignment", "boundary"),
+    [
+        ("misalign_same16", "same16"),
+        ("misalign_cross16", "cross16_same_line"),
+        ("misalign_cross64", "cross64"),
+    ],
+)
+def test_vector_forms_lower_and_solve_byte_level_misalignment(
+    forms: list[str],
+    alignment: str,
+    boundary: str,
+) -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=forms,
+            sew=["e32"],
+            whole_nreg=["nreg2"],
+            nf=["nf2"],
+            alignments=[alignment],
+            overlap_layouts=["same_start"],
+        )
+    )
+    assignment = next(domain.assignments())
+    case = lower_vector_assignment(assignment)
+    configs = case.case_ir.metadata["vectors"]
+    assert configs
+    assert all(config["alignment"] == alignment for config in configs.values())
+    assert all(config["atomicity_model"] == "byte_level_no_mag" for config in configs.values())
+    assert all(config["boundary"] == boundary for config in configs.values())
+    assert all(config["base_offset_bytes"] % 4 != 0 for config in configs.values())
+    assert f"/{ {'misalign_same16': 'U16', 'misalign_cross16': 'X16', 'misalign_cross64': 'X64'}[alignment]}" in case.display_name
+    verdict = solve_generated_case(case)
+    assert verdict.status == "verified"
+    assert verdict.model == "riscv.cat+rvv-elements+byte-level-no-mag"
+
+
+def test_e8_and_misaligned_amo_fusion_are_audited_not_generated() -> None:
+    e8 = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            sew=["e8"],
+            alignments=["misalign_cross16"],
+        )
+    )
+    assert e8.total_cases == 0
+    assert e8.audit()["excluded"]["excluded_unsatisfiable_misaligned_layout"] > 0
+
+    amo = VectorNativeDomain.from_payload(
+        _small_payload(
+            endpoint_categories=["vector", "amo"],
+            endpoint_compositions=["vector_amo"],
+            alignments=["misalign_cross16"],
+        )
+    )
+    assert amo.total_cases == 0
+    assert amo.audit()["excluded"]["excluded_unsupported_misaligned_amo_fusion"] > 0
 
 
 def test_same_location_sb_rejects_two_amos_that_both_read_initial() -> None:

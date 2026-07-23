@@ -62,3 +62,45 @@ def test_disjoint_control_is_excluded_from_relation_cycle_lowering() -> None:
             "disjoint_control",
         )
     assert error.value.reason == "excluded_unsatisfiable_value_layout"
+
+
+@pytest.mark.parametrize(
+    ("placement", "expected_offset", "crosses_16", "crosses_64"),
+    [
+        ("misalign_same16", 7, False, False),
+        ("misalign_cross16", 15, True, False),
+        ("misalign_cross64", 63, True, True),
+    ],
+)
+def test_vector_misalignment_placements_have_real_boundary_offsets(
+    placement: str,
+    expected_offset: int,
+    crosses_16: bool,
+    crosses_64: bool,
+) -> None:
+    layout = synthesize_address_layout(
+        [
+            EndpointFootprint(0, 4, frozenset(range(4)), placement),
+            EndpointFootprint(1, 1, frozenset({0})),
+        ],
+        [(0, 1)],
+        "same_start",
+    )
+    offset = layout.offsets[0]
+    end = offset + 3
+    assert offset == layout.offsets[1] == expected_offset
+    assert offset % 4 != 0
+    assert (offset // 16 != end // 16) is crosses_16
+    assert (offset // 64 != end // 64) is crosses_64
+    assert layout.alignment_modes == {0: placement, 1: "aligned"}
+    assert layout.to_json()["naturally_aligned"] is False
+
+
+def test_e8_vector_element_has_no_misaligned_placement() -> None:
+    with pytest.raises(ValueError, match="8-bit memory element cannot be misaligned"):
+        EndpointFootprint(
+            0,
+            1,
+            frozenset({0}),
+            "misalign_cross64",
+        )

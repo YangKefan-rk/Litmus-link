@@ -324,6 +324,56 @@ def test_whole_register_herd_projection_is_explicitly_external_unsupported() -> 
     assert "whole-register" in str(result.external["reason"])
 
 
+def test_misaligned_ordered_elements_lift_order_to_every_byte_component() -> None:
+    domain = VectorNativeDomain.from_payload(
+        {
+            "mode": "vector",
+            "skeletons": ["LB"],
+            "mechanisms": ["po"],
+            "endpoint_categories": ["vector"],
+            "endpoint_compositions": ["vector_only"],
+            "overlap_layouts": ["same_start"],
+            "forms": ["indexed_ordered_load", "indexed_ordered_store"],
+            "sew": ["e32"],
+            "lmul": ["m1"],
+            "index_eew": ["ei32"],
+            "mask": ["unmasked"],
+            "tail": ["ta_ma"],
+            "vl": ["vl2"],
+            "alignments": ["misalign_cross16"],
+        }
+    )
+    case = lower_vector_assignment(next(domain.assignments())).case_ir
+    result = solve_vector_case(case, external_check=True)
+    assert result.status == "verified"
+    payload = result.to_json()
+    assert payload["model"] == "riscv.cat+rvv-elements+byte-level-no-mag"
+    assert payload["external"]["status"] == "external_unsupported"
+    embedded = payload["embedded"]
+    byte_events = {
+        event["event_id"]
+        for event in embedded["events"]
+        if ".e" in event["event_id"] and ".b" in event["event_id"]
+    }
+    assert byte_events
+    execution = embedded["execution"]
+    ordered = {
+        tuple(pair)
+        for pair in execution["ppo_rules"]["vector-element-order"]
+    }
+    for instruction in payload["vector_ir"]["instructions"]:
+        parent = instruction["event_id"]
+        first = {f"{parent}.e0.b{index}" for index in range(4)}
+        second = {f"{parent}.e1.b{index}" for index in range(4)}
+        assert first <= byte_events
+        assert second <= byte_events
+        assert {(left, right) for left in first for right in second} <= ordered
+        assert not any(
+            left in first and right in first
+            for left, right in map(tuple, execution["po"])
+        )
+
+
 def test_segment_register_group_legality_enforces_emul_times_nfields() -> None:
     assert vector_memory_config_legal(
         "segment_unit_load", "e32", "m4", "unmasked", "vl1", nf="nf2"

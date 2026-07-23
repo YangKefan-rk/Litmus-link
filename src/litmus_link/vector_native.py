@@ -28,6 +28,7 @@ from .amo import AMO_OPERATIONS, AMO_ORDERINGS, AmoSpec
 from .fusion_layout import (
     EndpointFootprint,
     FUSION_OVERLAP_LAYOUTS,
+    VECTOR_ALIGNMENT_MODES,
     FusionAddressLayout,
     FusionLayoutError,
     synthesize_address_layout,
@@ -74,7 +75,7 @@ from .solver import solve_generated_case
 
 ProgressCallback = Callable[[int, int, str], None]
 
-VECTOR_ALIGNMENTS = ("aligned",)
+VECTOR_ALIGNMENTS = VECTOR_ALIGNMENT_MODES
 
 SCALAR_WIDTHS = ("b", "h", "w", "d")
 SCALAR_WIDTH_BYTES = {"b": 1, "h": 2, "w": 4, "d": 8}
@@ -177,12 +178,14 @@ def _cached_fusion_layout(
     structure: tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
     categories: tuple[str, ...],
     widths: tuple[int, ...],
+    alignment: str,
     layout: str,
 ) -> FusionAddressLayout:
     result, reason, detail = _fusion_layout_result(
         structure,
         categories,
         widths,
+        alignment,
         layout,
     )
     if result is None:
@@ -195,6 +198,7 @@ def _fusion_layout_result(
     structure: tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]],
     categories: tuple[str, ...],
     widths: tuple[int, ...],
+    alignment: str,
     layout: str,
 ) -> tuple[FusionAddressLayout | None, str, str]:
     directions, locations, relations = structure
@@ -203,6 +207,27 @@ def _fusion_layout_result(
             None,
             "excluded_unsatisfiable_value_layout",
             "endpoint categories and widths do not match the relation cycle",
+        )
+    if alignment not in VECTOR_ALIGNMENTS:
+        return (
+            None,
+            "excluded_illegal_vector_alignment",
+            f"unknown Vector alignment mode {alignment!r}",
+        )
+    if alignment != "aligned" and "amo" in categories:
+        return (
+            None,
+            "excluded_unsupported_misaligned_amo_fusion",
+            "misaligned Vector and AMO endpoints are outside the current formal fusion scope",
+        )
+    if alignment != "aligned" and any(
+        category == "vector" and width == 1
+        for category, width in zip(categories, widths)
+    ):
+        return (
+            None,
+            "excluded_unsatisfiable_misaligned_layout",
+            "an 8-bit Vector element cannot be misaligned",
         )
     amo_mask = sum(
         1 << vertex
@@ -229,13 +254,240 @@ def _fusion_layout_result(
         for location in sorted(set(locations))
     )
     footprints = tuple(
-        EndpointFootprint(vertex, width, frozenset(range(width)))
-        for vertex, width in enumerate(widths)
+        EndpointFootprint(
+            vertex,
+            width,
+            frozenset(range(width)),
+            alignment if category == "vector" else "aligned",
+        )
+        for vertex, (category, width) in enumerate(zip(categories, widths))
     )
     try:
         return synthesize_address_layout(footprints, groups, layout), "", ""
     except FusionLayoutError as exc:
         return None, exc.reason, str(exc)
+
+
+@lru_cache(maxsize=16_384)
+def _misaligned_group_layout_valid(
+    vector_mask: int,
+    widths: tuple[int, ...],
+    alignment: str,
+    layout: str,
+) -> bool:
+    """Return layout feasibility for one normalized abstract location group."""
+
+    anchor = {
+        "misalign_same16": 7,
+        "misalign_cross16": 15,
+        "misalign_cross64": 63,
+    }[alignment]
+    candidates: list[tuple[int, ...]] = []
+    for vertex, width in enumerate(widths):
+        placement = alignment if vector_mask & (1 << vertex) else "aligned"
+        if placement != "aligned" and width == 1:
+            return False
+        values = _counting_placement_candidates(
+            width,
+            placement,
+            anchor,
+        )
+        if not values:
+            return False
+        candidates.append(values)
+    if layout == "same_start":
+        return bool(set.intersection(*(set(values) for values in candidates)))
+    for offsets in product(*candidates):
+        intervals = tuple(
+            (offset, offset + width - 1)
+            for offset, width in zip(offsets, widths)
+        )
+        if max(start for start, _end in intervals) > min(
+            end for _start, end in intervals
+        ):
+            continue
+        if len(set(intervals)) == 1:
+            continue
+        if layout == "contained" and not any(
+            (left[0] >= right[0] and left[1] <= right[1] and left != right)
+            or (right[0] >= left[0] and right[1] <= left[1] and left != right)
+            for index, left in enumerate(intervals)
+            for right in intervals[index + 1 :]
+        ):
+            continue
+        return True
+    return False
+
+
+@lru_cache(maxsize=256)
+def _counting_placement_candidates(
+    width: int,
+    placement: str,
+    anchor: int,
+) -> tuple[int, ...]:
+    focus = {anchor, anchor + 1}
+    values = []
+    for offset in range(max(anchor - 16, 0), anchor + 17):
+        naturally_aligned = offset % width == 0
+        if placement == "aligned":
+            accepted = naturally_aligned
+        else:
+            end = offset + width - 1
+            boundary = (
+                "cross64"
+                if offset // 64 != end // 64
+                else "cross16"
+                if offset // 16 != end // 16
+                else "same16"
+            )
+            accepted = not naturally_aligned and boundary == {
+                "misalign_same16": "same16",
+                "misalign_cross16": "cross16",
+                "misalign_cross64": "cross64",
+            }[placement]
+        if accepted and any(offset <= byte < offset + width for byte in focus):
+            values.append(offset)
+    return tuple(
+        sorted(
+            values,
+            key=lambda offset: (
+                abs((2 * offset + width - 1) - 2 * anchor),
+                offset,
+            ),
+        )[:8]
+    )
+
+
+@lru_cache(maxsize=65_536)
+def _weighted_misaligned_group_count(
+    categories: tuple[str, ...],
+    width_count_signatures: tuple[tuple[tuple[int, int], ...], ...],
+    layout: str,
+) -> int:
+    """Count legal endpoint choices for one location group.
+
+    The three supported misalignment boundaries are translations of the same
+    interval problem around byte 7, 15, or 63.  Count with the canonical
+    within-16B placement once and reuse it for every requested boundary.
+    """
+
+    counts_by_vertex = tuple(dict(signature) for signature in width_count_signatures)
+    if layout == "same_start":
+        # Track the set of bases still shared by every endpoint.  This handles
+        # cases such as an aligned 16-bit scalar and a misaligned 32-bit Vector
+        # element both starting at byte 6 without enumerating endpoint tuples.
+        common_states: dict[frozenset[int] | None, int] = {None: 1}
+        for category, counts in zip(categories, counts_by_vertex):
+            placement = (
+                "misalign_same16" if category == "vector" else "aligned"
+            )
+            next_common: dict[frozenset[int], int] = {}
+            for common, state_weight in common_states.items():
+                for width, choice_weight in counts.items():
+                    candidates = frozenset(
+                        _counting_placement_candidates(width, placement, 7)
+                    )
+                    if not candidates:
+                        continue
+                    intersection = candidates if common is None else common & candidates
+                    if not intersection:
+                        continue
+                    next_common[intersection] = (
+                        next_common.get(intersection, 0)
+                        + state_weight * choice_weight
+                    )
+            common_states = next_common
+        return sum(common_states.values())
+
+    # For partial/contained layouts every supported endpoint type has an
+    # interval containing the low anchor and another containing the high
+    # anchor.  The group is therefore legal exactly when at least one selected
+    # endpoint pair can realize the requested strict relationship.  Track the
+    # selected type set and repeated types, capping the state at two uses.
+    states: dict[tuple[int, int], int] = {(0, 0): 1}
+    for category, counts in zip(categories, counts_by_vertex):
+        options = tuple(
+            (_misaligned_endpoint_type(category, width), count)
+            for width, count in counts.items()
+            if not (category == "vector" and width == 1)
+        )
+        next_states: dict[tuple[int, int], int] = {}
+        for (used, repeated), state_weight in states.items():
+            for endpoint_type, choice_weight in options:
+                bit = 1 << endpoint_type
+                key = (
+                    used | bit,
+                    repeated | (bit if used & bit else 0),
+                )
+                next_states[key] = (
+                    next_states.get(key, 0) + state_weight * choice_weight
+                )
+        states = next_states
+    return sum(
+        weight
+        for (used, repeated), weight in states.items()
+        if _misaligned_type_state_has_relation(used, repeated, layout)
+    )
+
+
+def _misaligned_endpoint_type(category: str, width: int) -> int:
+    if category == "scalar" and width in {1, 2, 4, 8}:
+        return {1: 0, 2: 1, 4: 2, 8: 3}[width]
+    if category == "vector" and width in {2, 4, 8}:
+        return {2: 4, 4: 5, 8: 6}[width]
+    raise ValueError(f"unsupported misaligned endpoint type: {category}/{width}")
+
+
+def _misaligned_endpoint_descriptor(endpoint_type: int) -> tuple[str, int]:
+    values = (
+        ("scalar", 1),
+        ("scalar", 2),
+        ("scalar", 4),
+        ("scalar", 8),
+        ("vector", 2),
+        ("vector", 4),
+        ("vector", 8),
+    )
+    return values[endpoint_type]
+
+
+@lru_cache(maxsize=128)
+def _misaligned_type_pair_has_relation(
+    left_type: int,
+    right_type: int,
+    layout: str,
+) -> bool:
+    left_category, left_width = _misaligned_endpoint_descriptor(left_type)
+    right_category, right_width = _misaligned_endpoint_descriptor(right_type)
+    vector_mask = int(left_category == "vector") | (
+        int(right_category == "vector") << 1
+    )
+    return _misaligned_group_layout_valid(
+        vector_mask,
+        (left_width, right_width),
+        "misalign_same16",
+        layout,
+    )
+
+
+@lru_cache(maxsize=512)
+def _misaligned_type_state_has_relation(
+    used: int,
+    repeated: int,
+    layout: str,
+) -> bool:
+    selected = tuple(index for index in range(7) if used & (1 << index))
+    if any(
+        repeated & (1 << endpoint_type)
+        and _misaligned_type_pair_has_relation(endpoint_type, endpoint_type, layout)
+        for endpoint_type in selected
+    ):
+        return True
+    return any(
+        _misaligned_type_pair_has_relation(left, right, layout)
+        for index, left in enumerate(selected)
+        for right in selected[index + 1 :]
+    )
 
 
 @lru_cache(maxsize=None)
@@ -433,21 +685,10 @@ class VectorNativeDomain:
         requested_alignments = _selected(payload, "alignments", ("aligned",))
         if not requested_alignments:
             raise ValueError("select at least one Vector alignment")
-        known_misaligned = {
-            "misalign_same16",
-            "misalign_cross16",
-            "misalign_cross64",
-        }
-        unknown_alignments = (
-            set(requested_alignments) - set(VECTOR_ALIGNMENTS) - known_misaligned
-        )
+        unknown_alignments = set(requested_alignments) - set(VECTOR_ALIGNMENTS)
         if unknown_alignments:
             raise ValueError(f"unknown Vector alignment(s): {', '.join(sorted(unknown_alignments))}")
-        alignments = tuple(
-            alignment
-            for alignment in requested_alignments
-            if alignment in VECTOR_ALIGNMENTS
-        )
+        alignments = tuple(requested_alignments)
         request_exclusions, supported_scope_requested = _fusion_request_audit(
             payload,
             categories,
@@ -561,7 +802,6 @@ class VectorNativeDomain:
         if not self.alignments:
             return {"raw": 0, "generated": 0, "excluded": {}}
         directions = vertex_directions(cycle.edges)
-        locations = location_ids(cycle.edges)
         category_domains = [
             tuple(self._width_multiplicities[direction])
             for direction in directions
@@ -569,15 +809,6 @@ class VectorNativeDomain:
         allowed_compositions = {
             _COMPOSITION_CATEGORIES[name] for name in self.compositions
         }
-        location_groups = [
-            tuple(
-                vertex
-                for vertex, actual_location in enumerate(locations)
-                if actual_location == location
-            )
-            for location in sorted(set(locations))
-        ]
-
         raw = 0
         generated = 0
         excluded: Counter[str] = Counter()
@@ -592,39 +823,76 @@ class VectorNativeDomain:
             for counts in width_counts:
                 endpoint_count *= sum(counts.values())
 
-            # Naturally aligned power-of-two accesses can realize a nontrivial
-            # low/center/high containment layout iff at least one abstract
-            # location contains two different endpoint widths.  Count its
-            # complement analytically: every endpoint in each location picks
-            # the same width.
-            all_locations_uniform = 1
-            for vertices in location_groups:
-                uniform_at_location = sum(
-                    _product(width_counts[vertex].get(width, 0) for vertex in vertices)
-                    for width in (1, 2, 4, 8)
-                )
-                all_locations_uniform *= uniform_at_location
-            mixed_width_count = endpoint_count - all_locations_uniform
+            for alignment in self.alignments:
+                for layout in self.overlap_layouts:
+                    raw += endpoint_count
+                    # Aligned layouts retain the fast analytical count used by
+                    # the large complete domain.  Misaligned layouts have only
+                    # four possible endpoint widths, so enumerate that compact
+                    # width domain and weight each result by its choice count.
+                    if alignment == "aligned":
+                        amo_mask = sum(
+                            1 << vertex
+                            for vertex, category in enumerate(categories)
+                            if category == "amo"
+                        )
+                        if (
+                            not _amo_mask_satisfiable(cycle, amo_mask)
+                            or layout == "disjoint_control"
+                        ):
+                            excluded["excluded_unsatisfiable_value_layout"] += endpoint_count
+                            continue
+                        locations = location_ids(cycle.edges)
+                        all_locations_uniform = 1
+                        for location in sorted(set(locations)):
+                            vertices = tuple(
+                                vertex
+                                for vertex, actual in enumerate(locations)
+                                if actual == location
+                            )
+                            uniform = sum(
+                                _product(
+                                    width_counts[vertex].get(width, 0)
+                                    for vertex in vertices
+                                )
+                                for width in (1, 2, 4, 8)
+                            )
+                            all_locations_uniform *= uniform
+                        eligible = (
+                            endpoint_count
+                            if layout == "same_start"
+                            else endpoint_count - all_locations_uniform
+                        )
+                        generated += eligible
+                        excluded["excluded_unsatisfiable_value_layout"] += endpoint_count - eligible
+                        continue
 
-            amo_mask = sum(
-                1 << vertex
-                for vertex, category in enumerate(categories)
-                if category == "amo"
-            )
-            structure_ok = _amo_mask_satisfiable(cycle, amo_mask)
-            for layout in self.overlap_layouts:
-                weighted = endpoint_count * len(self.alignments)
-                raw += weighted
-                if not structure_ok or layout == "disjoint_control":
-                    excluded["excluded_unsatisfiable_value_layout"] += weighted
-                    continue
-                eligible = (
-                    endpoint_count
-                    if layout == "same_start"
-                    else mixed_width_count
-                ) * len(self.alignments)
-                generated += eligible
-                excluded["excluded_unsatisfiable_value_layout"] += weighted - eligible
+                    if "amo" in categories:
+                        excluded["excluded_unsupported_misaligned_amo_fusion"] += endpoint_count
+                        continue
+                    if layout == "disjoint_control":
+                        excluded["excluded_unsatisfiable_value_layout"] += endpoint_count
+                        continue
+                    locations = location_ids(cycle.edges)
+                    valid = 1
+                    for location in sorted(set(locations)):
+                        vertices = tuple(
+                            vertex
+                            for vertex, actual in enumerate(locations)
+                            if actual == location
+                        )
+                        group_counts = tuple(width_counts[vertex] for vertex in vertices)
+                        group_valid = _weighted_misaligned_group_count(
+                            tuple(categories[vertex] for vertex in vertices),
+                            tuple(
+                                tuple(sorted(counts.items()))
+                                for counts in group_counts
+                            ),
+                            layout,
+                        )
+                        valid *= group_valid
+                    generated += valid
+                    excluded["excluded_unsatisfiable_misaligned_layout"] += endpoint_count - valid
         return {
             "raw": raw,
             "generated": generated,
@@ -738,7 +1006,7 @@ class VectorNativeDomain:
                 if not self._composition_allowed(choices):
                     continue
                 try:
-                    self._layout_for(cycle, choices, overlap_layout)
+                    self._layout_for(cycle, choices, alignment, overlap_layout)
                 except FusionLayoutError:
                     continue
                 return VectorAssignment(
@@ -782,12 +1050,14 @@ class VectorNativeDomain:
         self,
         cycle: NativeCycle,
         choices: Sequence[EndpointChoice],
+        alignment: str,
         layout: str,
     ) -> FusionAddressLayout:
         return _cached_fusion_layout(
             _cycle_structure_key(cycle),
             tuple(choice.category for choice in choices),
             tuple(choice.width_bytes for choice in choices),
+            alignment,
             layout,
         )
 
@@ -807,7 +1077,7 @@ class VectorNativeDomain:
                         if not self._composition_allowed(choices):
                             continue
                         try:
-                            self._layout_for(cycle, choices, overlap_layout)
+                            self._layout_for(cycle, choices, alignment, overlap_layout)
                         except FusionLayoutError:
                             continue
                         yield VectorAssignment(
@@ -839,7 +1109,14 @@ class VectorNativeDomain:
                 "pbmt": 0,
                 "attribute": "cacheable",
                 "pma_atomic": True,
-                "natural_alignment": True,
+                "vector_alignment": list(self.alignments),
+                "misaligned_atomicity": (
+                    "byte_level_no_mag"
+                    if any(value != "aligned" for value in self.alignments)
+                    else "not_requested"
+                ),
+                "scalar_alignment": "natural",
+                "amo_alignment": "natural",
             },
             "raw_combinations": raw,
             "total_cases": self.total_cases,
@@ -1136,6 +1413,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         _cycle_structure_key(assignment.cycle),
         tuple(choice.category for choice in assignment.choices),
         tuple(choice.width_bytes for choice in assignment.choices),
+        assignment.alignment,
         assignment.overlap_layout,
     )
     value_plan = synthesize_fusion_values(
@@ -1219,11 +1497,22 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                 _rebase_vector(_vector_instruction(combination), vector_base),
                 register_map,
             )
+            atomicity_model = (
+                "aligned_atomic"
+                if assignment.alignment == "aligned"
+                else "byte_level_no_mag"
+            )
             vector_access = MemoryAccess.create(
                 event.location,
                 offset,
                 element_bytes,
-                "aligned_atomic",
+                atomicity_model,
+                transaction_kind="vector_element",
+                parent_instruction=event.event_id,
+                element_index=0,
+                field_index=(
+                    0 if choice.vector_form.startswith("segment_") else None
+                ),
             )
             if event.kind == "store":
                 expanded.extend(
@@ -1288,8 +1577,9 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             metadata.update(
                 {
                     "base_offset_bytes": offset,
-                    "alignment": "aligned",
-                    "atomicity_model": "aligned_atomic",
+                    "alignment": assignment.alignment,
+                    "atomicity_model": atomicity_model,
+                    "boundary": vector_access.boundary,
                     "footprint": footprint,
                 }
             )
@@ -1299,7 +1589,15 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
     exists = _fusion_exists(case, value_plan)
     cycle_labels = tuple(edge.label for edge in assignment.cycle.edges)
     cycle_text = " ".join(cycle_labels)
-    endpoint_choices = [choice.to_json() for choice in assignment.choices]
+    endpoint_choices = []
+    for choice in assignment.choices:
+        rendered_choice = choice.to_json()
+        if choice.category == "vector":
+            rendered_choice["params"] = {
+                **dict(rendered_choice.get("params") or {}),
+                "alignment": assignment.alignment,
+            }
+        endpoint_choices.append(rendered_choice)
     identity = vector_native_case_identity(
         assignment.cycle.family or "Cycle",
         assignment.cycle.to_json(),
@@ -1368,7 +1666,13 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
         combination_name=name,
         variant="vector-native-cycle",
         cycle=cycle_text,
-        model="rvwmo-vector-elements" if formal else "rvwmo-vector-mixed-observation",
+        model=(
+            "rvwmo-vector-elements-byte-level-no-mag"
+            if formal and assignment.alignment != "aligned"
+            else "rvwmo-vector-elements"
+            if formal
+            else "rvwmo-vector-mixed-observation"
+        ),
         expected_outcome="solver_required" if formal else "manual_oracle_required",
         description="Relation-cycle driven scalar/AMO/Vector Litmus case.",
         tags=[*case.tags, "vector-native", "multi-endpoint"],
@@ -1973,18 +2277,11 @@ def _fusion_request_audit(
     excluded: Counter[str] = Counter()
     supported_scope = True
 
-    misaligned = sum(
-        alignment != "aligned" for alignment in requested_alignments
-    )
-    if misaligned:
-        reason = (
-            "excluded_illegal_misaligned_amo_request"
-            if "amo" in categories
-            else "excluded_unsupported_misaligned_fusion_request"
-        )
-        excluded[reason] += misaligned
-    if "aligned" not in requested_alignments:
-        supported_scope = False
+    # Vector misalignment is part of the generated domain.  Combinations that
+    # also select an AMO endpoint are excluded per assignment, so a request can
+    # still contain both aligned and misaligned modes without losing its legal
+    # Vector-only or Vector+scalar members.
+    del categories, requested_alignments
 
     raw_attributes = payload.get("attributes", payload.get("attribute"))
     if raw_attributes is not None:
@@ -2328,16 +2625,32 @@ def _replace_registers(instruction: str, replacements: Mapping[str, str]) -> str
 
 
 def _formal_scope(case: LitmusCaseIR, assignment: VectorAssignment) -> tuple[bool, str]:
-    if assignment.alignment != "aligned":
+    if assignment.alignment != "aligned" and any(
+        choice.category == "amo" for choice in assignment.choices
+    ):
         return (
             False,
-            "Misaligned Vector/scalar/AMO fusion is outside the Nanhu aligned formal domain.",
+            "Misaligned Vector/AMO fusion is outside the current formal domain.",
         )
     for event in case.events():
         if event.kind not in {"load", "store", "amo"} or not event.location:
             continue
-        if event.memory_access is None or not event.memory_access.natural_aligned:
-            return False, f"Memory event {event.event_id} is not naturally aligned."
+        if event.memory_access is None:
+            return False, f"Memory event {event.event_id} has no byte footprint."
+        vector_event = event.memory_access.transaction_kind == "vector_element"
+        if vector_event:
+            expected_atomicity = (
+                "aligned_atomic"
+                if assignment.alignment == "aligned"
+                else "byte_level_no_mag"
+            )
+            if event.memory_access.atomicity_model != expected_atomicity:
+                return (
+                    False,
+                    f"Vector event {event.event_id} has inconsistent atomicity metadata.",
+                )
+        elif not event.memory_access.natural_aligned:
+            return False, f"Scalar/AMO event {event.event_id} is not naturally aligned."
         if event.kind == "amo" and event.memory_access.size_bytes not in {4, 8}:
             return False, f"AMO event {event.event_id} is not a Nanhu W/D AMO."
     metadata = case.metadata.get("vectors")
@@ -2345,10 +2658,18 @@ def _formal_scope(case: LitmusCaseIR, assignment: VectorAssignment) -> tuple[boo
         for event_id, raw in metadata.items():
             if isinstance(raw, Mapping) and raw.get("footprint") == "cross_page":
                 return False, f"Vector event {event_id} crosses the formal 4 KiB page."
-    return (
-        True,
-        "Nanhu aligned fusion: PBMT=0, cacheable main memory, PMA atomic=true; "
-        "mixed-size byte overlap and W/D AMO transactions are modeled by the Vector-aware RVWMO solver.",
+    if assignment.alignment == "aligned":
+        detail = (
+            "naturally aligned Vector elements, mixed-size byte overlap, and W/D AMO transactions"
+        )
+    else:
+        detail = (
+            f"{assignment.alignment} Vector elements use byte-level no-MAG component operations; "
+            "scalar endpoints remain naturally aligned"
+        )
+    return True, (
+        "Nanhu cacheable main-memory fusion with PBMT=0 and PMA atomic=true: "
+        f"{detail} are modeled by the Vector-aware RVWMO solver."
     )
 
 

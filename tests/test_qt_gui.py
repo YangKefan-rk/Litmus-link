@@ -274,8 +274,13 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         assert filtered["verification_effort"] == "interactive"
         assert filtered["solver_workers"] == 16
         assert set(filtered["mechanisms"]) == {"po", "fence", "dependency"}
-        assert filtered["alignments"] == ["aligned"]
-        assert "alignments" not in ui.vector_checks
+        assert filtered["alignments"] == [
+            "aligned",
+            "misalign_same16",
+            "misalign_cross16",
+            "misalign_cross64",
+        ]
+        assert "alignments" in ui.vector_checks
         assert ui.window.findChild(QtWidgets.QGroupBox, "VectorScopeGroup") is None
         assert ui.window.findChild(QtWidgets.QGroupBox, "VectorBasicConfiguration") is not None
 
