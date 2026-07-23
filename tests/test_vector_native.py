@@ -302,8 +302,8 @@ def test_interactive_crosscheck_is_bounded_and_progress_is_classified(
 
     assert len(cases) == 6
     assert external_flags == [True, True, True, True, False, False]
-    assert all(limits["max_memory_events"] == 24 for limits in received_limits)
-    assert all(limits["timeout_seconds"] == 0.05 for limits in received_limits)
+    assert all(limits["max_memory_events"] == 192 for limits in received_limits)
+    assert all(limits["timeout_seconds"] == 1.0 for limits in received_limits)
     assert audit["verification_effort"] == "interactive"
     assert audit["external_status"] == {"agree": 4, "batch_limit_skipped": 2}
     assert cases[-1].solver["cross_check"] == "batch_limit_skipped"
@@ -312,7 +312,24 @@ def test_interactive_crosscheck_is_bounded_and_progress_is_classified(
     assert "herd-skipped=2" in progress[-1][2]
 
 
-def test_vector_candidate_limit_is_inconclusive_not_forbidden() -> None:
+def test_embedded_preview_uses_parallel_solver_workers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("LITMUS_LINK_SOLVER_WORKERS", "2")
+    monkeypatch.setattr(vector_native, "_PARALLEL_SOLVER_THRESHOLD", 4)
+    cases, audit = sample_vector_cases(
+        _small_payload(
+            sample_limit=4,
+            solver_backend="embedded",
+            verification_effort="interactive",
+        ),
+        compute_verdicts=True,
+    )
+    assert len(cases) == 4
+    assert audit["solver_workers"] == 2
+    assert sum(audit["solver_status"].values()) == 4
+    assert all(case.solver["status"] in {"verified", "inconclusive"} for case in cases)
+
+
+def test_vector_search_limit_is_inconclusive_not_forbidden() -> None:
     cycles = native_template_cycles(["SB"], ["fence"])[0]
     cycle = next(
         cycle
@@ -328,7 +345,7 @@ def test_vector_candidate_limit_is_inconclusive_not_forbidden() -> None:
         _vector_choice(directions[3]),
     )
     case = lower_vector_assignment(VectorAssignment(cycle, choices))
-    verdict = solve_vector_case(case.case_ir, max_candidates=1)
+    verdict = solve_vector_case(case.case_ir, max_search_steps=1)
     assert verdict.status == "inconclusive"
     assert verdict.verdict == "unknown"
     assert verdict.allowed is None
@@ -662,6 +679,27 @@ def test_exhaustive_generation_writes_every_legal_assignment(tmp_path) -> None: 
     assert all(re.fullmatch(r"LLV-CoRR-[0-9a-f]{64}\.litmus", entry) for entry in entries)
     assert len(validate_path(out / "@all")) == domain.total_cases
     assert progress[-1] == (domain.total_cases, domain.total_cases)
+
+
+def test_sampled_generation_uses_bounded_parallel_solver(
+    tmp_path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("LITMUS_LINK_SOLVER_WORKERS", "2")
+    monkeypatch.setattr(vector_native, "_PARALLEL_SOLVER_THRESHOLD", 4)
+    payload = _small_payload(
+        generation_mode="balanced",
+        generate_limit=4,
+        compute_verdicts=True,
+        solver_backend="embedded",
+        verification_effort="interactive",
+    )
+    out = tmp_path / "parallel-vector"
+    report = generate_vector_cases(payload, out)
+    assert report["generated_litmus"] == 4
+    assert report["solver_workers"] == 2
+    assert len((out / "@all").read_text(encoding="utf-8").splitlines()) == 4
+    assert sum(report["solver"].values()) == 4
 
 
 def test_generation_refuses_identity_collision(tmp_path) -> None:  # type: ignore[no-untyped-def]

@@ -17,12 +17,10 @@ machines.  ``herd7`` remains a valuable differential oracle and the native
 generation path can request both backends.
 """
 
-import itertools
 import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
-from math import factorial
 from typing import Iterable, Iterator, Mapping, Sequence
 
 from .amo import AmoError, AmoSpec, apply_amo, parse_amo_mnemonic
@@ -149,6 +147,7 @@ class Execution:
     rf_bytes: ByteRelation = field(default_factory=set)
     co_bytes: ByteRelation = field(default_factory=set)
     fr_bytes: ByteRelation = field(default_factory=set)
+    partial: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -168,6 +167,7 @@ class Execution:
                 "co": _byte_pairs_json(self.co_bytes),
                 "fr": _byte_pairs_json(self.fr_bytes),
             },
+            "partial": self.partial,
         }
 
 
@@ -175,6 +175,16 @@ class Execution:
 class _CandidateRelation:
     relation: Relation
     bytes: ByteRelation
+    partial: bool = False
+
+
+@dataclass(frozen=True)
+class _CoCandidate:
+    relation: Relation
+    bytes: ByteRelation
+    successors: Mapping[tuple[str, str], frozenset[str]]
+    immediate_predecessors: Mapping[tuple[str, str], str]
+    latest_by_location: Mapping[str, str]
 
 
 @dataclass
@@ -182,6 +192,7 @@ class _SearchBudget:
     deadline: float
     max_steps: int
     steps: int = 0
+    next_deadline_check: int = 0
 
     def checkpoint(self, units: int = 1) -> None:
         if units < 1:
@@ -189,8 +200,13 @@ class _SearchBudget:
         self.steps += units
         if self.steps > self.max_steps:
             raise _SearchLimit("search_step_limit")
-        if time.monotonic() >= self.deadline:
-            raise _SearchLimit("timeout")
+        # monotonic() is comparatively expensive in the solver's innermost
+        # graph loops.  Checking every 64 logical steps keeps timeout drift
+        # negligible while avoiding hundreds of thousands of system calls.
+        if self.steps >= self.next_deadline_check:
+            if time.monotonic() >= self.deadline:
+                raise _SearchLimit("timeout")
+            self.next_deadline_check = self.steps + 64
 
 
 @dataclass(frozen=True)
@@ -276,6 +292,8 @@ def solve_rvwmo(
             selected_ordering.preserved_order,
             budget,
         )
+        invariant_ppo_rules = _ppo_invariant_relations(events, static, budget)
+        invariant_ppo = set().union(*invariant_ppo_rules.values())
     except RvwmoSolverError as exc:
         return EmbeddedVerdict(
             status="not_applicable",
@@ -297,21 +315,64 @@ def solve_rvwmo(
     last_execution: Execution | None = None
     last_resolved_events = events
     try:
-        for co in _co_candidates(events, budget):
+        for co in _co_candidates(
+            events,
+            budget,
+            (static.po_loc, invariant_ppo),
+        ):
             budget.checkpoint()
+            cycle = _find_cycle(co.relation | static.po_loc, budget)
+            if cycle:
+                violations["Coherence"] += 1
+                examples.setdefault("Coherence", cycle)
+                continue
+            cycle = _find_cycle(co.relation | invariant_ppo, budget)
+            if cycle:
+                violations["Model"] += 1
+                examples.setdefault("Model", cycle)
+                continue
             resolved_events = _resolve_amo_transactions(events, co, budget)
             if resolved_events is None:
                 continue
             last_resolved_events = resolved_events
             if not _final_values_match(resolved_events, co, final_values, budget):
                 continue
-            for rf in _rf_candidates(resolved_events, co, budget):
+            for rf in _rf_candidates(
+                resolved_events,
+                co,
+                budget,
+                static,
+                invariant_ppo,
+            ):
                 budget.checkpoint()
+                if rf.partial:
+                    execution, failure, cycle = _check_execution(
+                        resolved_events,
+                        static,
+                        rf,
+                        co,
+                        budget,
+                        invariant_ppo_rules,
+                    )
+                    last_execution = execution
+                    if failure is None:
+                        raise RvwmoSolverError(
+                            "partial reads-from pruning did not reproduce its cycle"
+                        )
+                    violations[failure] += 1
+                    if cycle and failure not in examples:
+                        examples[failure] = cycle
+                    continue
                 candidates += 1
                 if candidates > max_candidates:
                     raise _SearchLimit("candidate_limit")
                 execution, failure, cycle = _check_execution(
-                    resolved_events, static, rf, co, budget
+                    resolved_events,
+                    static,
+                    rf,
+                    co,
+                    budget,
+                    invariant_ppo_rules,
                 )
                 last_execution = execution
                 if failure is None:
@@ -913,63 +974,164 @@ def _fence_orders(pred: str, succ: str, left: MemoryEvent, right: MemoryEvent) -
 
 def _rf_candidates(
     events: Sequence[MemoryEvent],
-    co: _CandidateRelation,
+    co: _CoCandidate,
     budget: _SearchBudget,
+    static: _StaticRelations | None = None,
+    invariant_ppo: Relation | None = None,
 ) -> Iterator[_CandidateRelation]:
     writes = [event for event in events if event.write]
     reads = [event for event in events if event.read and not event.initial]
-    choices: list[list[ByteEdge]] = []
+    writes_by_location: dict[str, list[MemoryEvent]] = defaultdict(list)
+    for write in writes:
+        for location, _value in write.write_bytes:
+            writes_by_location[location].append(write)
+
+    # Keep each transaction's byte choices together.  The old Cartesian
+    # product built every byte assignment and only afterwards discarded
+    # assignments containing rf/fr two-cycles.  Rejecting that condition as
+    # soon as it becomes inevitable removes the dominant exponential waste in
+    # mixed-size and Vector cases without removing any legal execution.
+    groups: list[tuple[str, list[list[tuple[ByteEdge, frozenset[str]]]]]] = []
     for read in reads:
+        byte_choices: list[list[tuple[ByteEdge, frozenset[str]]]] = []
         for location, read_value in read.read_bytes:
             budget.checkpoint()
             if read.amo:
-                predecessor = _immediate_co_predecessor(
-                    read.event_id, location, co.bytes, budget
+                predecessor = co.immediate_predecessors.get(
+                    (read.event_id, location)
                 )
-                sources = []
-                for write in writes:
-                    budget.checkpoint()
-                    if (
-                        write.event_id == predecessor
-                        and write.write_byte_value(location) == read_value
-                    ):
-                        sources.append(write)
+                sources = [
+                    write
+                    for write in writes_by_location.get(location, ())
+                    if write.event_id == predecessor
+                    and write.write_byte_value(location) == read_value
+                ]
             else:
-                sources = []
-                for write in writes:
-                    budget.checkpoint()
-                    if (
-                        write.writes_byte(location)
-                        and write.event_id != read.event_id
-                        and (
-                            read_value is None
-                            or write.write_byte_value(location) == read_value
-                        )
-                    ):
-                        sources.append(write)
+                sources = [
+                    write
+                    for write in writes_by_location.get(location, ())
+                    if write.event_id != read.event_id
+                    and (
+                        read_value is None
+                        or write.write_byte_value(location) == read_value
+                    )
+                ]
+            budget.checkpoint(max(1, len(writes_by_location.get(location, ()))))
             if not sources:
                 return
-            choices.append(
-                [(write.event_id, read.event_id, location) for write in sources]
+            byte_choices.append(
+                [
+                    (
+                        (write.event_id, read.event_id, location),
+                        co.successors.get(
+                            (write.event_id, location), frozenset()
+                        ) - {read.event_id},
+                    )
+                    for write in sources
+                ]
             )
-    for selected in itertools.product(*choices):
-        budget.checkpoint()
-        byte_edges = set(selected)
-        fr_bytes = _from_read_bytes(byte_edges, co.bytes, budget)
-        rf_pairs = {(write, read) for write, read, _location in byte_edges}
-        fr_pairs = {(read, write) for read, write, _location in fr_bytes}
-        if rf_pairs & {(write, read) for read, write in fr_pairs}:
-            continue
-        yield _CandidateRelation(
-            rf_pairs,
-            byte_edges,
+        byte_choices.sort(key=len)
+        groups.append((read.event_id, byte_choices))
+    groups.sort(
+        key=lambda item: (
+            _choice_product_size(item[1]),
+            item[0],
         )
+    )
+
+    selected: list[ByteEdge] = []
+
+    def partial_execution_has_cycle() -> bool:
+        if static is None:
+            return False
+        rf_pairs = {(write, read) for write, read, _location in selected}
+        fr_pairs = {
+            (read, later)
+            for source, read, location in selected
+            for later in co.successors.get((source, location), ())
+            if later != read
+        }
+        if _find_cycle(
+            co.relation | static.po_loc | rf_pairs | fr_pairs,
+            budget,
+        ) is not None:
+            return True
+        rfe = {
+            (write, read)
+            for write, read in rf_pairs
+            if static.event_map[write].hart != static.event_map[read].hart
+        }
+        return _find_cycle(
+            co.relation | (invariant_ppo or set()) | rfe | fr_pairs,
+            budget,
+        ) is not None
+
+    def assign_group(group_index: int) -> Iterator[_CandidateRelation]:
+        budget.checkpoint()
+        if group_index == len(groups):
+            byte_edges = set(selected)
+            yield _CandidateRelation(
+                {(write, read) for write, read, _location in byte_edges},
+                byte_edges,
+            )
+            return
+
+        _read_id, byte_domains = groups[group_index]
+        sources: set[str] = set()
+        fr_targets: set[str] = set()
+
+        def assign_byte(byte_index: int) -> Iterator[_CandidateRelation]:
+            budget.checkpoint()
+            if byte_index == len(byte_domains):
+                if partial_execution_has_cycle():
+                    byte_edges = set(selected)
+                    yield _CandidateRelation(
+                        {
+                            (write, read)
+                            for write, read, _location in byte_edges
+                        },
+                        byte_edges,
+                        partial=True,
+                    )
+                    return
+                yield from assign_group(group_index + 1)
+                return
+            for edge, later_writes in byte_domains[byte_index]:
+                budget.checkpoint()
+                source = edge[0]
+                if source in fr_targets or sources & later_writes:
+                    continue
+                old_sources = set(sources)
+                old_targets = set(fr_targets)
+                sources.add(source)
+                fr_targets.update(later_writes)
+                selected.append(edge)
+                yield from assign_byte(byte_index + 1)
+                selected.pop()
+                sources.clear()
+                sources.update(old_sources)
+                fr_targets.clear()
+                fr_targets.update(old_targets)
+
+        yield from assign_byte(0)
+
+    yield from assign_group(0)
+
+
+def _choice_product_size(
+    choices: Sequence[Sequence[object]],
+) -> int:
+    size = 1
+    for choice in choices:
+        size *= len(choice)
+    return size
 
 
 def _co_candidates(
     events: Sequence[MemoryEvent],
     budget: _SearchBudget,
-) -> Iterator[_CandidateRelation]:
+    acyclic_bases: Sequence[Relation] = (),
+) -> Iterator[_CoCandidate]:
     event_map = {event.event_id: event for event in events}
     by_location: dict[str, list[str]] = defaultdict(list)
     initial_by_location: dict[str, str] = {}
@@ -993,14 +1155,21 @@ def _co_candidates(
         if _overlap(event_map[left], event_map[right])
     )
     budget.checkpoint(max(1, len(normal) * max(len(normal) - 1, 0) // 2))
-    components = _write_components(normal, overlap_pairs)
-    orientation_domains = [
-        tuple(_component_orientations(component, overlap_pairs, budget))
-        for component in components
+    components = [
+        component
+        for component in _write_components(normal, overlap_pairs)
+        if len(component) > 1
     ]
-    for selected in itertools.product(*orientation_domains):
+    components.sort(
+        key=lambda component: sum(
+            left in component and right in component
+            for left, right in overlap_pairs
+        ),
+        reverse=True,
+    )
+
+    def build_candidate(normal_order: Relation) -> _CoCandidate:
         budget.checkpoint()
-        normal_order = set().union(*selected) if selected else set()
         byte_edges: ByteRelation = set()
         for location, writers in sorted(by_location.items()):
             budget.checkpoint()
@@ -1012,15 +1181,59 @@ def _co_candidates(
                 for left, right in normal_order
                 if left in active and right in active
             )
-        yield _CandidateRelation(
+        successors: dict[tuple[str, str], frozenset[str]] = {}
+        immediate_predecessors: dict[tuple[str, str], str] = {}
+        latest_by_location: dict[str, str] = {}
+        for location, writers in sorted(by_location.items()):
+            initial = initial_by_location[location]
+            active = [writer for writer in writers if writer != initial]
+            ordered = [initial] + sorted(
+                active,
+                key=lambda writer: sum(
+                    (other, writer) in normal_order
+                    for other in active
+                    if other != writer
+                ),
+            )
+            for index, writer in enumerate(ordered):
+                successors[(writer, location)] = frozenset(ordered[index + 1 :])
+                if index:
+                    immediate_predecessors[(writer, location)] = ordered[index - 1]
+            latest_by_location[location] = ordered[-1]
+        return _CoCandidate(
             {(left, right) for left, right, _location in byte_edges},
             byte_edges,
+            successors,
+            immediate_predecessors,
+            latest_by_location,
         )
+
+    def assign_component(
+        component_index: int,
+        normal_order: Relation,
+    ) -> Iterator[_CoCandidate]:
+        budget.checkpoint()
+        if component_index == len(components):
+            yield build_candidate(normal_order)
+            return
+        component = components[component_index]
+        for orientation in _component_orientations(
+            component, overlap_pairs, budget
+        ):
+            combined = normal_order | orientation
+            if any(
+                _find_cycle(base | combined, budget) is not None
+                for base in acyclic_bases
+            ):
+                continue
+            yield from assign_component(component_index + 1, combined)
+
+    yield from assign_component(0, set())
 
 
 def _resolve_amo_transactions(
     events: Sequence[MemoryEvent],
-    co: _CandidateRelation,
+    co: _CoCandidate,
     budget: _SearchBudget,
 ) -> tuple[MemoryEvent, ...] | None:
     """Evaluate AMOs from their immediate coherence predecessors.
@@ -1042,7 +1255,7 @@ def _resolve_amo_transactions(
             budget.checkpoint()
             event = resolved[event_id]
             predecessors = tuple(
-                _immediate_co_predecessor(event_id, location, co.bytes, budget)
+                co.immediate_predecessors.get((event_id, location))
                 for location in event.footprint
             )
             if any(source is None for source in predecessors):
@@ -1112,7 +1325,7 @@ def _immediate_co_predecessor(
 
 def _final_values_match(
     events: Sequence[MemoryEvent],
-    co: _CandidateRelation,
+    co: _CoCandidate,
     final_values: Mapping[str, int],
     budget: _SearchBudget,
 ) -> bool:
@@ -1123,8 +1336,7 @@ def _final_values_match(
         target = _final_byte_value(final_values, location)
         if target is None:
             continue
-        writers = [event.event_id for event in events if event.writes_byte(location)]
-        latest = _latest_byte_write(writers, location, co.bytes, budget)
+        latest = co.latest_by_location.get(location)
         if latest is None or event_map[latest].write_byte_value(location) != target:
             return False
     return True
@@ -1194,27 +1406,21 @@ def _component_orientations(
     if not pairs:
         yield set()
         return
-    if factorial(len(component)) <= 2 ** len(pairs):
-        seen: set[frozenset[Pair]] = set()
-        for permutation in itertools.permutations(component):
-            budget.checkpoint()
-            position = {event: index for index, event in enumerate(permutation)}
-            relation = frozenset(
-                (left, right) if position[left] < position[right] else (right, left)
-                for left, right in pairs
-            )
-            if relation not in seen:
-                seen.add(relation)
-                yield set(relation)
-        return
-    for bits in itertools.product((False, True), repeat=len(pairs)):
+    relation: Relation = set()
+
+    def orient(pair_index: int) -> Iterator[Relation]:
         budget.checkpoint()
-        relation = {
-            (right, left) if reverse else (left, right)
-            for (left, right), reverse in zip(pairs, bits)
-        }
-        if _find_cycle(relation, budget) is None:
-            yield relation
+        if pair_index == len(pairs):
+            yield set(relation)
+            return
+        left, right = pairs[pair_index]
+        for edge in ((left, right), (right, left)):
+            relation.add(edge)
+            if _find_cycle(relation, budget) is None:
+                yield from orient(pair_index + 1)
+            relation.remove(edge)
+
+    yield from orient(0)
 
 
 def _latest_write(writes: Sequence[str], ordering: Relation) -> str:
@@ -1232,13 +1438,19 @@ def _check_execution(
     events: Sequence[MemoryEvent],
     static: _StaticRelations,
     rf_candidate: _CandidateRelation,
-    co_candidate: _CandidateRelation,
+    co_candidate: _CoCandidate,
     budget: _SearchBudget,
+    invariant_ppo_rules: Mapping[str, Relation],
 ) -> tuple[Execution, str | None, tuple[str, ...] | None]:
     event_map = static.event_map
     rf = rf_candidate.relation
     co = co_candidate.relation
-    fr_bytes = _from_read_bytes(rf_candidate.bytes, co_candidate.bytes, budget)
+    fr_bytes = _from_read_bytes(
+        rf_candidate.bytes,
+        co_candidate.bytes,
+        budget,
+        co_candidate.successors,
+    )
     fr = {(read, write) for read, write, _location in fr_bytes}
     rfe = {
         (write, read) for write, read in rf
@@ -1260,6 +1472,7 @@ def _check_execution(
         rfi,
         rf_candidate.bytes,
         budget,
+        invariant_ppo_rules,
     )
     ppo = set().union(*ppo_rules.values()) if ppo_rules else set()
     execution = Execution(
@@ -1273,6 +1486,7 @@ def _check_execution(
         set(rf_candidate.bytes),
         set(co_candidate.bytes),
         fr_bytes,
+        rf_candidate.partial,
     )
 
     coherence = co | rf | fr | static.po_loc
@@ -1283,7 +1497,7 @@ def _check_execution(
     cycle = _find_cycle(model, budget)
     if cycle:
         return execution, "Model", cycle
-    if not _atomicity_ok(events, rf_candidate.bytes, co_candidate.bytes, budget):
+    if not _atomicity_ok(events, rf_candidate.bytes, co_candidate, budget):
         # Report the equivalent cat relation when possible.
         atomic_pairs = _compose(fre, coe)
         cycle = tuple(next(iter(atomic_pairs))) if atomic_pairs else None
@@ -1295,12 +1509,17 @@ def _from_read_bytes(
     rf: ByteRelation,
     co: ByteRelation,
     budget: _SearchBudget | None = None,
+    co_successors: Mapping[tuple[str, str], frozenset[str]] | None = None,
 ) -> ByteRelation:
-    successors: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for before, after, location in co:
-        if budget is not None:
-            budget.checkpoint()
-        successors[(before, location)].add(after)
+    if co_successors is None:
+        built_successors: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for before, after, location in co:
+            if budget is not None:
+                budget.checkpoint()
+            built_successors[(before, location)].add(after)
+        successors: Mapping[tuple[str, str], Iterable[str]] = built_successors
+    else:
+        successors = co_successors
     result: ByteRelation = set()
     for source, read, location in rf:
         if budget is not None:
@@ -1313,6 +1532,77 @@ def _from_read_bytes(
     return result
 
 
+def _ppo_invariant_relations(
+    events: Sequence[MemoryEvent],
+    static: _StaticRelations,
+    budget: _SearchBudget,
+) -> dict[str, Relation]:
+    """Build PPO rules that do not depend on the selected reads-from edges."""
+
+    budget.checkpoint(max(1, len(events)))
+    reads = {event.event_id for event in events if event.read and not event.initial}
+    writes = {event.event_id for event in events if event.write and not event.initial}
+    memory = reads | writes
+    aq = {event.event_id for event in events if event.aq}
+    rl = {event.event_id for event in events if event.rl}
+    rcsc = {event.event_id for event in events if event.rcsc}
+    addr_to_memory = {
+        (left, right)
+        for left, right in static.addr
+        if left in memory and right in memory
+    }
+    return {
+        "r1": {
+            (left, right)
+            for left, right in static.po_loc
+            if left in memory and right in writes
+        },
+        "r2": set(),
+        "r3": set(),
+        "r4": set(static.fence),
+        "r5": {
+            (left, right)
+            for left, right in static.po
+            if left in aq and right in memory
+        },
+        "r6": {
+            (left, right)
+            for left, right in static.po
+            if left in memory and right in rl
+        },
+        "r7": {
+            (left, right)
+            for left, right in static.po
+            if left in rcsc and right in rcsc
+        },
+        # The internal R->W half of an RMW is represented by the immediate-co
+        # atomicity check rather than a self edge.
+        "r8": set(),
+        "r9": addr_to_memory,
+        "r10": {
+            (left, right)
+            for left, right in static.data
+            if left in memory and right in writes
+        },
+        "r11": {
+            (left, right)
+            for left, right in static.ctrl
+            if left in memory and right in writes
+        },
+        "r12": set(),
+        "r13": _compose(
+            addr_to_memory,
+            {
+                (left, right)
+                for left, right in static.po
+                if right in writes
+            },
+            budget,
+        ),
+        "vector-element-order": set(static.preserved_order),
+    }
+
+
 def _ppo_relations(
     events: Sequence[MemoryEvent],
     static: _StaticRelations,
@@ -1320,17 +1610,13 @@ def _ppo_relations(
     rfi: Relation,
     rf_bytes: ByteRelation,
     budget: _SearchBudget,
+    invariant: Mapping[str, Relation] | None = None,
 ) -> dict[str, Relation]:
     budget.checkpoint(max(1, len(events)))
     reads = {event.event_id for event in events if event.read and not event.initial}
     writes = {event.event_id for event in events if event.write and not event.initial}
     memory = reads | writes
     amo = {event.event_id for event in events if event.amo}
-    aq = {event.event_id for event in events if event.aq}
-    rl = {event.event_id for event in events if event.rl}
-    rcsc = {event.event_id for event in events if event.rcsc}
-
-    r1 = {(left, right) for left, right in static.po_loc if left in memory and right in writes}
     po_loc_no_w = {
         (left, right)
         for left, right in static.po_loc
@@ -1349,59 +1635,39 @@ def _ppo_relations(
             static.event_map[left],
             static.event_map[right],
             rf_bytes,
-            events,
+            static.event_map,
             static.po,
             budget,
         )
     }
     r3 = {(left, right) for left, right in rfi if left in amo and right in reads}
-    r4 = set(static.fence)
-    r5 = {(left, right) for left, right in static.po if left in aq and right in memory}
-    r6 = {(left, right) for left, right in static.po if left in memory and right in rl}
-    r7 = {(left, right) for left, right in static.po if left in rcsc and right in rcsc}
-    # r8 is the internal R->W half of an RMW.  MemoryEvent collapses those two
-    # halves into one event, so its ordering effect is represented by the
-    # immediate-co atomicity check rather than a self edge.
-    r8: Relation = set()
-    r9 = {(left, right) for left, right in static.addr if left in memory and right in memory}
-    r10 = {(left, right) for left, right in static.data if left in memory and right in writes}
-    r11 = {(left, right) for left, right in static.ctrl if left in memory and right in writes}
-    dep_to_write = {(left, right) for left, right in static.addr | static.data if left in memory and right in writes}
+    base = {
+        key: set(value)
+        for key, value in (
+            invariant or _ppo_invariant_relations(events, static, budget)
+        ).items()
+    }
+    dep_to_write = {
+        (left, right)
+        for left, right in base["r9"] | base["r10"]
+        if right in writes
+    }
     r12 = _compose(
         dep_to_write,
         {(left, right) for left, right in rfi if right in reads},
         budget,
     )
-    addr_to_memory = {(left, right) for left, right in static.addr if left in memory and right in memory}
-    r13 = _compose(
-        addr_to_memory,
-        {(left, right) for left, right in static.po if right in writes},
-        budget,
-    )
-    r14 = set(static.preserved_order)
-    return {
-        "r1": r1,
-        "r2": r2,
-        "r3": r3,
-        "r4": r4,
-        "r5": r5,
-        "r6": r6,
-        "r7": r7,
-        "r8": r8,
-        "r9": r9,
-        "r10": r10,
-        "r11": r11,
-        "r12": r12,
-        "r13": r13,
-        "vector-element-order": r14,
-    }
+    base["r2"] = r2
+    base["r3"] = r3
+    base["r12"] = r12
+    return base
 
 
 def _loads_read_different_writes(
     left: MemoryEvent,
     right: MemoryEvent,
     rf_bytes: ByteRelation,
-    events: Sequence[MemoryEvent],
+    event_map: Mapping[str, MemoryEvent],
     po: Relation,
     budget: _SearchBudget,
 ) -> bool:
@@ -1414,7 +1680,7 @@ def _loads_read_different_writes(
     }
     writes = {
         event.event_id
-        for event in events
+        for event in event_map.values()
         if event.write and not event.initial
     }
     for location in common:
@@ -1424,9 +1690,7 @@ def _loads_read_different_writes(
         intervening = False
         for middle in writes:
             budget.checkpoint()
-            middle_event = next(
-                event for event in events if event.event_id == middle
-            )
+            middle_event = event_map[middle]
             if (
                 (left.event_id, middle) in po
                 and (middle, right.event_id) in po
@@ -1442,7 +1706,7 @@ def _loads_read_different_writes(
 def _atomicity_ok(
     events: Sequence[MemoryEvent],
     rf: ByteRelation,
-    co: ByteRelation,
+    co: _CoCandidate,
     budget: _SearchBudget,
 ) -> bool:
     source_for_read = {
@@ -1456,8 +1720,8 @@ def _atomicity_ok(
         for location in event.footprint:
             budget.checkpoint()
             source = source_for_read.get((event.event_id, location))
-            if source is None or source != _immediate_co_predecessor(
-                event.event_id, location, co, budget
+            if source is None or source != co.immediate_predecessors.get(
+                (event.event_id, location)
             ):
                 return False
     return True

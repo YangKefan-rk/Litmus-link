@@ -11,12 +11,15 @@ remain the source of fences and dependencies.
 
 import bisect
 import json
+import multiprocessing
+import os
 import random
 import re
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from functools import cached_property, lru_cache
-from itertools import permutations, product
+from itertools import islice, permutations, product
 from math import prod as _product
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -106,27 +109,27 @@ VECTOR_SAMPLING_LABELS = {
 VECTOR_VERIFICATION_EFFORTS = ("interactive", "balanced", "thorough")
 VECTOR_VERIFICATION_LIMITS: Mapping[str, Mapping[str, Any]] = {
     "interactive": {
-        "max_candidates": 5_000,
-        "timeout_seconds": 0.05,
-        "max_search_steps": 25_000,
-        "max_memory_events": 24,
+        "max_candidates": 25_000,
+        "timeout_seconds": 1.0,
+        "max_search_steps": 250_000,
+        "max_memory_events": 192,
         "external_max_projections": 2,
         "external_timeout": 3,
         "external_case_limit": 4,
     },
     "balanced": {
-        "max_candidates": 50_000,
-        "timeout_seconds": 0.5,
-        "max_search_steps": 250_000,
-        "max_memory_events": 48,
+        "max_candidates": 100_000,
+        "timeout_seconds": 2.0,
+        "max_search_steps": 2_000_000,
+        "max_memory_events": 192,
         "external_max_projections": 16,
         "external_timeout": 10,
         "external_case_limit": 32,
     },
     "thorough": {
-        "max_candidates": 100_000,
-        "timeout_seconds": 10.0,
-        "max_search_steps": 1_000_000,
+        "max_candidates": 1_000_000,
+        "timeout_seconds": 30.0,
+        "max_search_steps": 10_000_000,
         "max_memory_events": None,
         "external_max_projections": 64,
         "external_timeout": 30,
@@ -150,13 +153,14 @@ def _amo_mask_satisfiable(cycle: NativeCycle, amo_mask: int) -> bool:
     return _amo_structure_satisfiable(directions, locations, relations, amo_mask)
 
 
+@lru_cache(maxsize=65_536)
 def _cycle_structure_key(
     cycle: NativeCycle,
 ) -> tuple[tuple[str, ...], tuple[int, ...], tuple[str, ...]]:
     """Collapse label-only variants that have identical memory structure."""
 
     return (
-        vertex_directions(cycle.edges),
+        tuple(edge.src for edge in cycle.edges),
         location_ids(cycle.edges),
         tuple(
             edge.relation if edge.relation in {"rf", "fr", "co"} else "local"
@@ -666,10 +670,12 @@ class VectorNativeDomain:
             if quota < 1:
                 sampled[family] = []
                 continue
-            family_domain = replace(self, cycles=family_cycles[family])
             family_seed = _derived_seed(seed, family)
-            sampled[family] = family_domain._coverage_weighted_assignments(
-                quota, family_seed
+            sampled[family] = self._domain_weighted_assignments_from_cycles(
+                family_cycles[family],
+                quota,
+                family_seed,
+                family_totals[family],
             )
 
         # Interleave families so the GUI never shows a long block from one
@@ -686,13 +692,29 @@ class VectorNativeDomain:
     def _domain_weighted_assignments(
         self, limit: int, seed: int
     ) -> list[VectorAssignment]:
+        return self._domain_weighted_assignments_from_cycles(
+            self.cycles,
+            limit,
+            seed,
+            self.total_cases,
+        )
+
+    def _domain_weighted_assignments_from_cycles(
+        self,
+        cycles: Sequence[NativeCycle],
+        limit: int,
+        seed: int,
+        total: int | None = None,
+    ) -> list[VectorAssignment]:
         if limit < 1:
             return []
-        total = self.total_cases
+        selected_cycles = tuple(cycles)
+        if total is None:
+            total = sum(self.count_for_cycle(cycle) for cycle in selected_cycles)
         if total < 1:
             return []
         target = min(limit, total)
-        weights = [self.count_for_cycle(cycle) for cycle in self.cycles]
+        weights = [self.count_for_cycle(cycle) for cycle in selected_cycles]
         cumulative: list[int] = []
         running = 0
         for weight in weights:
@@ -727,11 +749,11 @@ class VectorNativeDomain:
         while len(selected) < target and attempts < max_attempts:
             attempts += 1
             cycle_index = bisect.bisect_right(cumulative, rng.randrange(total))
-            assignment = random_assignment(self.cycles[cycle_index])
+            assignment = random_assignment(selected_cycles[cycle_index])
             selected.setdefault(assignment.key, assignment)
 
         if len(selected) < target:
-            for assignment in self.assignments():
+            for assignment in self._assignments_for_cycles(selected_cycles):
                 selected.setdefault(assignment.key, assignment)
                 if len(selected) >= target:
                     break
@@ -766,7 +788,13 @@ class VectorNativeDomain:
         )
 
     def assignments(self) -> Iterator[VectorAssignment]:
-        for cycle in self.cycles:
+        yield from self._assignments_for_cycles(self.cycles)
+
+    def _assignments_for_cycles(
+        self,
+        cycles: Sequence[NativeCycle],
+    ) -> Iterator[VectorAssignment]:
+        for cycle in cycles:
             directions = vertex_directions(cycle.edges)
             for alignment in self.alignments:
                 domains = [self.choices_for(direction) for direction in directions]
@@ -1363,6 +1391,37 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
     return generated
 
 
+_PARALLEL_SOLVER_THRESHOLD = 64
+_MAX_PARALLEL_SOLVER_WORKERS = 8
+
+
+def _embedded_solver_worker(
+    job: tuple[GeneratedCase, Mapping[str, Any]],
+) -> dict[str, Any]:
+    case, limits = job
+    return solve_generated_case(
+        case,
+        vector_external_check=False,
+        vector_solver_limits=limits,
+    ).to_json()
+
+
+def _parallel_solver_workers(case_count: int) -> int:
+    if case_count < _PARALLEL_SOLVER_THRESHOLD:
+        return 1
+    configured = os.environ.get("LITMUS_LINK_SOLVER_WORKERS")
+    if configured is not None:
+        try:
+            requested = int(configured)
+        except ValueError as exc:
+            raise ValueError("LITMUS_LINK_SOLVER_WORKERS must be an integer") from exc
+        if requested < 1:
+            raise ValueError("LITMUS_LINK_SOLVER_WORKERS must be positive")
+    else:
+        requested = max((os.cpu_count() or 2) - 1, 1)
+    return min(requested, _MAX_PARALLEL_SOLVER_WORKERS, case_count)
+
+
 def sample_vector_cases(
     payload: Mapping[str, Any],
     *,
@@ -1404,38 +1463,97 @@ def sample_vector_cases(
     solver_statuses: Counter[str] = Counter()
     external_statuses: Counter[str] = Counter()
     external_attempts = 0
+    parallel_workers = (
+        _parallel_solver_workers(len(assignments))
+        if compute_verdicts and solver_backend == "embedded"
+        else 1
+    )
+    lowered: list[GeneratedCase] = []
     for index, assignment in enumerate(assignments, start=1):
-        case = lower_vector_assignment(assignment)
-        if compute_verdicts:
-            request_external = solver_backend == "crosscheck" and (
-                external_case_limit is None
-                or external_attempts < external_case_limit
+        lowered.append(lower_vector_assignment(assignment))
+        if parallel_workers > 1 and progress_callback is not None:
+            progress_callback(
+                index,
+                total * 2,
+                f"Prepared {index:,}/{len(assignments):,} cases for {parallel_workers} solver workers",
             )
-            solver = solve_generated_case(
-                case,
-                vector_external_check=request_external,
-                vector_solver_limits=solver_limits,
-            ).to_json()
-            external_status = _solver_external_status(solver)
-            if request_external and external_status != "not_run":
-                external_attempts += 1
-            elif (
-                solver_backend == "crosscheck"
-                and not request_external
-                and solver.get("status") == "verified"
-            ):
-                solver = _mark_external_batch_skipped(
-                    solver,
-                    external_case_limit,
+
+    parallel_solvers: list[dict[str, Any] | None] | None = None
+    if parallel_workers > 1:
+        parallel_solvers = [None] * len(lowered)
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=parallel_workers,
+            mp_context=context,
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _embedded_solver_worker,
+                    (case, solver_limits),
+                ): index
+                for index, case in enumerate(lowered)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                case_index = futures[future]
+                solver = future.result()
+                parallel_solvers[case_index] = solver
+                completed += 1
+                status = str(solver.get("status", "unknown") or "unknown")
+                external_status = _solver_external_status(solver)
+                solver_statuses[status] += 1
+                external_statuses[external_status] += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        total + completed,
+                        total * 2,
+                        _verification_progress(
+                            "Verified",
+                            completed,
+                            len(lowered),
+                            solver_statuses,
+                            external_statuses,
+                        ),
+                    )
+
+    for index, case in enumerate(lowered, start=1):
+        if compute_verdicts:
+            if parallel_solvers is not None:
+                selected_solver = parallel_solvers[index - 1]
+                if selected_solver is None:
+                    raise RuntimeError("parallel Vector solver returned no result")
+                solver = selected_solver
+            else:
+                request_external = solver_backend == "crosscheck" and (
+                    external_case_limit is None
+                    or external_attempts < external_case_limit
                 )
+                solver = solve_generated_case(
+                    case,
+                    vector_external_check=request_external,
+                    vector_solver_limits=solver_limits,
+                ).to_json()
+                external_status = _solver_external_status(solver)
+                if request_external and external_status != "not_run":
+                    external_attempts += 1
+                elif (
+                    solver_backend == "crosscheck"
+                    and not request_external
+                    and solver.get("status") == "verified"
+                ):
+                    solver = _mark_external_batch_skipped(
+                        solver,
+                        external_case_limit,
+                    )
         else:
             solver = _unchecked_solver()
         status = str(solver.get("status", "unknown") or "unknown")
         external_status = _solver_external_status(solver)
-        solver_statuses[status] += 1
-        external_statuses[external_status] += 1
+        if parallel_solvers is None:
+            solver_statuses[status] += 1
+            external_statuses[external_status] += 1
         cases.append(replace(case, solver=solver))
-        if progress_callback is not None:
+        if progress_callback is not None and parallel_solvers is None:
             progress_callback(
                 index,
                 total,
@@ -1456,6 +1574,7 @@ def sample_vector_cases(
             "sampling_mode": sampling,
             "sampling": VECTOR_SAMPLING_LABELS[sampling],
             "solver_backend": solver_backend,
+            "solver_workers": parallel_workers,
             "verification_effort": effort,
             "verification_limits": {
                 **solver_limits,
@@ -1512,68 +1631,103 @@ def generate_vector_cases(
     external_attempts = 0
     seen_file_identities: dict[str, Mapping[str, Any]] = {}
     atfile_tmp = out_dir / "@all.tmp"
+    parallel_workers = (
+        _parallel_solver_workers(target)
+        if judge and solver_backend == "embedded"
+        else 1
+    )
+    executor: ProcessPoolExecutor | None = None
     try:
+        if parallel_workers > 1:
+            executor = ProcessPoolExecutor(
+                max_workers=parallel_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
         with atfile_tmp.open("w", encoding="utf-8") as atfile:
-            for index, assignment in enumerate(assignments, start=1):
-                case = lower_vector_assignment(assignment)
-                if judge:
-                    request_external = solver_backend == "crosscheck" and (
-                        external_case_limit is None
-                        or external_attempts < external_case_limit
-                    )
-                    solver = solve_generated_case(
-                        case,
-                        vector_external_check=request_external,
-                        vector_solver_limits=solver_limits,
-                    ).to_json()
-                    external = _solver_external_status(solver)
-                    if request_external and external != "not_run":
-                        external_attempts += 1
-                    elif (
-                        solver_backend == "crosscheck"
-                        and not request_external
-                        and solver.get("status") == "verified"
-                    ):
-                        solver = _mark_external_batch_skipped(
-                            solver,
-                            external_case_limit,
+            assignment_iterator = iter(assignments)
+            batch_size = max(parallel_workers * 8, 1) if executor else 1
+            while True:
+                batch = list(islice(assignment_iterator, batch_size))
+                if not batch:
+                    break
+                batch_cases = [lower_vector_assignment(assignment) for assignment in batch]
+                if executor is not None:
+                    batch_solvers = list(
+                        executor.map(
+                            _embedded_solver_worker,
+                            ((case, solver_limits) for case in batch_cases),
+                            chunksize=1,
                         )
-                else:
-                    solver = _unchecked_solver()
-                case = replace(case, solver=solver)
-                _claim_vector_file_identity(out_dir, case, seen_file_identities)
-                litmus_path = out_dir / case.file_name
-                litmus_path.write_text(case.litmus, encoding="utf-8")
-                (out_dir / f"{case.name}.meta.json").write_text(
-                    json.dumps(case.meta(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-                )
-                (out_dir / f"{case.name}.solver.json").write_text(
-                    json.dumps(solver, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-                )
-                atfile.write(litmus_path.name + "\n")
-                generated_count = index
-                status = str(solver.get("status", "unknown"))
-                solver_statuses[status] = solver_statuses.get(status, 0) + 1
-                verdict = str(solver.get("verdict", "unknown"))
-                solver_verdicts[verdict] = solver_verdicts.get(verdict, 0) + 1
-                external = str(solver.get("cross_check", "not_run") or "not_run")
-                external_statuses[external] = external_statuses.get(external, 0) + 1
-                if progress_callback is not None:
-                    progress_callback(
-                        index,
-                        max(target, 1),
-                        _verification_progress(
-                            "Generated",
-                            index,
-                            target,
-                            solver_statuses,
-                            external_statuses,
-                            file_name=case.file_name,
-                        ),
                     )
+                else:
+                    batch_solvers = []
+                    for case in batch_cases:
+                        if judge:
+                            request_external = solver_backend == "crosscheck" and (
+                                external_case_limit is None
+                                or external_attempts < external_case_limit
+                            )
+                            solver = solve_generated_case(
+                                case,
+                                vector_external_check=request_external,
+                                vector_solver_limits=solver_limits,
+                            ).to_json()
+                            external = _solver_external_status(solver)
+                            if request_external and external != "not_run":
+                                external_attempts += 1
+                            elif (
+                                solver_backend == "crosscheck"
+                                and not request_external
+                                and solver.get("status") == "verified"
+                            ):
+                                solver = _mark_external_batch_skipped(
+                                    solver,
+                                    external_case_limit,
+                                )
+                        else:
+                            solver = _unchecked_solver()
+                        batch_solvers.append(solver)
+
+                for raw_case, solver in zip(batch_cases, batch_solvers):
+                    case = replace(raw_case, solver=solver)
+                    _claim_vector_file_identity(out_dir, case, seen_file_identities)
+                    litmus_path = out_dir / case.file_name
+                    litmus_path.write_text(case.litmus, encoding="utf-8")
+                    (out_dir / f"{case.name}.meta.json").write_text(
+                        json.dumps(case.meta(), indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    (out_dir / f"{case.name}.solver.json").write_text(
+                        json.dumps(solver, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    atfile.write(litmus_path.name + "\n")
+                    generated_count += 1
+                    status = str(solver.get("status", "unknown"))
+                    solver_statuses[status] = solver_statuses.get(status, 0) + 1
+                    verdict = str(solver.get("verdict", "unknown"))
+                    solver_verdicts[verdict] = solver_verdicts.get(verdict, 0) + 1
+                    external = str(solver.get("cross_check", "not_run") or "not_run")
+                    external_statuses[external] = external_statuses.get(external, 0) + 1
+                    if progress_callback is not None:
+                        progress_callback(
+                            generated_count,
+                            max(target, 1),
+                            _verification_progress(
+                                "Generated",
+                                generated_count,
+                                target,
+                                solver_statuses,
+                                external_statuses,
+                                file_name=case.file_name,
+                            ),
+                        )
     except Exception:
         atfile_tmp.unlink(missing_ok=True)
         raise
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     atfile_tmp.replace(out_dir / "@all")
     audit = domain.audit()
     report = {
@@ -1591,6 +1745,7 @@ def generate_vector_cases(
         "solver_verdict": solver_verdicts,
         "external_status": external_statuses,
         "solver_backend": solver_backend,
+        "solver_workers": parallel_workers,
         "verification_effort": effort,
         "verification_limits": {
             **solver_limits,

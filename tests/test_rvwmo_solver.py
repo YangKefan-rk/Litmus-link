@@ -82,14 +82,18 @@ def test_embedded_rvwmo_mp_verdicts(labels: list[str], expected: str) -> None:
     assert verdict.allowed is (expected == "observable")
 
 
-def test_embedded_forbidden_requires_exhaustive_search() -> None:
-    case = _case(["Fence.r.rsWR", "Fre", "Fence.r.rsWW", "Wse"])
+def test_embedded_forbidden_uses_exhaustive_partial_cycle_pruning() -> None:
+    case = _case(["DpAddrsW", "Wse", "Fence.iorw.iorwsWW", "Rfe"])
     complete = solve_rvwmo(case.case_ir, max_candidates=10)
     assert complete.verdict == "forbidden"
-    assert complete.candidates == 2
+    assert complete.candidates == 0
+    assert complete.execution is not None
+    assert complete.execution.partial is True
+    # Candidate limits count complete candidates.  Branches proven cyclic
+    # from a partial rf assignment do not consume that budget.
     limited = solve_rvwmo(case.case_ir, max_candidates=1)
-    assert limited.status == "inconclusive"
-    assert limited.allowed is None
+    assert limited.status == "verified"
+    assert limited.allowed is False
 
 
 def test_search_step_limit_is_inconclusive_not_forbidden() -> None:
