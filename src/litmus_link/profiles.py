@@ -80,10 +80,20 @@ VECTOR_OPS = [
     "segment_indexed_unordered_load",
     "segment_indexed_ordered_store",
     "segment_indexed_unordered_store",
+    "whole_register_load",
+    "whole_register_store",
 ]
 
 SEGMENT_VECTOR_OPS = [operation for operation in VECTOR_OPS if operation.startswith("segment_")]
-PROFILE_VECTOR_OPS = [operation for operation in VECTOR_OPS if operation not in SEGMENT_VECTOR_OPS]
+WHOLE_REGISTER_VECTOR_OPS = [
+    "whole_register_load",
+    "whole_register_store",
+]
+PROFILE_VECTOR_OPS = [
+    operation
+    for operation in VECTOR_OPS
+    if operation not in {*SEGMENT_VECTOR_OPS, *WHOLE_REGISTER_VECTOR_OPS}
+]
 
 # Known RVV forms deliberately outside the first vector-aware solver scope.
 # They are not exposed by profiles/GUI, but rules recognize them so old rule
@@ -157,6 +167,23 @@ VECTOR_FOOTPRINTS = ["same_line", "cross_line", "cross_page", "misalign", "parti
 # architectural setting (vsetvli with rs1=x0).
 VECTOR_LENGTHS = ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]
 VECTOR_NFIELDS = [f"nf{value}" for value in range(2, 9)]
+VECTOR_WHOLE_NREGS = [f"nreg{value}" for value in (1, 2, 4, 8)]
+
+
+def vector_whole_nregs(vector: str, nreg: str | int | None = None) -> int | None:
+    """Return the architectural register count for a whole-register transfer."""
+
+    if vector not in WHOLE_REGISTER_VECTOR_OPS:
+        return None if nreg is not None else 1
+    if nreg is None:
+        return 1
+    text = str(nreg).lower()
+    if text.startswith("nreg"):
+        text = text[4:]
+    if not text.isdigit():
+        return None
+    parsed = int(text)
+    return parsed if parsed in {1, 2, 4, 8} else None
 
 
 def vector_nfields(vector: str, nf: str | int | None = None) -> int | None:
@@ -211,7 +238,11 @@ def vector_same_line_footprint(
     mask: str,
     vl: str,
     nf: str | int | None = None,
+    whole_nreg: str | int | None = None,
 ) -> bool:
+    if vector in WHOLE_REGISTER_VECTOR_OPS:
+        nregs = vector_whole_nregs(vector, whole_nreg)
+        return nregs is not None and nregs * (NANHU_VLEN_BITS // 8) <= 64
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None or mask not in VECTOR_MASKS:
         return False
@@ -246,8 +277,24 @@ def vector_memory_config_legal(
     vl: str,
     index_eew: str | None = None,
     nf: str | int | None = None,
+    whole_nreg: str | int | None = None,
 ) -> bool:
     """Check the register-group and finite-memory axes used by this target."""
+
+    if vector in WHOLE_REGISTER_VECTOR_OPS:
+        nregs = vector_whole_nregs(vector, whole_nreg)
+        if (
+            nregs is None
+            or sew not in VECTOR_WIDTHS
+            or mask != "unmasked"
+            or index_eew is not None
+            or nf is not None
+        ):
+            return False
+        # Whole-register stores have an architectural EEW of 8.  The load EEW
+        # is encoded and may be 8/16/32/64.  v8 is aligned for every legal
+        # NREG value and v8..v15 fits within the architectural register file.
+        return vector != "whole_register_store" or sew == "e8"
 
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None or mask not in VECTOR_MASKS or vector not in VECTOR_OPS:
@@ -299,7 +346,16 @@ def vector_footprint_kind(
     *,
     base_offset: int = 0,
     nf: str | int | None = None,
+    whole_nreg: str | int | None = None,
 ) -> str | None:
+    if vector in WHOLE_REGISTER_VECTOR_OPS:
+        nregs = vector_whole_nregs(vector, whole_nreg)
+        if nregs is None:
+            return None
+        end = base_offset + nregs * (NANHU_VLEN_BITS // 8)
+        if end > 4096:
+            return "cross_page"
+        return "cross_line" if base_offset // 64 != (end - 1) // 64 else "same_line"
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None or mask not in VECTOR_MASKS:
         return None

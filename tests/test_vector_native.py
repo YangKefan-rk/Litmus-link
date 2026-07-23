@@ -635,6 +635,60 @@ def test_non_segment_forms_do_not_duplicate_over_the_nfields_axis() -> None:
     assert all("nf" not in (choice.params or {}) for choice in (*domain.read_choices, *domain.write_choices))
 
 
+def test_whole_register_choices_do_not_duplicate_over_irrelevant_vector_axes() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["whole_register_load", "whole_register_store"],
+            sew=["e8", "e16", "e32", "e64"],
+            lmul=["mf8", "m1", "m8"],
+            nf=["nf2", "nf8"],
+            whole_nreg=["nreg1", "nreg2", "nreg4", "nreg8"],
+            mask=["unmasked", "masked"],
+            tail=["ta_ma", "tu_mu"],
+            vl=["vl1", "vlmax"],
+        )
+    )
+
+    assert len(domain.read_choices) == 16
+    assert len(domain.write_choices) == 4
+    assert {
+        str((choice.params or {})["whole_nreg"])
+        for choice in (*domain.read_choices, *domain.write_choices)
+    } == {"nreg1", "nreg2", "nreg4", "nreg8"}
+    assert all(
+        not {"lmul", "mask", "tail", "vl", "nf"}.intersection(choice.params or {})
+        for choice in (*domain.read_choices, *domain.write_choices)
+    )
+    assert {
+        str((choice.params or {})["sew"]) for choice in domain.write_choices
+    } == {"e8"}
+
+
+def test_whole_register_lowering_initializes_full_store_group() -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["whole_register_load", "whole_register_store"],
+            sew=["e64"],
+            whole_nreg=["nreg8"],
+        )
+    )
+    case = lower_vector_assignment(next(domain.assignments()))
+
+    assert "vl8re64.v" in case.litmus
+    assert "vs8r.v" in case.litmus
+    assert "vsetvli" in case.litmus and "e8,m8,ta,ma" in case.litmus
+    assert "vmv.v.x v8" in case.litmus
+    vectors = case.case_ir.metadata["vectors"]
+    assert all(config["whole_nreg"] == 8 for config in vectors.values())
+    assert all(config["avl"] == "evl" for config in vectors.values())
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     [

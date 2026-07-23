@@ -47,6 +47,7 @@ from .profiles import (
     VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
+    VECTOR_WHOLE_NREGS,
     VECTOR_WIDTHS,
 )
 from .scalar import (
@@ -77,6 +78,7 @@ PARAM_AXIS_VALUES: Dict[str, list[str]] = {
     "sew": list(VECTOR_WIDTHS),
     "index_eew": list(VECTOR_INDEX_EEWS),
     "nf": list(VECTOR_NFIELDS),
+    "whole_nreg": list(VECTOR_WHOLE_NREGS),
     "lmul": list(VECTOR_LMULS),
     "mask": list(VECTOR_MASKS),
     "tail": list(VECTOR_TAILS),
@@ -603,6 +605,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         "lmul": Counter(),
         "index_eew": Counter(),
         "nf": Counter(),
+        "whole_nreg": Counter(),
         "mask": Counter(),
         "tail": Counter(),
         "vl": Counter(),
@@ -629,7 +632,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
         for key in ("skeleton", "category", "attribute", "memory_event", "vector", "cmo", "tlb"):
             groups[key][_count_value(combination.get(key), "none")] += 1
         params = combination.get("params", {}) or {}
-        for key in ("sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"):
+        for key in ("sew", "lmul", "index_eew", "nf", "whole_nreg", "mask", "tail", "vl"):
             if key in params:
                 groups[key][_count_value(params.get(key), "default")] += 1
         case_ir = item.get("case_ir", {}) or {}
@@ -649,7 +652,7 @@ def _preview_classification_counts(sample: Iterable[Dict[str, Any]]) -> Dict[str
             if choice.get("category") == "vector":
                 groups["vector_event_form"][_count_value(choice.get("vector_form"), "vector")] += 1
                 groups["alignment"][_count_value(choice_params.get("alignment"), "aligned")] += 1
-                for key in ("sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"):
+                for key in ("sew", "lmul", "index_eew", "nf", "whole_nreg", "mask", "tail", "vl"):
                     if key in choice_params:
                         groups[key][
                             _count_value(choice_params.get(key), "default")

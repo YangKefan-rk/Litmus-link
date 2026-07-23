@@ -34,9 +34,19 @@ def _case(
     mask: str = "unmasked",
     index_eew: str | None = None,
     nf: str | None = None,
+    whole_nreg: str | None = None,
 ):
     if form.startswith("segment_") and nf is None:
         nf = "nf2"
+    if form.startswith("whole_register_") and whole_nreg is None:
+        whole_nreg = "nreg1"
+    if form == "whole_register_store":
+        sew = "e8"
+    footprint = (
+        "cross_line"
+        if form.startswith("whole_register_") and whole_nreg == "nreg8"
+        else "same_line"
+    )
     combination = Combination(
         "test",
         "vector_mem",
@@ -51,9 +61,10 @@ def _case(
             "vl": vl,
             "mask": mask,
             "tail": "ta_ma",
-            "footprint": "same_line",
+            "footprint": footprint,
             **({"index_eew": index_eew} if index_eew is not None else {}),
             **({"nf": nf} if nf is not None else {}),
+            **({"whole_nreg": whole_nreg} if whole_nreg is not None else {}),
         },
     )
     decision = evaluate(combination)
@@ -243,6 +254,74 @@ def test_segment_herd_projection_is_explicitly_external_unsupported() -> None:
     assert result.external is not None
     assert result.external["status"] == "external_unsupported"
     assert "artificial scalar program order" in str(result.external["reason"])
+
+
+@pytest.mark.parametrize("nreg", [1, 2, 4, 8])
+@pytest.mark.parametrize("eew", [8, 16, 32, 64])
+def test_whole_register_load_uses_architectural_evl(nreg: int, eew: int) -> None:
+    case = _case(
+        "whole_register_load",
+        sew=f"e{eew}",
+        whole_nreg=f"nreg{nreg}",
+    )
+    result = solve_vector_case(case.case_ir)
+
+    assert f"vl{nreg}re{eew}.v v8,(x8)" in case.litmus
+    assert result.expansion is not None
+    instruction = result.expansion.instructions[0].to_json()
+    expected_evl = nreg * 128 // eew
+    assert instruction["active_element_count"] == expected_evl
+    assert instruction["active_transaction_count"] == expected_evl
+    assert instruction["elements"][-1]["register_index"] == nreg - 1
+    assert instruction["elements"][-1]["register_element_index"] == 128 // eew - 1
+    assert result.expansion.config.avl == "evl"
+    assert result.expansion.config.effective_vl == expected_evl
+
+
+@pytest.mark.parametrize("nreg", [1, 2, 4, 8])
+def test_whole_register_store_is_an_eew8_unmasked_transfer(nreg: int) -> None:
+    case = _case("whole_register_store", whole_nreg=f"nreg{nreg}")
+    result = solve_vector_case(case.case_ir)
+
+    assert f"vs{nreg}r.v v8,(x6)" in case.litmus
+    assert "vsetvli x10,x0,e8,m8,ta,ma" in case.litmus
+    assert "vmv.v.x v8,x5" in case.litmus
+    assert result.expansion is not None
+    config = result.expansion.config
+    assert config.sew_bits == 8
+    assert config.effective_vl == nreg * 16
+    assert config.mask == "unmasked"
+    assert config.tail_policy == "not_applicable"
+
+
+def test_whole_register_elements_are_unordered_siblings() -> None:
+    result = solve_vector_case(
+        _case("whole_register_load", sew="e64", whole_nreg="nreg2").case_ir
+    )
+
+    assert result.expansion is not None
+    assert result.expansion.ordering.preserved_order == frozenset()
+    assert result.embedded is not None and result.embedded.execution is not None
+    sibling_ids = {
+        element.event_id for element in result.expansion.instructions[0].active_elements
+    }
+    assert not {
+        edge
+        for edge in result.embedded.execution.po
+        if edge[0] in sibling_ids and edge[1] in sibling_ids
+    }
+
+
+def test_whole_register_herd_projection_is_explicitly_external_unsupported() -> None:
+    result = solve_vector_case(
+        _case("whole_register_load", sew="e64", whole_nreg="nreg1").case_ir,
+        external_check=True,
+    )
+
+    assert result.status == "verified"
+    assert result.external is not None
+    assert result.external["status"] == "external_unsupported"
+    assert "whole-register" in str(result.external["reason"])
 
 
 def test_segment_register_group_legality_enforces_emul_times_nfields() -> None:

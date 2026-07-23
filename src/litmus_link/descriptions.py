@@ -51,6 +51,8 @@ FEATURE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "segment_indexed_unordered_load": "Unordered indexed Segment load with no ordering among sibling elements or fields.",
         "segment_indexed_ordered_store": "Ordered indexed Segment store; segment elements are ordered while fields within one element remain unordered.",
         "segment_indexed_unordered_store": "Unordered indexed Segment store with no ordering among sibling elements or fields.",
+        "whole_register_load": "Whole-register load using encoded EEW and evl=NREG*VLEN/EEW, independent of current vl/vtype.",
+        "whole_register_store": "Whole-register store modeled as an unmasked unit-stride EEW=8 transfer over NREG complete vector registers.",
     },
     "cmo": {
         "clean": "cbo.clean pushes dirty data toward the coherence point while keeping the line valid.",

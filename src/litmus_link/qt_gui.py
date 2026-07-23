@@ -982,6 +982,7 @@ class _LitmusLinkQtWindow:
             ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4, _axis_label),
             ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4, _index_eew_label),
             ("Segment NFIELDS", "nf", PARAM_AXIS_VALUES["nf"], 4, _nf_label),
+            ("Whole-register NREG", "whole_nreg", PARAM_AXIS_VALUES["whole_nreg"], 4, _whole_nreg_label),
             ("Mask mode", "mask", PARAM_AXIS_VALUES["mask"], 2, _mask_label),
             ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4, _tail_label),
             ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4, _vl_label),
@@ -1119,7 +1120,25 @@ class _LitmusLinkQtWindow:
             and str(check.property("axis_value")).startswith("segment_")
             for check in self.vector_checks.get("forms", [])
         )
-        for key, selected in (("index_eew", indexed), ("nf", segment)):
+        whole = any(
+            check.isChecked()
+            and str(check.property("axis_value")).startswith("whole_register_")
+            for check in self.vector_checks.get("forms", [])
+        )
+        ordinary = any(
+            check.isChecked()
+            and not str(check.property("axis_value")).startswith("whole_register_")
+            for check in self.vector_checks.get("forms", [])
+        )
+        for key, selected in (
+            ("index_eew", indexed),
+            ("nf", segment),
+            ("whole_nreg", whole),
+            ("lmul", ordinary),
+            ("mask", ordinary),
+            ("tail", ordinary),
+            ("vl", ordinary),
+        ):
             group = self.vector_group_by_key.get(key)
             if group is None:
                 continue
@@ -1658,6 +1677,7 @@ class _LitmusLinkQtWindow:
             "lmul": "Vector LMUL",
             "index_eew": "Indexed EEW",
             "nf": "Segment NFIELDS",
+            "whole_nreg": "Whole-register NREG",
             "mask": "Vector mask",
             "tail": "Vector tail policy",
             "vl": "Vector VL",
@@ -2601,6 +2621,8 @@ def _vector_form_label(value: str) -> str:
         "segment_indexed_unordered_store": "Segment indexed-unordered store",
         "segment_indexed_ordered_load": "Segment indexed-ordered load",
         "segment_indexed_ordered_store": "Segment indexed-ordered store",
+        "whole_register_load": "Whole-register load",
+        "whole_register_store": "Whole-register store",
     }.get(value, value)
 
 
@@ -2637,6 +2659,10 @@ def _overlap_layout_label(value: str) -> str:
 
 def _sew_label(value: str) -> str:
     return value.upper()
+
+
+def _whole_nreg_label(value: str) -> str:
+    return value.replace("nreg", "NREG=")
 
 
 def _index_eew_label(value: str) -> str:

@@ -8,10 +8,12 @@ from .models import Combination, Decision
 from .naming import case_display_name, case_name
 from .profiles import (
     NANHU_VLEN_BITS,
+    WHOLE_REGISTER_VECTOR_OPS,
     VECTOR_ENDPOINTS,
     VECTOR_INDEX_EEWS,
     VECTOR_LMUL_FACTORS,
     vector_nfields,
+    vector_whole_nregs,
 )
 
 
@@ -456,6 +458,16 @@ def _vector_variant_ids(combination: Combination) -> list[str]:
 def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
     events: list[LitmusEvent] = []
     extra_init: list[str] = []
+    if combination.vector in WHOLE_REGISTER_VECTOR_OPS:
+        # Whole-register memory instructions do not depend on vl or vtype.
+        # The explicit vtype is used only to initialize a complete store source
+        # group or to extract load element zero into the scalar result register.
+        setup = (
+            "vsetvli x10,x0,e8,m8,ta,ma"
+            if combination.vector == "whole_register_store"
+            else f"vsetivli x10,1,e{_vector_width(combination)},m1,ta,ma"
+        )
+        return [_event(f"{prefix}_vset", hart, "setup", setup)], extra_init
     vl = str(combination.params.get("vl", "vlmax"))
     if vl in {"vl32", "vl64"}:
         # vsetivli has a 5-bit AVL immediate.  Larger finite AVL values use
@@ -1217,6 +1229,7 @@ def _vector_instruction(combination: Combination) -> str:
     if index_eew not in VECTOR_INDEX_EEWS:
         index_eew = "ei32"
     nf = _vector_nf(combination)
+    nregs = _vector_whole_nregs(combination)
     table = {
         "unit_load": f"vle{width}.v v8,(x6){mask}",
         "unit_store": f"vse{width}.v v8,(x6){mask}",
@@ -1234,6 +1247,8 @@ def _vector_instruction(combination: Combination) -> str:
         "segment_indexed_unordered_load": f"vluxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
         "segment_indexed_ordered_store": f"vsoxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
         "segment_indexed_unordered_store": f"vsuxseg{nf}{index_eew}.v v8,(x6),v16{mask}",
+        "whole_register_load": f"vl{nregs}re{width}.v v8,(x6)",
+        "whole_register_store": f"vs{nregs}r.v v8,(x6)",
     }
     return table.get(combination.vector, f"vle{width}.v v8,(x6){mask}")
 
@@ -1256,7 +1271,23 @@ def _vector_nf(combination: Combination) -> int:
     return parsed
 
 
+def _vector_whole_nregs(combination: Combination) -> int:
+    if combination.vector not in WHOLE_REGISTER_VECTOR_OPS:
+        return 1
+    parsed = vector_whole_nregs(
+        combination.vector, combination.params.get("whole_nreg")
+    )
+    if parsed is None:
+        raise ValueError(
+            f"invalid whole-register NREG={combination.params.get('whole_nreg')!r} "
+            f"for {combination.vector}"
+        )
+    return parsed
+
+
 def _vector_field_registers(combination: Combination) -> tuple[str, ...]:
+    if combination.vector in WHOLE_REGISTER_VECTOR_OPS:
+        return ("v8",)
     lmul = VECTOR_LMUL_FACTORS[str(combination.params.get("lmul", "m1"))]
     registers_per_field = int(lmul) if lmul >= 1 else 1
     return tuple(
@@ -1303,18 +1334,24 @@ def _vector_stride_bytes(combination: Combination) -> int:
 
 def _vector_metadata(combination: Combination) -> dict[str, Any]:
     form = combination.vector
+    whole = form in WHOLE_REGISTER_VECTOR_OPS
     return {
         "schema": "litmus-link.vector-config.v1",
         "form": form,
         "vlen_bits": NANHU_VLEN_BITS,
         "sew_bits": int(_vector_width(combination)),
-        "lmul": str(combination.params.get("lmul", "m1")),
+        "lmul": None if whole else str(combination.params.get("lmul", "m1")),
         "index_eew": str(combination.params.get("index_eew", "ei32")) if "indexed" in form else None,
         "nf": _vector_nf(combination),
-        "avl": str(combination.params.get("vl", "vlmax")),
-        "mask": str(combination.params.get("mask", "unmasked")),
-        "mask_pattern": "even-elements" if combination.params.get("mask") == "masked" else "all-elements",
-        "tail_policy": str(combination.params.get("tail", "ta_ma")),
+        "whole_nreg": _vector_whole_nregs(combination) if whole else None,
+        "avl": "evl" if whole else str(combination.params.get("vl", "vlmax")),
+        "mask": "unmasked" if whole else str(combination.params.get("mask", "unmasked")),
+        "mask_pattern": (
+            "all-elements"
+            if whole or combination.params.get("mask") != "masked"
+            else "even-elements"
+        ),
+        "tail_policy": "not_applicable" if whole else str(combination.params.get("tail", "ta_ma")),
         "footprint": str(combination.params.get("footprint", "same_line")),
         "stride_bytes": _vector_stride_bytes(combination) if "strided" in form else None,
         "index_pattern": (

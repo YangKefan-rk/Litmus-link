@@ -150,3 +150,29 @@ def test_segment_nfields_is_visible_and_part_of_file_identity() -> None:
     assert "E0:VLSEG2E32" in nf2["display_name"]
     assert "E0:VLSEG3E32" in nf3["display_name"]
     assert nf2["machine_name"] != nf3["machine_name"]
+
+
+def test_whole_register_nreg_is_visible_and_part_of_file_identity() -> None:
+    def identity(nreg: str):
+        return vector_native_case_identity(
+            "MP",
+            {"family": "MP", "labels": ["PodWW", "Rfe", "PodRR", "Fre"]},
+            ["PodWW", "Rfe", "PodRR", "Fre"],
+            [
+                {
+                    "choice_id": f"vector:whole_register_load:e64:{nreg}",
+                    "category": "vector",
+                    "direction": "R",
+                    "annotation": "P",
+                    "vector_form": "whole_register_load",
+                    "params": {"sew": "e64", "whole_nreg": nreg},
+                }
+            ],
+            "aligned",
+        )
+
+    nreg1 = identity("nreg1")
+    nreg8 = identity("nreg8")
+    assert "E0:VL1RE64" in nreg1["display_name"]
+    assert "E0:VL8RE64" in nreg8["display_name"]
+    assert nreg1["machine_name"] != nreg8["machine_name"]

@@ -17,11 +17,13 @@ from typing import Any, Mapping
 from .litmus_ir import LitmusCaseIR, LitmusEvent, MemoryAccess
 from .profiles import (
     NANHU_VLEN_BITS,
+    WHOLE_REGISTER_VECTOR_OPS,
     VECTOR_INDEX_EEWS,
     VECTOR_LENGTHS,
     VECTOR_LMUL_FACTORS,
     vector_nfields,
     vector_vlmax,
+    vector_whole_nregs,
 )
 from .rvwmo_solver import EmbeddedVerdict, OrderingOverrides, Pair, solve_rvwmo
 
@@ -44,6 +46,8 @@ SUPPORTED_VECTOR_FORMS = frozenset(
         "segment_indexed_unordered_store",
         "segment_indexed_ordered_load",
         "segment_indexed_ordered_store",
+        "whole_register_load",
+        "whole_register_store",
     }
 )
 
@@ -72,6 +76,7 @@ class VectorConfig:
     alignment: str
     atomicity_model: str
     nf: int
+    whole_nreg: int
 
     @classmethod
     def from_case(cls, case: LitmusCaseIR) -> "VectorConfig":
@@ -95,29 +100,47 @@ class VectorConfig:
         sew_bits = _integer(raw.get("sew_bits", 0), "sew_bits")
         if sew_bits not in {8, 16, 32, 64}:
             raise VectorSolverError(f"unsupported SEW: {sew_bits}")
-        lmul = str(raw.get("lmul", ""))
-        if lmul not in VECTOR_LMUL_FACTORS:
-            raise VectorSolverError(f"unsupported LMUL: {lmul}")
-        nf = vector_nfields(form, raw.get("nf"))
-        if nf is None:
-            raise VectorSolverError(
-                f"NFIELDS={raw.get('nf')!r} is invalid for Vector form {form}"
-            )
-        if VECTOR_LMUL_FACTORS[lmul] * nf > 8:
-            raise VectorSolverError(
-                f"EMUL*NFIELDS exceeds 8 for LMUL={lmul}, NFIELDS={nf}"
-            )
-        vlmax = vector_vlmax(f"e{sew_bits}", lmul)
-        if vlmax is None:
-            raise VectorSolverError(f"illegal VLMAX for VLEN={vlen_bits}, SEW={sew_bits}, LMUL={lmul}")
-
-        avl = str(raw.get("avl", ""))
-        if avl == "vlmax":
+        whole = form in WHOLE_REGISTER_VECTOR_OPS
+        if whole:
+            lmul = "m1"
+            nf = 1
+            whole_nreg = vector_whole_nregs(form, raw.get("whole_nreg"))
+            if whole_nreg is None:
+                raise VectorSolverError(
+                    f"NREG={raw.get('whole_nreg')!r} is invalid for {form}"
+                )
+            if form == "whole_register_store" and sew_bits != 8:
+                raise VectorSolverError("whole-register stores have architectural EEW=8")
+            vlmax = whole_nreg * vlen_bits // sew_bits
             effective_vl = vlmax
-        elif avl in VECTOR_LENGTHS and avl.startswith("vl") and avl[2:].isdigit():
-            effective_vl = min(int(avl[2:]), vlmax)
+            avl = str(raw.get("avl", "evl"))
+            if avl != "evl":
+                raise VectorSolverError("whole-register transfers use evl, not vl")
         else:
-            raise VectorSolverError(f"AVL {avl!r} is not statically supported")
+            lmul = str(raw.get("lmul", ""))
+            if lmul not in VECTOR_LMUL_FACTORS:
+                raise VectorSolverError(f"unsupported LMUL: {lmul}")
+            nf = vector_nfields(form, raw.get("nf"))
+            if nf is None:
+                raise VectorSolverError(
+                    f"NFIELDS={raw.get('nf')!r} is invalid for Vector form {form}"
+                )
+            if VECTOR_LMUL_FACTORS[lmul] * nf > 8:
+                raise VectorSolverError(
+                    f"EMUL*NFIELDS exceeds 8 for LMUL={lmul}, NFIELDS={nf}"
+                )
+            whole_nreg = 1
+            vlmax = vector_vlmax(f"e{sew_bits}", lmul)
+            if vlmax is None:
+                raise VectorSolverError(f"illegal VLMAX for VLEN={vlen_bits}, SEW={sew_bits}, LMUL={lmul}")
+
+            avl = str(raw.get("avl", ""))
+            if avl == "vlmax":
+                effective_vl = vlmax
+            elif avl in VECTOR_LENGTHS and avl.startswith("vl") and avl[2:].isdigit():
+                effective_vl = min(int(avl[2:]), vlmax)
+            else:
+                raise VectorSolverError(f"AVL {avl!r} is not statically supported")
 
         mask = str(raw.get("mask", "unmasked"))
         if mask not in {"unmasked", "masked"}:
@@ -129,8 +152,15 @@ class VectorConfig:
                 f"mask metadata does not match generated assembly: expected {expected_pattern}, got {mask_pattern}"
             )
 
-        tail_policy = str(raw.get("tail_policy", ""))
-        if tail_policy not in {"ta_ma", "ta_mu", "tu_ma", "tu_mu"}:
+        if whole and mask != "unmasked":
+            raise VectorSolverError("whole-register transfers are unmasked")
+        tail_policy = str(raw.get("tail_policy", "not_applicable" if whole else ""))
+        allowed_tail_policies = (
+            {"not_applicable"}
+            if whole
+            else {"ta_ma", "ta_mu", "tu_ma", "tu_mu"}
+        )
+        if tail_policy not in allowed_tail_policies:
             raise VectorSolverError(f"unsupported tail policy: {tail_policy}")
         footprint = str(raw.get("footprint", ""))
         if footprint not in {"same_line", "cross_line"}:
@@ -215,6 +245,7 @@ class VectorConfig:
             alignment=alignment,
             atomicity_model=atomicity_model,
             nf=nf,
+            whole_nreg=whole_nreg,
         )
         active_offsets = [
             config.offset(index, field)
@@ -235,7 +266,13 @@ class VectorConfig:
         return self.sew_bits // 8
 
     def active(self, index: int) -> bool:
+        if self.whole_register:
+            return index < self.effective_vl
         return index < self.effective_vl and (self.mask == "unmasked" or index % 2 == 0)
+
+    @property
+    def whole_register(self) -> bool:
+        return self.form in WHOLE_REGISTER_VECTOR_OPS
 
     @property
     def segment(self) -> bool:
@@ -250,6 +287,8 @@ class VectorConfig:
             raise VectorSolverError(
                 f"field index {field} is outside NFIELDS={self.nf}"
             )
+        if self.whole_register:
+            return index * self.element_bytes
         if self.form.startswith("segment_unit_"):
             return index * self.segment_bytes + field * self.element_bytes
         if self.form.startswith("segment_strided_"):
@@ -272,7 +311,7 @@ class VectorConfig:
             "vlen_bits": self.vlen_bits,
             "sew_bits": self.sew_bits,
             "element_bytes": self.element_bytes,
-            "lmul": self.lmul,
+            "lmul": None if self.whole_register else self.lmul,
             "avl": self.avl,
             "index_eew": self.index_eew,
             "vlmax": self.vlmax,
@@ -288,6 +327,7 @@ class VectorConfig:
             "alignment": self.alignment,
             "atomicity_model": self.atomicity_model,
             "nf": self.nf,
+            "whole_nreg": self.whole_nreg if self.whole_register else None,
             "vstart": 0,
         }
 
@@ -299,6 +339,8 @@ class VectorElement:
     hart: int
     index: int
     field_index: int | None
+    register_index: int | None
+    register_element_index: int | None
     within_vl: bool
     mask_enabled: bool
     active: bool
@@ -315,6 +357,8 @@ class VectorElement:
             "hart": self.hart,
             "index": self.index,
             "field_index": self.field_index,
+            "register_index": self.register_index,
+            "register_element_index": self.register_element_index,
             "within_vl": self.within_vl,
             "mask_enabled": self.mask_enabled,
             "active": self.active,
@@ -468,6 +512,16 @@ def expand_vector_case(case: LitmusCaseIR) -> VectorExpansion:
                         hart=hart_id,
                         index=index,
                         field_index=field if config.segment else None,
+                        register_index=(
+                            index // (config.vlen_bits // config.sew_bits)
+                            if config.whole_register
+                            else None
+                        ),
+                        register_element_index=(
+                            index % (config.vlen_bits // config.sew_bits)
+                            if config.whole_register
+                            else None
+                        ),
                         within_vl=within_vl,
                         mask_enabled=mask_enabled,
                         active=active,
@@ -616,16 +670,20 @@ def solve_vector_case(
         max_search_steps=max_search_steps,
         ordering=expansion.ordering,
     )
-    segment_case = any(config.segment for config in expansion.configs.values())
-    if external_check and embedded.status == "verified" and segment_case:
+    compound_vector_case = any(
+        config.segment or config.whole_register
+        for config in expansion.configs.values()
+    )
+    if external_check and embedded.status == "verified" and compound_vector_case:
         external = {
             "schema": "litmus-link.vector-herd-reference.v1",
             "status": "external_unsupported",
             "verdict": "unknown",
             "allowed": None,
             "reason": (
-                "Stock herd7 cannot represent one Segment instruction as unordered "
-                "field transactions without introducing artificial scalar program order."
+                "Stock herd7 cannot represent one Segment/whole-register instruction "
+                "as unordered field/element transactions without introducing artificial "
+                "scalar program order."
             ),
         }
     elif external_check and embedded.status == "verified":
@@ -651,7 +709,8 @@ def solve_vector_case(
         allowed = embedded.allowed
         reason = (
             "Active RVV element/field transactions were solved as one instruction-level event set under RVWMO; "
-            "mask/vl/address generation, unordered Segment fields, and ordered-indexed element PPO are explicit in vector_ir. "
+            "mask/vl/evl/address generation, unordered Segment fields, whole-register elements, "
+            "and ordered-indexed element PPO are explicit in vector_ir. "
             f"External reference status: {external.get('status', 'not_run') if external is not None else 'not_run'}."
         )
     else:

@@ -240,9 +240,13 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
             "segment_strided_load", "segment_strided_store",
             "segment_indexed_ordered_load", "segment_indexed_ordered_store",
             "segment_indexed_unordered_load", "segment_indexed_unordered_store",
+            "whole_register_load", "whole_register_store",
         }
         assert set(complete["nf"]) == {
             "nf2", "nf3", "nf4", "nf5", "nf6", "nf7", "nf8"
+        }
+        assert set(complete["whole_nreg"]) == {
+            "nreg1", "nreg2", "nreg4", "nreg8"
         }
 
         ui.vector_complete.setChecked(False)
@@ -296,6 +300,10 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
             if str(check.property("axis_value")).startswith("segment_"):
                 check.setChecked(False)
         assert not ui.vector_group_by_key["nf"].isEnabled()
+        for check in ui.vector_checks["forms"]:
+            if str(check.property("axis_value")).startswith("whole_register_"):
+                check.setChecked(False)
+        assert not ui.vector_group_by_key["whole_nreg"].isEnabled()
 
         ui.vector_complete.setChecked(True)
         restored = ui._payload()
@@ -311,6 +319,7 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         ui.vector_complete.setChecked(False)
         assert ui.vector_group_by_key["index_eew"].isEnabled()
         assert ui.vector_group_by_key["nf"].isEnabled()
+        assert ui.vector_group_by_key["whole_nreg"].isEnabled()
 
         crosscheck = ui.vector_solver_backend.findData("crosscheck")
         ui.vector_solver_backend.setCurrentIndex(crosscheck)

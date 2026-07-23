@@ -150,7 +150,7 @@ def test_gui_options_expose_only_scalar_and_vector_workflows() -> None:
     assert set(options) == {"axes", "param_axes", "native_scalar", "vector_native"}
     assert set(options["axes"]) == {"skeleton", "vector"}
     assert set(options["param_axes"]) == {
-        "sew", "lmul", "index_eew", "nf", "mask", "tail", "vl"
+        "sew", "lmul", "index_eew", "nf", "whole_nreg", "mask", "tail", "vl"
     }
     assert set(options["axes"]["vector"]) == {
         "none",
@@ -170,6 +170,8 @@ def test_gui_options_expose_only_scalar_and_vector_workflows() -> None:
         "segment_indexed_unordered_store",
         "segment_indexed_ordered_load",
         "segment_indexed_ordered_store",
+        "whole_register_load",
+        "whole_register_store",
     }
     assert "elem_order" not in options["param_axes"]
     assert options["param_axes"]["vl"] == ["vl1", "vl2", "vl4", "vl8", "vl16", "vl32", "vl64", "vlmax"]

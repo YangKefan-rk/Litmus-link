@@ -19,12 +19,15 @@ from .profiles import (
     VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
+    VECTOR_WHOLE_NREGS,
     VECTOR_WIDTHS,
     VECTOR_ENDPOINTS,
     vector_same_line_footprint,
     vector_memory_config_legal,
     vector_nfields,
     vector_vlmax,
+    vector_whole_nregs,
+    WHOLE_REGISTER_VECTOR_OPS,
 )
 
 
@@ -36,7 +39,7 @@ NEGATIVE_TLBS = {"nonleaf_pbmt"}
 ILLEGAL_VECTOR_FORMS = {"fof_strided", "fof_indexed"}
 VECTOR_LOAD_OPS = {operation for operation in VECTOR_OPS if not operation.endswith("store")}
 VECTOR_STORE_OPS = {operation for operation in VECTOR_OPS if operation.endswith("store")}
-VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "index_eew", "nf", "vector_event"}
+VECTOR_PARAMS = {"sew", "lmul", "mask", "tail", "vl", "index_eew", "nf", "whole_nreg", "vector_event"}
 VM_PARAMS = {"vm", "shootdown", "pte"}
 
 
@@ -51,7 +54,7 @@ RULE_DESCRIPTIONS: Dict[str, str] = {
     "vector_fof_unit_only": "Fault-only-first is unit-stride LOAD only (incl. unit-stride segment); strided-FOF, indexed-FOF and FOF stores have no encoding (spike has only vle*ff.h; XiangShan VSplit.scala:156,518; DecodeUnit.scala:1061,1072).",
     "vector_event_shape": "Vector load/store instruction forms must match the generated memory-event shape.",
     "vector_memory_type": "The Nanhu target profile does not support vector accesses to MMIO/uncacheable or PBMT-tagged mappings; normal vector cases are restricted to cacheable memory.",
-    "vector_solver_scope": "The vector-aware solver supports unit-stride, strided, indexed, and Segment loads/stores with deterministic vl/mask semantics; fault, FOF, restart, whole-register, cross-page, and complex indexed-alias forms are deferred.",
+    "vector_solver_scope": "The vector-aware solver supports unit-stride, strided, indexed, Segment, and whole-register loads/stores; fault, FOF, restart, cross-page, and complex indexed-alias forms are deferred.",
     "vector_ordering": "Vector memory follows RVWMO per active element/field transaction; unordered siblings share one instruction-order position, and ordered-indexed Segment forms order different segment elements without ordering fields inside one element.",
     "vector_native_relation_cycle": "Multi-endpoint Vector cases are built from validated native relation cycles; endpoint ISA legality and formal solver scope are checked per generated case.",
     "cmo_event_shape": "CMO operations must be emitted as CMO, ifetch, or explicit Vector+CMO cross observation shapes.",
@@ -157,7 +160,7 @@ def evaluate(combination: Combination) -> Decision:
         return Decision(
             EXCLUDED_UNSUPPORTED,
             f"Vector form {combination.vector} is intentionally outside the current vector-aware solver scope; "
-            "FOF/fault trimming, segment partial completion, restart, and whole-register behavior are deferred.",
+            "FOF/fault trimming, segment partial completion, and restart behavior are deferred.",
             "platform-specific",
             "hardware-observation",
             requires,
@@ -474,6 +477,25 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             "vector",
         )
     if combination.vector != "none":
+        whole = combination.vector in WHOLE_REGISTER_VECTOR_OPS
+        if (
+            whole
+            and "whole_nreg" in combination.params
+            and vector_whole_nregs(
+                combination.vector, combination.params.get("whole_nreg")
+            )
+            is None
+        ):
+            return Decision(
+                EXCLUDED_ILLEGAL,
+                f"Whole-register NREG={combination.params.get('whole_nreg')!r} must be 1, 2, 4, or 8.",
+                "negative-exception",
+                "negative-exception",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "reserved-register-group"},
+            )
         vector_domains = {
             "sew": set(VECTOR_WIDTHS),
             "lmul": set(VECTOR_LMULS),
@@ -482,6 +504,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             "vl": set(VECTOR_LENGTHS),
             "index_eew": set(VECTOR_INDEX_EEWS),
             "nf": set(VECTOR_NFIELDS),
+            "whole_nreg": set(VECTOR_WHOLE_NREGS),
         }
         for key, allowed in vector_domains.items():
             if key in combination.params and str(combination.params[key]) not in allowed:
@@ -499,7 +522,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
         lmul = str(combination.params.get("lmul", "m1"))
         mask = str(combination.params.get("mask", "unmasked"))
         vl = str(combination.params.get("vl", "vlmax"))
-        if vector_vlmax(sew, lmul) is None:
+        if not whole and vector_vlmax(sew, lmul) is None:
             return Decision(
                 EXCLUDED_ILLEGAL,
                 f"SEW={sew}, LMUL={lmul} does not provide one complete element for VLEN=128.",
@@ -526,6 +549,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
                 )
         index_eew = combination.params.get("index_eew")
         nf = combination.params.get("nf")
+        whole_nreg = combination.params.get("whole_nreg")
         if index_eew is not None and "indexed" not in combination.vector:
             return Decision(
                 EXCLUDED_UNSUPPORTED,
@@ -559,6 +583,28 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
                 "vector",
                 {"formal_forbidden_claim": "false", "vector_solver": "unsupported-nf"},
             )
+        if whole_nreg is not None and not whole:
+            return Decision(
+                EXCLUDED_UNSUPPORTED,
+                "whole_nreg only applies to whole-register vector loads/stores.",
+                "platform-specific",
+                "hardware-observation",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "unsupported-nreg"},
+            )
+        if whole and vector_whole_nregs(combination.vector, whole_nreg) is None:
+            return Decision(
+                EXCLUDED_ILLEGAL,
+                f"Whole-register NREG={whole_nreg!r} must be 1, 2, 4, or 8.",
+                "negative-exception",
+                "negative-exception",
+                requires,
+                ["rule:vector_solver_scope"],
+                "vector",
+                {"formal_forbidden_claim": "false", "vector_solver": "reserved-register-group"},
+            )
         if vector_nfields(combination.vector, nf) is None or not vector_memory_config_legal(
             combination.vector,
             sew,
@@ -571,6 +617,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
                 else None
             ),
             nf,
+            whole_nreg,
         ):
             return Decision(
                 EXCLUDED_ILLEGAL,
@@ -590,6 +637,7 @@ def _param_validity(combination: Combination, requires: List[str]) -> Decision |
             mask,
             vl,
             nf,
+            whole_nreg,
         ):
             return Decision(
                 EXCLUDED_UNSUPPORTED,
@@ -722,6 +770,7 @@ _FORMAL_VECTOR_PARAM_VALUES = {
     "vl": set(VECTOR_LENGTHS),
     "index_eew": set(VECTOR_INDEX_EEWS),
     "nf": set(VECTOR_NFIELDS),
+    "whole_nreg": set(VECTOR_WHOLE_NREGS),
     "stress": {"none"},
 }
 
@@ -741,6 +790,12 @@ def _is_formal_vector_rvwmo(combination: Combination) -> bool:
             continue
         if key == "index_eew" and "indexed" not in combination.vector:
             return False
+        if (
+            key == "footprint"
+            and str(value) == "cross_line"
+            and combination.vector in WHOLE_REGISTER_VECTOR_OPS
+        ):
+            continue
         allowed = _FORMAL_VECTOR_PARAM_VALUES.get(key)
         if allowed is None or str(value) not in allowed:
             return False

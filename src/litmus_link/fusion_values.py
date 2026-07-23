@@ -11,7 +11,13 @@ from .amo import amo_read_result, apply_amo
 from .fusion_layout import FusionAddressLayout, FusionLayoutError
 from .native_cycles import NativeCycle, location_ids, vertex_directions
 from .native_edges import READ, WRITE
-from .profiles import vector_effective_vl, vector_nfields
+from .profiles import (
+    NANHU_VLEN_BITS,
+    WHOLE_REGISTER_VECTOR_OPS,
+    vector_effective_vl,
+    vector_nfields,
+    vector_whole_nregs,
+)
 
 
 @dataclass(frozen=True)
@@ -404,24 +410,10 @@ def _write_footprints(
         return ((0, frozenset(range(base_offset, base_offset + width))),)
     if direction != WRITE:
         return ()
-    params = dict(getattr(choice, "params", None) or {})
-    sew = str(params.get("sew", "e32"))
-    lmul = str(params.get("lmul", "m1"))
-    vl = str(params.get("vl", "vl1"))
-    mask = str(params.get("mask", "unmasked"))
-    effective_vl = vector_effective_vl(sew, lmul, vl)
-    if effective_vl is None:
+    shape = _vector_memory_shape(choice)
+    if shape is None:
         return ()
-    form = str(getattr(choice, "vector_form", ""))
-    nf = vector_nfields(form, params.get("nf"))
-    if nf is None:
-        return ()
-    if form.startswith("segment_unit_") or form.startswith("segment_indexed_"):
-        stride = width * nf
-    elif form.startswith("segment_strided_"):
-        stride = width * nf * 2
-    else:
-        stride = width * 2 if form.startswith("strided_") else width
+    effective_vl, nf, stride, mask = shape
     return tuple(
         (
             index * nf + field,
@@ -447,25 +439,10 @@ def _all_memory_footprint(choice: object, base_offset: int) -> frozenset[int]:
     width = _choice_width(choice)
     if category != "vector":
         return frozenset(range(base_offset, base_offset + width))
-    params = dict(getattr(choice, "params", None) or {})
-    effective_vl = vector_effective_vl(
-        str(params.get("sew", "e32")),
-        str(params.get("lmul", "m1")),
-        str(params.get("vl", "vl1")),
-    )
-    if effective_vl is None:
+    shape = _vector_memory_shape(choice)
+    if shape is None:
         return frozenset()
-    form = str(getattr(choice, "vector_form", ""))
-    nf = vector_nfields(form, params.get("nf"))
-    if nf is None:
-        return frozenset()
-    if form.startswith("segment_unit_") or form.startswith("segment_indexed_"):
-        stride = width * nf
-    elif form.startswith("segment_strided_"):
-        stride = width * nf * 2
-    else:
-        stride = width * 2 if form.startswith("strided_") else width
-    mask = str(params.get("mask", "unmasked"))
+    effective_vl, nf, stride, mask = shape
     return frozenset(
         base_offset + index * stride + field * width + byte
         for index in range(effective_vl)
@@ -473,6 +450,36 @@ def _all_memory_footprint(choice: object, base_offset: int) -> frozenset[int]:
         for field in range(nf)
         for byte in range(width)
     )
+
+
+def _vector_memory_shape(
+    choice: object,
+) -> tuple[int, int, int, str] | None:
+    params = dict(getattr(choice, "params", None) or {})
+    form = str(getattr(choice, "vector_form", ""))
+    width = _choice_width(choice)
+    if form in WHOLE_REGISTER_VECTOR_OPS:
+        nregs = vector_whole_nregs(form, params.get("whole_nreg"))
+        if nregs is None:
+            return None
+        effective_vl = nregs * NANHU_VLEN_BITS // (width * 8)
+        return effective_vl, 1, width, "unmasked"
+
+    effective_vl = vector_effective_vl(
+        str(params.get("sew", "e32")),
+        str(params.get("lmul", "m1")),
+        str(params.get("vl", "vl1")),
+    )
+    nf = vector_nfields(form, params.get("nf"))
+    if effective_vl is None or nf is None:
+        return None
+    if form.startswith("segment_unit_") or form.startswith("segment_indexed_"):
+        stride = width * nf
+    elif form.startswith("segment_strided_"):
+        stride = width * nf * 2
+    else:
+        stride = width * 2 if form.startswith("strided_") else width
+    return effective_vl, nf, stride, str(params.get("mask", "unmasked"))
 
 
 def _choice_width(choice: object) -> int:

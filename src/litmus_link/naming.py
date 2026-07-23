@@ -32,6 +32,8 @@ _VECTOR_FORMS = {
     "segment_indexed_unordered_load": "vluxseg{nf}ei{index}.v-E{sew}",
     "segment_indexed_ordered_store": "vsoxseg{nf}ei{index}.v-E{sew}",
     "segment_indexed_unordered_store": "vsuxseg{nf}ei{index}.v-E{sew}",
+    "whole_register_load": "vl{nreg}re{sew}.v",
+    "whole_register_store": "vs{nreg}r.v",
 }
 
 _VECTOR_EVENT_FORMS = {
@@ -51,6 +53,8 @@ _VECTOR_EVENT_FORMS = {
     "segment_indexed_unordered_load": "VLUXSEG{nf}EI{index}/E{sew}",
     "segment_indexed_ordered_store": "VSOXSEG{nf}EI{index}/E{sew}",
     "segment_indexed_unordered_store": "VSUXSEG{nf}EI{index}/E{sew}",
+    "whole_register_load": "VL{nreg}RE{sew}",
+    "whole_register_store": "VS{nreg}R",
 }
 
 _VECTOR_ALIGNMENT_NAMES = {
@@ -160,6 +164,7 @@ def combination_name(combination: Any) -> str:
                 "vector_event",
                 "footprint",
                 "stride_bytes",
+                "whole_nreg",
             }
         )
 
@@ -290,8 +295,9 @@ def _vector_event_name(choice: Mapping[str, Any], alignment: str) -> str:
     sew = str(values.get("sew", "e32")).removeprefix("e")
     index = str(values.get("index_eew", "ei32")).removeprefix("ei")
     nf = str(values.get("nf", "nf2")).removeprefix("nf")
+    nreg = str(values.get("whole_nreg", "nreg1")).removeprefix("nreg")
     template = _VECTOR_EVENT_FORMS.get(form, _token(form).upper())
-    name = template.format(sew=sew, index=index, nf=nf)
+    name = template.format(sew=sew, index=index, nf=nf, nreg=nreg)
     alignment_name = _VECTOR_ALIGNMENT_NAMES.get(alignment)
     return f"{name}/{alignment_name}" if alignment_name else name
 
@@ -330,14 +336,20 @@ def _vector_tokens(
     sew = str(params.get("sew", "e32")).removeprefix("e")
     index = str(params.get("index_eew", "ei32")).removeprefix("ei")
     nf = str(params.get("nf", "nf2")).removeprefix("nf")
+    nreg = str(params.get("whole_nreg", "nreg1")).removeprefix("nreg")
     mnemonic = _VECTOR_FORMS.get(form, _token(form)).format(
-        sew=sew, index=index, nf=nf
+        sew=sew, index=index, nf=nf, nreg=nreg
     )
     endpoint_value = params.get("vector_event")
     if endpoint_value is None:
         endpoint_value = _DEFAULT_VECTOR_ENDPOINTS.get(skeleton, {}).get(memory_event)
     endpoint = _endpoint(str(endpoint_value)) if endpoint_value is not None else ""
     tokens = [f"{mnemonic}-{endpoint}" if endpoint else mnemonic]
+    if form in {"whole_register_load", "whole_register_store"}:
+        footprint = str(params.get("footprint", "same_line"))
+        if footprint not in {"", "same_line"}:
+            tokens.append(_token(footprint))
+        return tokens
     tokens.append(str(params.get("lmul", "m1")).upper())
     tokens.append(str(params.get("vl", "vlmax")).upper())
     tail = str(params.get("tail", "ta_ma")).replace("_", ".").upper()

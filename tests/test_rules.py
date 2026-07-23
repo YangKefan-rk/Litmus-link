@@ -143,6 +143,59 @@ def test_segment_nfields_and_register_groups_are_checked() -> None:
     assert "only applies" in ordinary_with_nf.reason
 
 
+def test_whole_register_nreg_and_store_eew_are_checked() -> None:
+    legal_load = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="whole_register_load",
+            params={"sew": "e64", "whole_nreg": "nreg8", "footprint": "cross_line"},
+        )
+    )
+    reserved_nreg = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="whole_register_load",
+            params={"sew": "e32", "whole_nreg": "nreg3"},
+        )
+    )
+    illegal_store_eew = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_store",
+            "cacheable",
+            vector="whole_register_store",
+            params={"sew": "e32", "whole_nreg": "nreg1"},
+        )
+    )
+
+    assert legal_load.status == GENERATED
+    masked_whole = evaluate(
+        Combination(
+            "test",
+            "vector_mem",
+            "MP",
+            "vector_load",
+            "cacheable",
+            vector="whole_register_load",
+            params={"sew": "e32", "whole_nreg": "nreg1", "mask": "masked"},
+        )
+    )
+
+    assert reserved_nreg.status == EXCLUDED_ILLEGAL
+    assert illegal_store_eew.status == EXCLUDED_ILLEGAL
+    assert masked_whole.status == EXCLUDED_ILLEGAL
+
+
 def test_cmo_shape_must_match_memory_event() -> None:
     decision = evaluate(Combination("test", "cmo", "MP", "scalar_pair", "cacheable", cmo="flush"))
     assert decision.status == EXCLUDED_UNSUPPORTED

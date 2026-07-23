@@ -55,6 +55,7 @@ from .native_scalar import (
 )
 from .profiles import (
     NANHU_VECTOR_ATTRIBUTES,
+    WHOLE_REGISTER_VECTOR_OPS,
     VECTOR_INDEX_EEWS,
     VECTOR_LENGTHS,
     VECTOR_LMULS,
@@ -62,6 +63,7 @@ from .profiles import (
     VECTOR_NFIELDS,
     VECTOR_OPS,
     VECTOR_TAILS,
+    VECTOR_WHOLE_NREGS,
     VECTOR_WIDTHS,
     vector_footprint_kind,
     vector_memory_config_legal,
@@ -1281,6 +1283,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                 str((choice.params or {}).get("vl", "vl1")),
                 base_offset=offset,
                 nf=(choice.params or {}).get("nf"),
+                whole_nreg=(choice.params or {}).get("whole_nreg"),
             )
             metadata.update(
                 {
@@ -2147,17 +2150,23 @@ def _vector_choices_with_audit(
     lmuls = _selected(payload, "lmul", VECTOR_LMULS)
     index_eews = _selected(payload, "index_eew", VECTOR_INDEX_EEWS)
     nfields = _selected(payload, "nf", VECTOR_NFIELDS)
+    whole_nregs = _selected(payload, "whole_nreg", VECTOR_WHOLE_NREGS)
     masks = _selected(payload, "mask", VECTOR_MASKS)
     tails = _selected(payload, "tail", VECTOR_TAILS)
     vls = _selected(payload, "vl", VECTOR_LENGTHS)
-    required_axes = {
-        "Vector form": forms,
-        "SEW": sews,
-        "LMUL": lmuls,
-        "mask mode": masks,
-        "tail policy": tails,
-        "Vector length": vls,
-    }
+    regular_forms = tuple(
+        form for form in forms if form not in WHOLE_REGISTER_VECTOR_OPS
+    )
+    required_axes = {"Vector form": forms, "SEW": sews}
+    if regular_forms:
+        required_axes.update(
+            {
+                "LMUL": lmuls,
+                "mask mode": masks,
+                "tail policy": tails,
+                "Vector length": vls,
+            }
+        )
     for label, selected in required_axes.items():
         if not selected:
             raise ValueError(f"select at least one {label}")
@@ -2165,12 +2174,15 @@ def _vector_choices_with_audit(
         raise ValueError("select at least one indexed offset EEW")
     if any(form.startswith("segment_") for form in forms) and not nfields:
         raise ValueError("select at least one Segment NFIELDS value")
+    if any(form in WHOLE_REGISTER_VECTOR_OPS for form in forms) and not whole_nregs:
+        raise ValueError("select at least one whole-register NREG value")
     validators = (
         ("Vector form", forms, VECTOR_OPS),
         ("SEW", sews, VECTOR_WIDTHS),
         ("LMUL", lmuls, VECTOR_LMULS),
         ("index EEW", index_eews, VECTOR_INDEX_EEWS),
         ("Segment NFIELDS", nfields, VECTOR_NFIELDS),
+        ("whole-register NREG", whole_nregs, VECTOR_WHOLE_NREGS),
         ("mask mode", masks, VECTOR_MASKS),
         ("tail policy", tails, VECTOR_TAILS),
         ("Vector length", vls, VECTOR_LENGTHS),
@@ -2183,7 +2195,7 @@ def _vector_choices_with_audit(
     excluded: Counter[str] = Counter()
     raw = 0
     for form, sew, lmul, mask, tail, vl in product(
-        forms, sews, lmuls, masks, tails, vls
+        regular_forms, sews, lmuls, masks, tails, vls
     ):
         selected_indexes: Sequence[str | None] = index_eews if "indexed" in form else (None,)
         selected_nfields: Sequence[str | None] = (
@@ -2228,6 +2240,48 @@ def _vector_choices_with_audit(
                 ]
             )
             out.append(EndpointChoice(choice_id, "vector", direction, "P", form, params))
+    for form in (item for item in forms if item in WHOLE_REGISTER_VECTOR_OPS):
+        selected_sews = sews if form == "whole_register_load" else ("e8",)
+        for sew, whole_nreg in product(selected_sews, whole_nregs):
+            raw += 1
+            if not vector_memory_config_legal(
+                form,
+                sew,
+                "m1",
+                "unmasked",
+                "vl1",
+                whole_nreg=whole_nreg,
+            ):
+                excluded["excluded_illegal_vector_config"] += 1
+                continue
+            footprint = vector_footprint_kind(
+                form,
+                sew,
+                "m1",
+                "unmasked",
+                "vl1",
+                whole_nreg=whole_nreg,
+            )
+            if footprint not in {"same_line", "cross_line"}:
+                excluded["excluded_unsupported_cross_page"] += 1
+                continue
+            params = {
+                "sew": sew,
+                "whole_nreg": whole_nreg,
+                "footprint": footprint,
+            }
+            direction = WRITE if form.endswith("store") else READ
+            choice_id = f"vector:{form}:{sew}:{whole_nreg}"
+            out.append(
+                EndpointChoice(
+                    choice_id,
+                    "vector",
+                    direction,
+                    "P",
+                    form,
+                    params,
+                )
+            )
     return tuple(out), {
         "raw_configurations": raw,
         "generated_endpoint_choices": len(out),

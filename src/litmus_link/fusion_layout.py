@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from .profiles import vector_effective_vl
+from .profiles import WHOLE_REGISTER_VECTOR_OPS, vector_effective_vl, vector_whole_nregs
 
 
 FUSION_OVERLAP_LAYOUTS = (
@@ -96,6 +96,17 @@ def endpoint_footprint(vertex: int, choice: object) -> EndpointFootprint:
     vl = str(params.get("vl", "vl1"))
     mask = str(params.get("mask", "unmasked"))
     form = str(getattr(choice, "vector_form", ""))
+    if form in WHOLE_REGISTER_VECTOR_OPS:
+        nregs = vector_whole_nregs(form, params.get("whole_nreg"))
+        if nregs is None:
+            raise FusionLayoutError(
+                "excluded_illegal_vector_config",
+                f"illegal whole-register NREG at vertex {vertex}",
+            )
+        element_bytes = int(sew.removeprefix("e")) // 8
+        return EndpointFootprint(
+            vertex, element_bytes, frozenset(range(element_bytes))
+        )
     effective_vl = vector_effective_vl(sew, lmul, vl)
     if effective_vl is None:
         raise FusionLayoutError(
@@ -211,4 +222,3 @@ def _connected_overlap(footprints: Sequence[frozenset[int]]) -> bool:
 
 def _align_down(value: int, alignment: int) -> int:
     return max(value, 0) // alignment * alignment
-
