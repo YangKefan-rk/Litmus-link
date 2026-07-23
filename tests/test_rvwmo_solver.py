@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 
 import pytest
@@ -89,6 +90,32 @@ def test_embedded_forbidden_requires_exhaustive_search() -> None:
     limited = solve_rvwmo(case.case_ir, max_candidates=1)
     assert limited.status == "inconclusive"
     assert limited.allowed is None
+
+
+def test_search_step_limit_is_inconclusive_not_forbidden() -> None:
+    verdict = solve_rvwmo(
+        _case(["Rfe", "PodRR", "Fre", "PodWW"]).case_ir,
+        max_search_steps=1,
+    )
+    assert verdict.status == "inconclusive"
+    assert verdict.verdict == "unknown"
+    assert verdict.allowed is None
+    assert verdict.search_steps > 1
+    assert "search_step_limit" in verdict.reason
+
+
+def test_solver_deadline_covers_setup_and_returns_promptly() -> None:
+    started = time.monotonic()
+    verdict = solve_rvwmo(
+        _case(["Rfe", "PodRR", "Fre", "PodWW"]).case_ir,
+        timeout_seconds=1e-9,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    assert verdict.status == "inconclusive"
+    assert verdict.verdict == "unknown"
+    assert verdict.allowed is None
+    assert "timeout" in verdict.reason
 
 
 @pytest.mark.parametrize(

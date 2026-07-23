@@ -233,6 +233,17 @@ def test_mask_removes_inactive_elements_from_memory_graph() -> None:
     assert "p1_rx.e1" not in embedded_ids and "p1_rx.e3" not in embedded_ids
 
 
+def test_interactive_memory_event_limit_is_inconclusive_not_forbidden() -> None:
+    case = _case("unit_load", sew="e8", lmul="m4", vl="vlmax")
+    result = solve_vector_case(case.case_ir, max_memory_events=8)
+    assert result.status == "inconclusive"
+    assert result.verdict == "unknown"
+    assert result.allowed is None
+    assert result.embedded is None
+    assert "transaction" in result.reason
+    assert "limit is 8" in result.reason
+
+
 @pytest.mark.parametrize(
     ("sew", "lmul", "vl", "vlmax", "effective"),
     [

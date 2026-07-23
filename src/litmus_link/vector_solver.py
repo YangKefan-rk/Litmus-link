@@ -490,7 +490,11 @@ def solve_vector_case(
     *,
     max_candidates: int = 100_000,
     timeout_seconds: float = 10.0,
+    max_search_steps: int = 1_000_000,
+    max_memory_events: int | None = None,
     external_check: bool = False,
+    external_max_projections: int = 64,
+    external_timeout: int = 30,
 ) -> VectorSolverVerdict:
     try:
         expansion = expand_vector_case(case)
@@ -505,16 +509,42 @@ def solve_vector_case(
             external=None,
         )
 
+    memory_event_count = sum(
+        event.kind in {"load", "store", "amo"}
+        for event in expansion.case.events()
+    )
+    if max_memory_events is not None and memory_event_count > max_memory_events:
+        return VectorSolverVerdict(
+            status="inconclusive",
+            verdict="unknown",
+            allowed=None,
+            reason=(
+                f"Interactive verification skipped a {memory_event_count}-transaction "
+                f"execution graph; the current limit is {max_memory_events}. "
+                "Use a higher verification effort for this case."
+            ),
+            expansion=expansion,
+            embedded=None,
+            external=None,
+        )
+
     embedded = solve_rvwmo(
         expansion.case,
         max_candidates=max_candidates,
         timeout_seconds=timeout_seconds,
+        max_search_steps=max_search_steps,
         ordering=expansion.ordering,
     )
-    if external_check:
+    if external_check and embedded.status == "verified":
         from .herd_reference import crosscheck_vector_projection
 
-        external = crosscheck_vector_projection(case, expansion, embedded)
+        external = crosscheck_vector_projection(
+            case,
+            expansion,
+            embedded,
+            max_projections=external_max_projections,
+            timeout=external_timeout,
+        )
     else:
         external = None
     if external is not None and external.get("status") == "conflict":

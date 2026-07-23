@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from .models import GeneratedCase
 from .rvwmo import check_rvwmo
@@ -49,11 +49,14 @@ def solve_generated_case(
     herd: str = "herd7",
     *,
     vector_external_check: bool = False,
+    vector_solver_limits: Mapping[str, Any] | None = None,
 ) -> SolverResult:
     case_ir = case.case_ir
     if case.decision.expected_kind == "rvwmo-vector":
         return _solve_vector_generated_case(
-            case, external_check=vector_external_check
+            case,
+            external_check=vector_external_check,
+            limits=vector_solver_limits,
         )
     if case_ir is None or case_ir.model != "rvwmo" or case.decision.expected_kind not in {"rvwmo-herd", "rvwmo-nc"}:
         # Not a pure scalar RVWMO case: no formal forbidden/allowed verdict is
@@ -160,7 +163,10 @@ def solve_generated_case(
 
 
 def _solve_vector_generated_case(
-    case: GeneratedCase, *, external_check: bool = False
+    case: GeneratedCase,
+    *,
+    external_check: bool = False,
+    limits: Mapping[str, Any] | None = None,
 ) -> SolverResult:
     from .vector_solver import solve_vector_case
 
@@ -175,9 +181,11 @@ def _solve_vector_generated_case(
             cross_check="not_applicable",
         )
 
+    selected_limits = dict(limits or {})
     result = solve_vector_case(
         case.case_ir,
         external_check=external_check,
+        **selected_limits,
     )
     payload = result.to_json()
     edges: list[dict[str, Any]] = []

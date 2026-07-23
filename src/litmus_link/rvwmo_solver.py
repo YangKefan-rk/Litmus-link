@@ -177,6 +177,22 @@ class _CandidateRelation:
     bytes: ByteRelation
 
 
+@dataclass
+class _SearchBudget:
+    deadline: float
+    max_steps: int
+    steps: int = 0
+
+    def checkpoint(self, units: int = 1) -> None:
+        if units < 1:
+            raise ValueError("search budget units must be positive")
+        self.steps += units
+        if self.steps > self.max_steps:
+            raise _SearchLimit("search_step_limit")
+        if time.monotonic() >= self.deadline:
+            raise _SearchLimit("timeout")
+
+
 @dataclass(frozen=True)
 class EmbeddedVerdict:
     status: str
@@ -190,6 +206,7 @@ class EmbeddedVerdict:
     execution: Execution | None = None
     violation_counts: Mapping[str, int] | None = None
     example_cycles: Mapping[str, tuple[str, ...]] | None = None
+    search_steps: int = 0
 
     def to_json(self) -> dict:
         no_mag = any(event.atomicity_model == "byte_level_no_mag" for event in self.events)
@@ -210,6 +227,7 @@ class EmbeddedVerdict:
             "verdict": self.verdict,
             "allowed": self.allowed,
             "candidates": self.candidates,
+            "search_steps": self.search_steps,
             "consistent_candidates": self.consistent_candidates,
             "reason": self.reason,
             "elapsed_seconds": round(self.elapsed_seconds, 6),
@@ -228,6 +246,7 @@ def solve_rvwmo(
     *,
     max_candidates: int = 100_000,
     timeout_seconds: float = 10.0,
+    max_search_steps: int = 1_000_000,
     ordering: OrderingOverrides | None = None,
 ) -> EmbeddedVerdict:
     """Decide whether ``case.exists`` has an RVWMO-consistent execution.
@@ -241,12 +260,22 @@ def solve_rvwmo(
         raise RvwmoSolverError("max_candidates must be at least 1")
     if timeout_seconds <= 0:
         raise RvwmoSolverError("timeout_seconds must be positive")
+    if max_search_steps < 1:
+        raise RvwmoSolverError("max_search_steps must be at least 1")
     started = time.monotonic()
+    budget = _SearchBudget(started + timeout_seconds, max_search_steps)
+    events: tuple[MemoryEvent, ...] = ()
     try:
         selected_ordering = ordering or OrderingOverrides()
         events = _memory_events(case, selected_ordering)
+        budget.checkpoint(max(1, len(events)))
         final_values = _final_values(case.exists)
-        static = _static_relations(case, events, selected_ordering.preserved_order)
+        static = _static_relations(
+            case,
+            events,
+            selected_ordering.preserved_order,
+            budget,
+        )
     except RvwmoSolverError as exc:
         return EmbeddedVerdict(
             status="not_applicable",
@@ -258,6 +287,8 @@ def solve_rvwmo(
             elapsed_seconds=time.monotonic() - started,
             events=(),
         )
+    except _SearchLimit as exc:
+        return _limited_verdict(exc, started, budget, events)
 
     violations: dict[str, int] = defaultdict(int)
     examples: dict[str, tuple[str, ...]] = {}
@@ -266,23 +297,21 @@ def solve_rvwmo(
     last_execution: Execution | None = None
     last_resolved_events = events
     try:
-        for co in _co_candidates(events):
-            if time.monotonic() - started > timeout_seconds:
-                raise _SearchLimit("timeout")
-            resolved_events = _resolve_amo_transactions(events, co)
+        for co in _co_candidates(events, budget):
+            budget.checkpoint()
+            resolved_events = _resolve_amo_transactions(events, co, budget)
             if resolved_events is None:
                 continue
             last_resolved_events = resolved_events
-            if not _final_values_match(resolved_events, co, final_values):
+            if not _final_values_match(resolved_events, co, final_values, budget):
                 continue
-            for rf in _rf_candidates(resolved_events, co):
-                if time.monotonic() - started > timeout_seconds:
-                    raise _SearchLimit("timeout")
+            for rf in _rf_candidates(resolved_events, co, budget):
+                budget.checkpoint()
                 candidates += 1
                 if candidates > max_candidates:
                     raise _SearchLimit("candidate_limit")
                 execution, failure, cycle = _check_execution(
-                    resolved_events, static, rf, co
+                    resolved_events, static, rf, co, budget
                 )
                 last_execution = execution
                 if failure is None:
@@ -299,25 +328,21 @@ def solve_rvwmo(
                         execution=execution,
                         violation_counts=violations,
                         example_cycles=examples,
+                        search_steps=budget.steps,
                     )
                 violations[failure] += 1
                 if cycle and failure not in examples:
                     examples[failure] = cycle
     except _SearchLimit as exc:
-        return EmbeddedVerdict(
-            status="inconclusive",
-            verdict="unknown",
-            allowed=None,
+        return _limited_verdict(
+            exc,
+            started,
+            budget,
+            last_resolved_events,
             candidates=min(candidates, max_candidates),
-            consistent_candidates=consistent,
-            reason=(
-                f"Embedded RVWMO search stopped at {exc.reason}; "
-                "a forbidden verdict requires exhaustive search."
-            ),
-            elapsed_seconds=time.monotonic() - started,
-            events=last_resolved_events,
-            violation_counts=violations,
-            example_cycles=examples,
+            consistent=consistent,
+            violations=violations,
+            examples=examples,
         )
 
     return EmbeddedVerdict(
@@ -332,6 +357,36 @@ def solve_rvwmo(
         execution=last_execution,
         violation_counts=violations,
         example_cycles=examples,
+        search_steps=budget.steps,
+    )
+
+
+def _limited_verdict(
+    limit: _SearchLimit,
+    started: float,
+    budget: _SearchBudget,
+    events: Sequence[MemoryEvent],
+    *,
+    candidates: int = 0,
+    consistent: int = 0,
+    violations: Mapping[str, int] | None = None,
+    examples: Mapping[str, tuple[str, ...]] | None = None,
+) -> EmbeddedVerdict:
+    return EmbeddedVerdict(
+        status="inconclusive",
+        verdict="unknown",
+        allowed=None,
+        candidates=candidates,
+        consistent_candidates=consistent,
+        reason=(
+            f"Embedded RVWMO search stopped at {limit.reason}; "
+            "a forbidden verdict requires exhaustive search."
+        ),
+        elapsed_seconds=time.monotonic() - started,
+        events=tuple(events),
+        violation_counts=violations,
+        example_cycles=examples,
+        search_steps=budget.steps,
     )
 
 
@@ -725,20 +780,23 @@ def _static_relations(
     case: LitmusCaseIR,
     events: Sequence[MemoryEvent],
     preserved_order: Iterable[Pair] = (),
+    budget: _SearchBudget | None = None,
 ) -> _StaticRelations:
     event_map = {event.event_id: event for event in events}
     po: Relation = set()
     by_hart: dict[int, list[MemoryEvent]] = defaultdict(list)
     for event in events:
+        if budget is not None:
+            budget.checkpoint()
         if event.hart is not None:
             by_hart[event.hart].append(event)
     for sequence in by_hart.values():
-        po.update(
-            (left.event_id, right.event_id)
-            for left in sequence
-            for right in sequence
-            if left.order < right.order
-        )
+        for left in sequence:
+            for right in sequence:
+                if budget is not None:
+                    budget.checkpoint()
+                if left.order < right.order:
+                    po.add((left.event_id, right.event_id))
     explicit_order = set(preserved_order)
     for left, right in explicit_order:
         if left not in event_map or right not in event_map:
@@ -759,6 +817,8 @@ def _static_relations(
     for event in events:
         by_instruction[event.instruction_id or event.event_id].append(event)
     for relation in case.relations:
+        if budget is not None:
+            budget.checkpoint()
         sources = by_instruction.get(relation.src, ())
         targets = by_instruction.get(relation.dst, ())
         if not sources or not targets:
@@ -785,13 +845,14 @@ def _static_relations(
             data.update(lifted)
         if "ctrl" in label:
             ctrl.update(lifted)
-    fence = _fence_relation(case, events)
+    fence = _fence_relation(case, events, budget)
     return _StaticRelations(event_map, po, po_loc, fence, addr, data, ctrl, explicit_order)
 
 
 def _fence_relation(
     case: LitmusCaseIR,
     events: Sequence[MemoryEvent],
+    budget: _SearchBudget | None = None,
 ) -> Relation:
     by_instruction: dict[str, list[MemoryEvent]] = defaultdict(list)
     by_event = {event.event_id: event for event in events}
@@ -799,6 +860,8 @@ def _fence_relation(
         by_instruction[event.instruction_id or event.event_id].append(event)
     out: Relation = set()
     for sequence in case.harts:
+        if budget is not None:
+            budget.checkpoint()
         memory_positions = [
             (index, memory)
             for index, event in enumerate(sequence)
@@ -809,6 +872,8 @@ def _fence_relation(
             )
         ]
         for index, event in enumerate(sequence):
+            if budget is not None:
+                budget.checkpoint()
             if event.kind != "fence":
                 continue
             pred, succ = _fence_modes(event.instruction)
@@ -849,41 +914,48 @@ def _fence_orders(pred: str, succ: str, left: MemoryEvent, right: MemoryEvent) -
 def _rf_candidates(
     events: Sequence[MemoryEvent],
     co: _CandidateRelation,
+    budget: _SearchBudget,
 ) -> Iterator[_CandidateRelation]:
     writes = [event for event in events if event.write]
     reads = [event for event in events if event.read and not event.initial]
     choices: list[list[ByteEdge]] = []
     for read in reads:
         for location, read_value in read.read_bytes:
+            budget.checkpoint()
             if read.amo:
                 predecessor = _immediate_co_predecessor(
-                    read.event_id, location, co.bytes
+                    read.event_id, location, co.bytes, budget
                 )
-                sources = [
-                    write
-                    for write in writes
-                    if write.event_id == predecessor
-                    and write.write_byte_value(location) == read_value
-                ]
+                sources = []
+                for write in writes:
+                    budget.checkpoint()
+                    if (
+                        write.event_id == predecessor
+                        and write.write_byte_value(location) == read_value
+                    ):
+                        sources.append(write)
             else:
-                sources = [
-                    write
-                    for write in writes
-                    if write.writes_byte(location)
-                    and write.event_id != read.event_id
-                    and (
-                        read_value is None
-                        or write.write_byte_value(location) == read_value
-                    )
-                ]
+                sources = []
+                for write in writes:
+                    budget.checkpoint()
+                    if (
+                        write.writes_byte(location)
+                        and write.event_id != read.event_id
+                        and (
+                            read_value is None
+                            or write.write_byte_value(location) == read_value
+                        )
+                    ):
+                        sources.append(write)
             if not sources:
                 return
             choices.append(
                 [(write.event_id, read.event_id, location) for write in sources]
             )
     for selected in itertools.product(*choices):
+        budget.checkpoint()
         byte_edges = set(selected)
-        fr_bytes = _from_read_bytes(byte_edges, co.bytes)
+        fr_bytes = _from_read_bytes(byte_edges, co.bytes, budget)
         rf_pairs = {(write, read) for write, read, _location in byte_edges}
         fr_pairs = {(read, write) for read, write, _location in fr_bytes}
         if rf_pairs & {(write, read) for read, write in fr_pairs}:
@@ -896,12 +968,14 @@ def _rf_candidates(
 
 def _co_candidates(
     events: Sequence[MemoryEvent],
+    budget: _SearchBudget,
 ) -> Iterator[_CandidateRelation]:
     event_map = {event.event_id: event for event in events}
     by_location: dict[str, list[str]] = defaultdict(list)
     initial_by_location: dict[str, str] = {}
     normal: list[str] = []
     for event in events:
+        budget.checkpoint()
         if event.write and not event.initial:
             normal.append(event.event_id)
         for location, _value in event.write_bytes:
@@ -918,15 +992,18 @@ def _co_candidates(
         for right in normal[index + 1 :]
         if _overlap(event_map[left], event_map[right])
     )
+    budget.checkpoint(max(1, len(normal) * max(len(normal) - 1, 0) // 2))
     components = _write_components(normal, overlap_pairs)
     orientation_domains = [
-        tuple(_component_orientations(component, overlap_pairs))
+        tuple(_component_orientations(component, overlap_pairs, budget))
         for component in components
     ]
     for selected in itertools.product(*orientation_domains):
+        budget.checkpoint()
         normal_order = set().union(*selected) if selected else set()
         byte_edges: ByteRelation = set()
         for location, writers in sorted(by_location.items()):
+            budget.checkpoint()
             initial = initial_by_location[location]
             active = [writer for writer in writers if writer != initial]
             byte_edges.update((initial, writer, location) for writer in active)
@@ -944,6 +1021,7 @@ def _co_candidates(
 def _resolve_amo_transactions(
     events: Sequence[MemoryEvent],
     co: _CandidateRelation,
+    budget: _SearchBudget,
 ) -> tuple[MemoryEvent, ...] | None:
     """Evaluate AMOs from their immediate coherence predecessors.
 
@@ -958,11 +1036,13 @@ def _resolve_amo_transactions(
     amo_ids = {event.event_id for event in events if event.amo}
     unresolved = set(amo_ids)
     while unresolved:
+        budget.checkpoint()
         progressed = False
         for event_id in sorted(unresolved):
+            budget.checkpoint()
             event = resolved[event_id]
             predecessors = tuple(
-                _immediate_co_predecessor(event_id, location, co.bytes)
+                _immediate_co_predecessor(event_id, location, co.bytes, budget)
                 for location in event.footprint
             )
             if any(source is None for source in predecessors):
@@ -1002,22 +1082,31 @@ def _immediate_co_predecessor(
     event_id: str,
     location: str,
     co: ByteRelation,
+    budget: _SearchBudget | None = None,
 ) -> str | None:
-    predecessors = {
-        before
-        for before, after, byte in co
-        if after == event_id and byte == location
-    }
-    immediate = {
-        candidate
-        for candidate in predecessors
-        if not any(
-            (candidate, middle, location) in co
-            and (middle, event_id, location) in co
-            for middle in predecessors
-            if middle != candidate
-        )
-    }
+    predecessors: set[str] = set()
+    for before, after, byte in co:
+        if budget is not None:
+            budget.checkpoint()
+        if after == event_id and byte == location:
+            predecessors.add(before)
+    immediate: set[str] = set()
+    for candidate in predecessors:
+        if budget is not None:
+            budget.checkpoint()
+        blocked = False
+        for middle in predecessors:
+            if budget is not None:
+                budget.checkpoint()
+            if (
+                middle != candidate
+                and (candidate, middle, location) in co
+                and (middle, event_id, location) in co
+            ):
+                blocked = True
+                break
+        if not blocked:
+            immediate.add(candidate)
     return next(iter(immediate)) if len(immediate) == 1 else None
 
 
@@ -1025,15 +1114,17 @@ def _final_values_match(
     events: Sequence[MemoryEvent],
     co: _CandidateRelation,
     final_values: Mapping[str, int],
+    budget: _SearchBudget,
 ) -> bool:
     event_map = {event.event_id: event for event in events}
     locations = {location for event in events for location in event.byte_locations}
     for location in locations:
+        budget.checkpoint()
         target = _final_byte_value(final_values, location)
         if target is None:
             continue
         writers = [event.event_id for event in events if event.writes_byte(location)]
-        latest = _latest_byte_write(writers, location, co.bytes)
+        latest = _latest_byte_write(writers, location, co.bytes, budget)
         if latest is None or event_map[latest].write_byte_value(location) != target:
             return False
     return True
@@ -1043,16 +1134,21 @@ def _latest_byte_write(
     writes: Sequence[str],
     location: str,
     ordering: ByteRelation,
+    budget: _SearchBudget | None = None,
 ) -> str | None:
-    latest = [
-        write
-        for write in writes
-        if not any(
-            (write, other, location) in ordering
-            for other in writes
-            if other != write
-        )
-    ]
+    latest: list[str] = []
+    for write in writes:
+        if budget is not None:
+            budget.checkpoint()
+        superseded = False
+        for other in writes:
+            if budget is not None:
+                budget.checkpoint()
+            if other != write and (write, other, location) in ordering:
+                superseded = True
+                break
+        if not superseded:
+            latest.append(write)
     return latest[0] if len(latest) == 1 else None
 
 
@@ -1088,6 +1184,7 @@ def _write_components(
 def _component_orientations(
     component: Sequence[str],
     overlap_pairs: Sequence[Pair],
+    budget: _SearchBudget,
 ) -> Iterator[Relation]:
     pairs = tuple(
         pair
@@ -1100,6 +1197,7 @@ def _component_orientations(
     if factorial(len(component)) <= 2 ** len(pairs):
         seen: set[frozenset[Pair]] = set()
         for permutation in itertools.permutations(component):
+            budget.checkpoint()
             position = {event: index for index, event in enumerate(permutation)}
             relation = frozenset(
                 (left, right) if position[left] < position[right] else (right, left)
@@ -1110,11 +1208,12 @@ def _component_orientations(
                 yield set(relation)
         return
     for bits in itertools.product((False, True), repeat=len(pairs)):
+        budget.checkpoint()
         relation = {
             (right, left) if reverse else (left, right)
             for (left, right), reverse in zip(pairs, bits)
         }
-        if _find_cycle(relation) is None:
+        if _find_cycle(relation, budget) is None:
             yield relation
 
 
@@ -1134,11 +1233,12 @@ def _check_execution(
     static: _StaticRelations,
     rf_candidate: _CandidateRelation,
     co_candidate: _CandidateRelation,
+    budget: _SearchBudget,
 ) -> tuple[Execution, str | None, tuple[str, ...] | None]:
     event_map = static.event_map
     rf = rf_candidate.relation
     co = co_candidate.relation
-    fr_bytes = _from_read_bytes(rf_candidate.bytes, co_candidate.bytes)
+    fr_bytes = _from_read_bytes(rf_candidate.bytes, co_candidate.bytes, budget)
     fr = {(read, write) for read, write, _location in fr_bytes}
     rfe = {
         (write, read) for write, read in rf
@@ -1153,7 +1253,14 @@ def _check_execution(
         (left, right) for left, right in co
         if event_map[left].hart != event_map[right].hart
     }
-    ppo_rules = _ppo_relations(events, static, rf, rfi, rf_candidate.bytes)
+    ppo_rules = _ppo_relations(
+        events,
+        static,
+        rf,
+        rfi,
+        rf_candidate.bytes,
+        budget,
+    )
     ppo = set().union(*ppo_rules.values()) if ppo_rules else set()
     execution = Execution(
         set(rf),
@@ -1169,14 +1276,14 @@ def _check_execution(
     )
 
     coherence = co | rf | fr | static.po_loc
-    cycle = _find_cycle(coherence)
+    cycle = _find_cycle(coherence, budget)
     if cycle:
         return execution, "Coherence", cycle
     model = co | rfe | fr | ppo
-    cycle = _find_cycle(model)
+    cycle = _find_cycle(model, budget)
     if cycle:
         return execution, "Model", cycle
-    if not _atomicity_ok(events, rf_candidate.bytes, co_candidate.bytes):
+    if not _atomicity_ok(events, rf_candidate.bytes, co_candidate.bytes, budget):
         # Report the equivalent cat relation when possible.
         atomic_pairs = _compose(fre, coe)
         cycle = tuple(next(iter(atomic_pairs))) if atomic_pairs else None
@@ -1184,16 +1291,26 @@ def _check_execution(
     return execution, None, None
 
 
-def _from_read_bytes(rf: ByteRelation, co: ByteRelation) -> ByteRelation:
+def _from_read_bytes(
+    rf: ByteRelation,
+    co: ByteRelation,
+    budget: _SearchBudget | None = None,
+) -> ByteRelation:
     successors: dict[tuple[str, str], set[str]] = defaultdict(set)
     for before, after, location in co:
+        if budget is not None:
+            budget.checkpoint()
         successors[(before, location)].add(after)
-    return {
-        (read, later, location)
-        for source, read, location in rf
-        for later in successors.get((source, location), ())
-        if later != read
-    }
+    result: ByteRelation = set()
+    for source, read, location in rf:
+        if budget is not None:
+            budget.checkpoint()
+        result.update(
+            (read, later, location)
+            for later in successors.get((source, location), ())
+            if later != read
+        )
+    return result
 
 
 def _ppo_relations(
@@ -1202,7 +1319,9 @@ def _ppo_relations(
     rf: Relation,
     rfi: Relation,
     rf_bytes: ByteRelation,
+    budget: _SearchBudget,
 ) -> dict[str, Relation]:
+    budget.checkpoint(max(1, len(events)))
     reads = {event.event_id for event in events if event.read and not event.initial}
     writes = {event.event_id for event in events if event.write and not event.initial}
     memory = reads | writes
@@ -1232,6 +1351,7 @@ def _ppo_relations(
             rf_bytes,
             events,
             static.po,
+            budget,
         )
     }
     r3 = {(left, right) for left, right in rfi if left in amo and right in reads}
@@ -1247,9 +1367,17 @@ def _ppo_relations(
     r10 = {(left, right) for left, right in static.data if left in memory and right in writes}
     r11 = {(left, right) for left, right in static.ctrl if left in memory and right in writes}
     dep_to_write = {(left, right) for left, right in static.addr | static.data if left in memory and right in writes}
-    r12 = _compose(dep_to_write, {(left, right) for left, right in rfi if right in reads})
+    r12 = _compose(
+        dep_to_write,
+        {(left, right) for left, right in rfi if right in reads},
+        budget,
+    )
     addr_to_memory = {(left, right) for left, right in static.addr if left in memory and right in memory}
-    r13 = _compose(addr_to_memory, {(left, right) for left, right in static.po if right in writes})
+    r13 = _compose(
+        addr_to_memory,
+        {(left, right) for left, right in static.po if right in writes},
+        budget,
+    )
     r14 = set(static.preserved_order)
     return {
         "r1": r1,
@@ -1275,6 +1403,7 @@ def _loads_read_different_writes(
     rf_bytes: ByteRelation,
     events: Sequence[MemoryEvent],
     po: Relation,
+    budget: _SearchBudget,
 ) -> bool:
     common = left.byte_locations & right.byte_locations
     if not common:
@@ -1289,14 +1418,22 @@ def _loads_read_different_writes(
         if event.write and not event.initial
     }
     for location in common:
+        budget.checkpoint()
         if sources.get((left.event_id, location)) == sources.get((right.event_id, location)):
             continue
-        intervening = any(
-            (left.event_id, middle) in po
-            and (middle, right.event_id) in po
-            and next(event for event in events if event.event_id == middle).writes_byte(location)
-            for middle in writes
-        )
+        intervening = False
+        for middle in writes:
+            budget.checkpoint()
+            middle_event = next(
+                event for event in events if event.event_id == middle
+            )
+            if (
+                (left.event_id, middle) in po
+                and (middle, right.event_id) in po
+                and middle_event.writes_byte(location)
+            ):
+                intervening = True
+                break
         if not intervening:
             return True
     return False
@@ -1306,34 +1443,53 @@ def _atomicity_ok(
     events: Sequence[MemoryEvent],
     rf: ByteRelation,
     co: ByteRelation,
+    budget: _SearchBudget,
 ) -> bool:
     source_for_read = {
         (read, location): write
         for write, read, location in rf
     }
     for event in events:
+        budget.checkpoint()
         if not event.amo:
             continue
         for location in event.footprint:
+            budget.checkpoint()
             source = source_for_read.get((event.event_id, location))
             if source is None or source != _immediate_co_predecessor(
-                event.event_id, location, co
+                event.event_id, location, co, budget
             ):
                 return False
     return True
 
 
-def _compose(left: Relation, right: Relation) -> Relation:
+def _compose(
+    left: Relation,
+    right: Relation,
+    budget: _SearchBudget | None = None,
+) -> Relation:
     by_start: dict[str, set[str]] = defaultdict(set)
     for middle, target in right:
+        if budget is not None:
+            budget.checkpoint()
         by_start[middle].add(target)
-    return {(source, target) for source, middle in left for target in by_start.get(middle, ())}
+    result: Relation = set()
+    for source, middle in left:
+        if budget is not None:
+            budget.checkpoint()
+        result.update((source, target) for target in by_start.get(middle, ()))
+    return result
 
 
-def _find_cycle(relation: Relation) -> tuple[str, ...] | None:
+def _find_cycle(
+    relation: Relation,
+    budget: _SearchBudget | None = None,
+) -> tuple[str, ...] | None:
     graph: dict[str, set[str]] = defaultdict(set)
     nodes: set[str] = set()
     for source, target in relation:
+        if budget is not None:
+            budget.checkpoint()
         graph[source].add(target)
         nodes.update((source, target))
     state: dict[str, int] = {}
@@ -1341,10 +1497,14 @@ def _find_cycle(relation: Relation) -> tuple[str, ...] | None:
     position: dict[str, int] = {}
 
     def visit(node: str) -> tuple[str, ...] | None:
+        if budget is not None:
+            budget.checkpoint()
         state[node] = 1
         position[node] = len(stack)
         stack.append(node)
         for target in sorted(graph.get(node, ())):
+            if budget is not None:
+                budget.checkpoint()
             if state.get(target, 0) == 0:
                 cycle = visit(target)
                 if cycle:
