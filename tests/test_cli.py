@@ -432,6 +432,7 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
             "excluded_unsupported": 0,
             "hand_required": 0,
             "missing": 0,
+            "solver_workers": 16,
             "solver": {"verified": 5, "conflict": 0, "not_applicable": 2},
         },
         "out/qt-custom",
@@ -440,6 +441,7 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
     assert "generated combinations: 3" in summary
     assert "litmus files: 7" in summary
     assert "solver results: 7" in summary
+    assert "Solver processes used: 16" in summary
     assert "out/qt-custom/@all" in summary
     assert "out/qt-custom/audit-report.json" in summary
 

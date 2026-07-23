@@ -875,7 +875,10 @@ class _LitmusLinkQtWindow:
         layout.setContentsMargins(8, 12, 8, 8)
         layout.setSpacing(10)
 
-        form = QtWidgets.QFormLayout()
+        basic_group = QtWidgets.QGroupBox("Basic configuration")
+        basic_group.setObjectName("VectorBasicConfiguration")
+        form = QtWidgets.QFormLayout(basic_group)
+        _configure_responsive_form(form, QtWidgets)
         self.vector_complete = QtWidgets.QCheckBox("Use the complete legal fusion domain")
         self.vector_complete.setObjectName("VectorComplete")
         self.vector_complete.setChecked(True)
@@ -917,6 +920,15 @@ class _LitmusLinkQtWindow:
             "Controls the per-case search budget and the number of herd7 projections. "
             "A budget limit returns inconclusive, never a guessed forbidden verdict."
         )
+        self.vector_solver_workers = QtWidgets.QSpinBox()
+        self.vector_solver_workers.setObjectName("VectorSolverWorkers")
+        self.vector_solver_workers.setRange(1, 64)
+        self.vector_solver_workers.setValue(16)
+        self.vector_solver_workers.setSuffix(" processes")
+        self.vector_solver_workers.setToolTip(
+            "Maximum local processes used by Embedded RVWMO batch verification. "
+            "The runtime also respects CPU affinity and LITMUS_LINK_SOLVER_WORKERS."
+        )
         form.addRow("Generation scope", self.vector_complete)
         form.addRow("Output directory", self.vector_out)
         form.addRow("Random preview cases", self.vector_preview_limit)
@@ -926,7 +938,8 @@ class _LitmusLinkQtWindow:
         form.addRow("Maximum generated cases", self.vector_generate_limit)
         form.addRow("Vector solver backend", self.vector_solver_backend)
         form.addRow("Verification effort", self.vector_verification_effort)
-        layout.addLayout(form)
+        form.addRow("Solver processes", self.vector_solver_workers)
+        layout.addWidget(basic_group)
 
         scroll = QtWidgets.QScrollArea()
         scroll.setObjectName("VectorAxesScroll")
@@ -1378,6 +1391,7 @@ class _LitmusLinkQtWindow:
                 "random_seed": self.vector_random_seed.value(),
                 "solver_backend": str(self.vector_solver_backend.currentData()),
                 "verification_effort": str(self.vector_verification_effort.currentData()),
+                "solver_workers": self.vector_solver_workers.value(),
                 "compute_verdicts": not self.defer_solver.isChecked(),
                 # Current backend capability, retained in metadata/audit without
                 # presenting it as a permanent GUI product constraint.
@@ -1698,6 +1712,12 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     )
     if verification_effort:
         lines.append(f"Verification effort: {verification_effort}")
+    solver_workers = counts.get(
+        "solver_workers",
+        audit.get("solver_workers"),
+    )
+    if solver_workers is not None:
+        lines.append(f"Solver processes used: {solver_workers}")
     lines.extend(
         [
             f"Output directory: {out_dir}",

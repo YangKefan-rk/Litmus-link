@@ -267,6 +267,7 @@ def _vector_native_preview_payload(
         "random_seed": audit["sample_seed"],
         "relation_cycles": audit["relation_cycles"],
         "solver_backend": audit["solver_backend"],
+        "solver_workers": audit["solver_workers"],
         "verification_effort": audit["verification_effort"],
     }
     return {

@@ -185,6 +185,10 @@ class _CoCandidate:
     successors: Mapping[tuple[str, str], frozenset[str]]
     immediate_predecessors: Mapping[tuple[str, str], str]
     latest_by_location: Mapping[str, str]
+    # Closures for ``co | static-base`` are built while coherence order is
+    # enumerated.  RF search reuses them instead of rebuilding the same
+    # static transitive closure for every coherence candidate.
+    acyclic_closures: tuple[_TransitiveClosure, ...] = ()
 
 
 @dataclass
@@ -207,6 +211,71 @@ class _SearchBudget:
             if time.monotonic() >= self.deadline:
                 raise _SearchLimit("timeout")
             self.next_deadline_check = self.steps + 64
+
+
+@dataclass(frozen=True)
+class _TransitiveClosure:
+    """Bitset reachability used while an acyclic relation is extended."""
+
+    index: Mapping[str, int]
+    rows: tuple[int, ...]
+
+    @classmethod
+    def build(
+        cls,
+        nodes: Sequence[str],
+        relation: Iterable[Pair],
+        budget: _SearchBudget,
+    ) -> "_TransitiveClosure | None":
+        ordered = tuple(dict.fromkeys(nodes))
+        index = {node: position for position, node in enumerate(ordered)}
+        rows = [0] * len(ordered)
+        for source, target in relation:
+            budget.checkpoint()
+            if source not in index or target not in index:
+                raise RvwmoSolverError(
+                    f"relation references unknown event: {source}->{target}"
+                )
+            rows[index[source]] |= 1 << index[target]
+        for pivot in range(len(rows)):
+            budget.checkpoint()
+            pivot_bit = 1 << pivot
+            pivot_reach = rows[pivot]
+            for source in range(len(rows)):
+                if rows[source] & pivot_bit:
+                    rows[source] |= pivot_reach
+        if any(row & (1 << node) for node, row in enumerate(rows)):
+            return None
+        return cls(index, tuple(rows))
+
+    def extend(
+        self,
+        edges: Iterable[Pair],
+        budget: _SearchBudget,
+    ) -> "_TransitiveClosure | None":
+        rows = list(self.rows)
+        for source_name, target_name in sorted(edges):
+            budget.checkpoint()
+            source = self.index[source_name]
+            target = self.index[target_name]
+            source_bit = 1 << source
+            target_bit = 1 << target
+            if source == target or rows[target] & source_bit:
+                return None
+            if rows[source] & target_bit:
+                continue
+            successors = rows[target] | target_bit
+            for predecessor in range(len(rows)):
+                if predecessor == source or rows[predecessor] & source_bit:
+                    rows[predecessor] |= successors
+        return _TransitiveClosure(self.index, tuple(rows))
+
+    def reaches(self, source_name: str, target_name: str) -> bool:
+        """Return whether the current relation already orders source before target."""
+
+        source = self.index[source_name]
+        target = self.index[target_name]
+        return bool(self.rows[source] & (1 << target))
 
 
 @dataclass(frozen=True)
@@ -319,18 +388,9 @@ def solve_rvwmo(
             events,
             budget,
             (static.po_loc, invariant_ppo),
+            final_values,
         ):
             budget.checkpoint()
-            cycle = _find_cycle(co.relation | static.po_loc, budget)
-            if cycle:
-                violations["Coherence"] += 1
-                examples.setdefault("Coherence", cycle)
-                continue
-            cycle = _find_cycle(co.relation | invariant_ppo, budget)
-            if cycle:
-                violations["Model"] += 1
-                examples.setdefault("Model", cycle)
-                continue
             resolved_events = _resolve_amo_transactions(events, co, budget)
             if resolved_events is None:
                 continue
@@ -343,6 +403,7 @@ def solve_rvwmo(
                 budget,
                 static,
                 invariant_ppo,
+                co.acyclic_closures,
             ):
                 budget.checkpoint()
                 if rf.partial:
@@ -978,6 +1039,7 @@ def _rf_candidates(
     budget: _SearchBudget,
     static: _StaticRelations | None = None,
     invariant_ppo: Relation | None = None,
+    co_base_closures: Sequence[_TransitiveClosure] = (),
 ) -> Iterator[_CandidateRelation]:
     writes = [event for event in events if event.write]
     reads = [event for event in events if event.read and not event.initial]
@@ -1041,7 +1103,71 @@ def _rf_candidates(
 
     selected: list[ByteEdge] = []
 
+    # A Vector instruction can contribute many active memory elements.  The
+    # previous implementation rebuilt and traversed the complete coherence
+    # and model graphs after every read transaction was assigned.  RF and FR
+    # edges are monotonic inside this DFS, so retain the base reachability once
+    # and extend it as each byte source is selected.  A failed extension is a
+    # real cycle in a subrelation of every completion, hence pruning it cannot
+    # convert an allowed execution into a forbidden verdict.
+    coherence_closure: _TransitiveClosure | None = None
+    model_closure: _TransitiveClosure | None = None
+    if static is not None:
+        if len(co_base_closures) == 2:
+            # _co_candidates built these from po-loc and invariant PPO, then
+            # incrementally added the initial-write edges and all non-initial
+            # coherence orientations.  Reuse them directly: replaying the
+            # dense, already-reachable co relation per candidate is expensive.
+            coherence_closure = co_base_closures[0]
+            model_closure = co_base_closures[1]
+        else:
+            nodes = tuple(static.event_map)
+            coherence_closure = _TransitiveClosure.build(
+                nodes,
+                co.relation | static.po_loc,
+                budget,
+            )
+            model_closure = _TransitiveClosure.build(
+                nodes,
+                co.relation | (invariant_ppo or set()),
+                budget,
+            )
+        # _co_candidates already rejects either static base cycle.  Keep this
+        # guard so direct users of _rf_candidates remain sound as well.
+        if coherence_closure is None or model_closure is None:
+            return
+
+    def extend_partial_relations(
+        edge: ByteEdge,
+        later_writes: frozenset[str],
+        coherence: _TransitiveClosure | None,
+        model: _TransitiveClosure | None,
+    ) -> tuple[_TransitiveClosure | None, _TransitiveClosure | None, bool]:
+        if static is None:
+            return coherence, model, False
+        source, read, _location = edge
+        fr_edges = tuple(
+            (read, later)
+            for later in later_writes
+            if later != read
+        )
+        next_coherence = coherence.extend(
+            ((source, read), *fr_edges),
+            budget,
+        )
+        rfe = (
+            ((source, read),)
+            if static.event_map[source].hart != static.event_map[read].hart
+            else ()
+        )
+        next_model = model.extend((*rfe, *fr_edges), budget)
+        return next_coherence, next_model, (
+            next_coherence is None or next_model is None
+        )
+
     def partial_execution_has_cycle() -> bool:
+        """Fallback retained for callers without the static relation inputs."""
+
         if static is None:
             return False
         rf_pairs = {(write, read) for write, read, _location in selected}
@@ -1066,7 +1192,11 @@ def _rf_candidates(
             budget,
         ) is not None
 
-    def assign_group(group_index: int) -> Iterator[_CandidateRelation]:
+    def assign_group(
+        group_index: int,
+        coherence: _TransitiveClosure | None,
+        model: _TransitiveClosure | None,
+    ) -> Iterator[_CandidateRelation]:
         budget.checkpoint()
         if group_index == len(groups):
             byte_edges = set(selected)
@@ -1080,10 +1210,14 @@ def _rf_candidates(
         sources: set[str] = set()
         fr_targets: set[str] = set()
 
-        def assign_byte(byte_index: int) -> Iterator[_CandidateRelation]:
+        def assign_byte(
+            byte_index: int,
+            coherence_state: _TransitiveClosure | None,
+            model_state: _TransitiveClosure | None,
+        ) -> Iterator[_CandidateRelation]:
             budget.checkpoint()
             if byte_index == len(byte_domains):
-                if partial_execution_has_cycle():
+                if static is None and partial_execution_has_cycle():
                     byte_edges = set(selected)
                     yield _CandidateRelation(
                         {
@@ -1094,7 +1228,11 @@ def _rf_candidates(
                         partial=True,
                     )
                     return
-                yield from assign_group(group_index + 1)
+                yield from assign_group(
+                    group_index + 1,
+                    coherence_state,
+                    model_state,
+                )
                 return
             for edge, later_writes in byte_domains[byte_index]:
                 budget.checkpoint()
@@ -1106,16 +1244,37 @@ def _rf_candidates(
                 sources.add(source)
                 fr_targets.update(later_writes)
                 selected.append(edge)
-                yield from assign_byte(byte_index + 1)
+                next_coherence, next_model, has_cycle = extend_partial_relations(
+                    edge,
+                    later_writes,
+                    coherence_state,
+                    model_state,
+                )
+                if has_cycle:
+                    byte_edges = set(selected)
+                    yield _CandidateRelation(
+                        {
+                            (write, target)
+                            for write, target, _location in byte_edges
+                        },
+                        byte_edges,
+                        partial=True,
+                    )
+                else:
+                    yield from assign_byte(
+                        byte_index + 1,
+                        next_coherence,
+                        next_model,
+                    )
                 selected.pop()
                 sources.clear()
                 sources.update(old_sources)
                 fr_targets.clear()
                 fr_targets.update(old_targets)
 
-        yield from assign_byte(0)
+        yield from assign_byte(0, coherence, model)
 
-    yield from assign_group(0)
+    yield from assign_group(0, coherence_closure, model_closure)
 
 
 def _choice_product_size(
@@ -1131,6 +1290,7 @@ def _co_candidates(
     events: Sequence[MemoryEvent],
     budget: _SearchBudget,
     acyclic_bases: Sequence[Relation] = (),
+    final_values: Mapping[str, int] | None = None,
 ) -> Iterator[_CoCandidate]:
     event_map = {event.event_id: event for event in events}
     by_location: dict[str, list[str]] = defaultdict(list)
@@ -1154,7 +1314,65 @@ def _co_candidates(
         for right in normal[index + 1 :]
         if _overlap(event_map[left], event_map[right])
     )
+    active_by_location = {
+        location: tuple(
+            writer
+            for writer in writers
+            if writer != initial_by_location[location]
+        )
+        for location, writers in by_location.items()
+    }
+    # Every normal-order edge exists only because the two transactions overlap.
+    # Index the exact written bytes once so candidate construction does not
+    # rescan all normal-order edges for every byte location.
+    pair_locations = {
+        frozenset((left, right)): tuple(
+            sorted(
+                set(event_map[left].byte_locations)
+                & set(event_map[right].byte_locations)
+            )
+        )
+        for left, right in overlap_pairs
+    }
+    initial_byte_edges = {
+        (initial_by_location[location], writer, location)
+        for location, writers in active_by_location.items()
+        for writer in writers
+    }
     budget.checkpoint(max(1, len(normal) * max(len(normal) - 1, 0) // 2))
+    final_targets = {
+        location: target
+        for location in by_location
+        for target in (_final_byte_value(final_values or {}, location),)
+        if target is not None
+    }
+    forced_order: Relation = set()
+    for location, target in final_targets.items():
+        active = [
+            writer
+            for writer in by_location[location]
+            if writer != initial_by_location[location]
+        ]
+        if not active:
+            if event_map[initial_by_location[location]].write_byte_value(location) != target:
+                return
+            continue
+        values = {
+            writer: event_map[writer].write_byte_value(location)
+            for writer in active
+        }
+        if any(value is None for value in values.values()):
+            continue
+        matching = [writer for writer, value in values.items() if value == target]
+        if not matching:
+            return
+        if len(matching) == 1:
+            latest = matching[0]
+            forced_order.update(
+                (writer, latest)
+                for writer in active
+                if writer != latest
+            )
     components = [
         component
         for component in _write_components(normal, overlap_pairs)
@@ -1167,33 +1385,47 @@ def _co_candidates(
         ),
         reverse=True,
     )
+    nodes = tuple(event_map)
+    initial_order = {
+        (initial_by_location[location], writer)
+        for location, writers in by_location.items()
+        for writer in writers
+        if writer != initial_by_location[location]
+    }
+    base_closures: list[_TransitiveClosure] = []
+    for base in acyclic_bases:
+        closure = _TransitiveClosure.build(nodes, base, budget)
+        if closure is None:
+            return
+        closure = closure.extend(initial_order, budget)
+        if closure is None:
+            return
+        base_closures.append(closure)
 
-    def build_candidate(normal_order: Relation) -> _CoCandidate:
+    def build_candidate(
+        normal_order: Relation,
+        closures: tuple[_TransitiveClosure, ...],
+    ) -> _CoCandidate:
         budget.checkpoint()
-        byte_edges: ByteRelation = set()
-        for location, writers in sorted(by_location.items()):
+        byte_edges: ByteRelation = set(initial_byte_edges)
+        incoming = {
+            (writer, location): 0
+            for location, writers in active_by_location.items()
+            for writer in writers
+        }
+        for left, right in normal_order:
             budget.checkpoint()
-            initial = initial_by_location[location]
-            active = [writer for writer in writers if writer != initial]
-            byte_edges.update((initial, writer, location) for writer in active)
-            byte_edges.update(
-                (left, right, location)
-                for left, right in normal_order
-                if left in active and right in active
-            )
+            for location in pair_locations[frozenset((left, right))]:
+                byte_edges.add((left, right, location))
+                incoming[(right, location)] += 1
         successors: dict[tuple[str, str], frozenset[str]] = {}
         immediate_predecessors: dict[tuple[str, str], str] = {}
         latest_by_location: dict[str, str] = {}
-        for location, writers in sorted(by_location.items()):
+        for location, active in sorted(active_by_location.items()):
             initial = initial_by_location[location]
-            active = [writer for writer in writers if writer != initial]
             ordered = [initial] + sorted(
                 active,
-                key=lambda writer: sum(
-                    (other, writer) in normal_order
-                    for other in active
-                    if other != writer
-                ),
+                key=lambda writer: incoming[(writer, location)],
             )
             for index, writer in enumerate(ordered):
                 successors[(writer, location)] = frozenset(ordered[index + 1 :])
@@ -1206,29 +1438,44 @@ def _co_candidates(
             successors,
             immediate_predecessors,
             latest_by_location,
+            closures,
         )
 
     def assign_component(
         component_index: int,
         normal_order: Relation,
+        closures: tuple[_TransitiveClosure, ...],
     ) -> Iterator[_CoCandidate]:
         budget.checkpoint()
         if component_index == len(components):
-            yield build_candidate(normal_order)
+            yield build_candidate(normal_order, closures)
             return
         component = components[component_index]
-        for orientation in _component_orientations(
-            component, overlap_pairs, budget
+        for orientation, extended_closures in _component_orientations(
+            component,
+            overlap_pairs,
+            budget,
+            forced_order,
+            closures,
         ):
-            combined = normal_order | orientation
-            if any(
-                _find_cycle(base | combined, budget) is not None
-                for base in acyclic_bases
+            if not _component_final_values_match(
+                component,
+                orientation,
+                by_location,
+                initial_by_location,
+                event_map,
+                final_targets,
+                budget,
             ):
                 continue
-            yield from assign_component(component_index + 1, combined)
+            combined = normal_order | orientation
+            yield from assign_component(
+                component_index + 1,
+                combined,
+                extended_closures,
+            )
 
-    yield from assign_component(0, set())
+    yield from assign_component(0, set(), tuple(base_closures))
 
 
 def _resolve_amo_transactions(
@@ -1397,30 +1644,132 @@ def _component_orientations(
     component: Sequence[str],
     overlap_pairs: Sequence[Pair],
     budget: _SearchBudget,
-) -> Iterator[Relation]:
+    required: Iterable[Pair] = (),
+    closures: Sequence[_TransitiveClosure] = (),
+) -> Iterator[tuple[Relation, tuple[_TransitiveClosure, ...]]]:
+    """Enumerate acyclic coherence orientations for one overlap component.
+
+    ``co`` edges only grow while this DFS explores a component.  Reusing the
+    base reachability lets the solver reject a direction as soon as it closes
+    either coherence or RVWMO-model cycle.  It also turns an already implied
+    reachability direction into a single choice, rather than exploring its
+    impossible reverse branch and rejecting it later.
+    """
+
     pairs = tuple(
         pair
         for pair in overlap_pairs
         if pair[0] in component and pair[1] in component
     )
     if not pairs:
-        yield set()
+        yield set(), tuple(closures)
         return
+    required_edges = set(required)
     relation: Relation = set()
-
-    def orient(pair_index: int) -> Iterator[Relation]:
-        budget.checkpoint()
-        if pair_index == len(pairs):
-            yield set(relation)
+    required_pairs: set[Pair] = set()
+    for left, right in pairs:
+        forward = (left, right)
+        reverse = (right, left)
+        if forward in required_edges and reverse in required_edges:
             return
-        left, right = pairs[pair_index]
-        for edge in ((left, right), (right, left)):
+        if forward in required_edges:
+            required_pairs.add(forward)
+        elif reverse in required_edges:
+            required_pairs.add(reverse)
+    relation.update(required_pairs)
+
+    initial_closures = tuple(closures)
+    if initial_closures:
+        extended: list[_TransitiveClosure] = []
+        for closure in initial_closures:
+            next_closure = closure.extend(required_pairs, budget)
+            if next_closure is None:
+                return
+            extended.append(next_closure)
+        initial_closures = tuple(extended)
+    elif _find_cycle(relation, budget) is not None:
+        return
+
+    pending_pairs = tuple(
+        pair
+        for pair in pairs
+        if pair not in required_pairs and (pair[1], pair[0]) not in required_pairs
+    )
+
+    def orient(
+        pair_index: int,
+        states: tuple[_TransitiveClosure, ...],
+    ) -> Iterator[tuple[Relation, tuple[_TransitiveClosure, ...]]]:
+        budget.checkpoint()
+        if pair_index == len(pending_pairs):
+            yield set(relation), states
+            return
+        left, right = pending_pairs[pair_index]
+        forward = (left, right)
+        reverse = (right, left)
+        forward_implied = any(closure.reaches(left, right) for closure in states)
+        reverse_implied = any(closure.reaches(right, left) for closure in states)
+        if forward_implied and reverse_implied:
+            return
+        directions = (
+            (forward,)
+            if forward_implied
+            else (reverse,)
+            if reverse_implied
+            else (forward, reverse)
+        )
+        for edge in directions:
             relation.add(edge)
-            if _find_cycle(relation, budget) is None:
-                yield from orient(pair_index + 1)
+            if states:
+                extended_states: list[_TransitiveClosure] = []
+                for closure in states:
+                    next_closure = closure.extend((edge,), budget)
+                    if next_closure is None:
+                        break
+                    extended_states.append(next_closure)
+                if len(extended_states) == len(states):
+                    yield from orient(pair_index + 1, tuple(extended_states))
+            elif _find_cycle(relation, budget) is None:
+                yield from orient(pair_index + 1, states)
             relation.remove(edge)
 
-    yield from orient(0)
+    yield from orient(0, initial_closures)
+
+
+def _component_final_values_match(
+    component: Sequence[str],
+    orientation: Relation,
+    by_location: Mapping[str, Sequence[str]],
+    initial_by_location: Mapping[str, str],
+    event_map: Mapping[str, MemoryEvent],
+    final_targets: Mapping[str, int],
+    budget: _SearchBudget,
+) -> bool:
+    component_ids = frozenset(component)
+    for location, target in final_targets.items():
+        active = [
+            writer
+            for writer in by_location[location]
+            if writer != initial_by_location[location]
+        ]
+        if not active or not set(active) <= component_ids:
+            continue
+        budget.checkpoint(max(1, len(active)))
+        latest = [
+            writer
+            for writer in active
+            if not any(
+                (writer, other) in orientation
+                for other in active
+                if other != writer
+            )
+        ]
+        if len(latest) != 1:
+            return False
+        value = event_map[latest[0]].write_byte_value(location)
+        if value is not None and value != target:
+            return False
+    return True
 
 
 def _latest_write(writes: Sequence[str], ordering: Relation) -> str:

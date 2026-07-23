@@ -210,10 +210,15 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         }
         assert filtered["solver_backend"] == "embedded"
         assert filtered["verification_effort"] == "interactive"
+        assert filtered["solver_workers"] == 16
         assert set(filtered["mechanisms"]) == {"po", "fence", "dependency"}
         assert filtered["alignments"] == ["aligned"]
         assert "alignments" not in ui.vector_checks
         assert ui.window.findChild(QtWidgets.QGroupBox, "VectorScopeGroup") is None
+        assert ui.window.findChild(QtWidgets.QGroupBox, "VectorBasicConfiguration") is not None
+
+        ui.vector_solver_workers.setValue(3)
+        assert ui._payload()["solver_workers"] == 3
 
         scalar = next(
             check for check in ui.vector_category_checks

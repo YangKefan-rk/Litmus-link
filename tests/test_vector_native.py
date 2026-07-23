@@ -302,8 +302,9 @@ def test_interactive_crosscheck_is_bounded_and_progress_is_classified(
 
     assert len(cases) == 6
     assert external_flags == [True, True, True, True, False, False]
-    assert all(limits["max_memory_events"] == 192 for limits in received_limits)
-    assert all(limits["timeout_seconds"] == 1.0 for limits in received_limits)
+    assert all(limits["max_memory_events"] == 256 for limits in received_limits)
+    assert all(limits["timeout_seconds"] == 5.0 for limits in received_limits)
+    assert all(limits["max_search_steps"] == 1_000_000 for limits in received_limits)
     assert audit["verification_effort"] == "interactive"
     assert audit["external_status"] == {"agree": 4, "batch_limit_skipped": 2}
     assert cases[-1].solver["cross_check"] == "batch_limit_skipped"
@@ -327,6 +328,33 @@ def test_embedded_preview_uses_parallel_solver_workers(monkeypatch) -> None:  # 
     assert audit["solver_workers"] == 2
     assert sum(audit["solver_status"].values()) == 4
     assert all(case.solver["status"] in {"verified", "inconclusive"} for case in cases)
+
+
+def test_payload_worker_request_and_environment_cap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(vector_native, "_PARALLEL_SOLVER_THRESHOLD", 1)
+    cases, audit = sample_vector_cases(
+        _small_payload(
+            sample_limit=2,
+            solver_backend="embedded",
+            verification_effort="interactive",
+            solver_workers=2,
+        ),
+        compute_verdicts=True,
+    )
+    assert len(cases) == 2
+    assert audit["solver_workers"] == 2
+
+    monkeypatch.setenv("LITMUS_LINK_SOLVER_WORKERS", "1")
+    _cases, capped = sample_vector_cases(
+        _small_payload(
+            sample_limit=2,
+            solver_backend="embedded",
+            verification_effort="interactive",
+            solver_workers=16,
+        ),
+        compute_verdicts=True,
+    )
+    assert capped["solver_workers"] == 1
 
 
 def test_vector_search_limit_is_inconclusive_not_forbidden() -> None:

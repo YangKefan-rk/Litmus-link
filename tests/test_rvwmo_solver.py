@@ -12,7 +12,7 @@ from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_diy import DEFAULT_DIY_RELAX, DEFAULT_DIY_SAFE, DiyConfig, enumerate_diy_cycles
 from litmus_link.native_edges import edge_by_label
 from litmus_link.native_scalar import lower_native_cycle
-from litmus_link.rvwmo_solver import solve_rvwmo
+from litmus_link.rvwmo_solver import _SearchBudget, _TransitiveClosure, solve_rvwmo
 from litmus_link.toolchain import herd_judge, tools_available
 
 
@@ -106,6 +106,21 @@ def test_search_step_limit_is_inconclusive_not_forbidden() -> None:
     assert verdict.allowed is None
     assert verdict.search_steps > 1
     assert "search_step_limit" in verdict.reason
+
+
+def test_incremental_transitive_closure_detects_only_real_cycles() -> None:
+    budget = _SearchBudget(time.monotonic() + 1.0, 10_000)
+    closure = _TransitiveClosure.build(
+        ("a", "b", "c", "d"),
+        {("a", "b")},
+        budget,
+    )
+    assert closure is not None
+    extended = closure.extend({("b", "c"), ("c", "d")}, budget)
+    assert extended is not None
+    assert extended.reaches("a", "d")
+    assert not extended.reaches("d", "a")
+    assert extended.extend({("d", "a")}, budget) is None
 
 
 def test_solver_deadline_covers_setup_and_returns_promptly() -> None:

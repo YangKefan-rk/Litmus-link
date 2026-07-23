@@ -109,19 +109,19 @@ VECTOR_SAMPLING_LABELS = {
 VECTOR_VERIFICATION_EFFORTS = ("interactive", "balanced", "thorough")
 VECTOR_VERIFICATION_LIMITS: Mapping[str, Mapping[str, Any]] = {
     "interactive": {
-        "max_candidates": 25_000,
-        "timeout_seconds": 1.0,
-        "max_search_steps": 250_000,
-        "max_memory_events": 192,
+        "max_candidates": 50_000,
+        "timeout_seconds": 5.0,
+        "max_search_steps": 1_000_000,
+        "max_memory_events": 256,
         "external_max_projections": 2,
         "external_timeout": 3,
         "external_case_limit": 4,
     },
     "balanced": {
         "max_candidates": 100_000,
-        "timeout_seconds": 2.0,
+        "timeout_seconds": 10.0,
         "max_search_steps": 2_000_000,
-        "max_memory_events": 192,
+        "max_memory_events": 256,
         "external_max_projections": 16,
         "external_timeout": 10,
         "external_case_limit": 32,
@@ -1392,7 +1392,8 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
 
 
 _PARALLEL_SOLVER_THRESHOLD = 64
-_MAX_PARALLEL_SOLVER_WORKERS = 8
+_DEFAULT_PARALLEL_SOLVER_WORKERS = 16
+_MAX_PARALLEL_SOLVER_WORKERS = 64
 
 
 def _embedded_solver_worker(
@@ -1406,20 +1407,40 @@ def _embedded_solver_worker(
     ).to_json()
 
 
-def _parallel_solver_workers(case_count: int) -> int:
+def _parallel_solver_workers(
+    case_count: int,
+    requested_workers: object | None = None,
+) -> int:
     if case_count < _PARALLEL_SOLVER_THRESHOLD:
         return 1
-    configured = os.environ.get("LITMUS_LINK_SOLVER_WORKERS")
-    if configured is not None:
+    if requested_workers is None:
+        requested = _DEFAULT_PARALLEL_SOLVER_WORKERS
+    else:
         try:
-            requested = int(configured)
+            requested = int(str(requested_workers))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("solver_workers must be an integer") from exc
+        if requested < 1:
+            raise ValueError("solver_workers must be positive")
+    configured_cap = os.environ.get("LITMUS_LINK_SOLVER_WORKERS")
+    if configured_cap is not None:
+        try:
+            cap = int(configured_cap)
         except ValueError as exc:
             raise ValueError("LITMUS_LINK_SOLVER_WORKERS must be an integer") from exc
-        if requested < 1:
+        if cap < 1:
             raise ValueError("LITMUS_LINK_SOLVER_WORKERS must be positive")
-    else:
-        requested = max((os.cpu_count() or 2) - 1, 1)
-    return min(requested, _MAX_PARALLEL_SOLVER_WORKERS, case_count)
+        requested = min(requested, cap)
+    try:
+        available = max(len(os.sched_getaffinity(0)), 1)
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+    return min(
+        requested,
+        available,
+        _MAX_PARALLEL_SOLVER_WORKERS,
+        case_count,
+    )
 
 
 def sample_vector_cases(
@@ -1464,7 +1485,10 @@ def sample_vector_cases(
     external_statuses: Counter[str] = Counter()
     external_attempts = 0
     parallel_workers = (
-        _parallel_solver_workers(len(assignments))
+        _parallel_solver_workers(
+            len(assignments),
+            payload.get("solver_workers"),
+        )
         if compute_verdicts and solver_backend == "embedded"
         else 1
     )
@@ -1632,7 +1656,10 @@ def generate_vector_cases(
     seen_file_identities: dict[str, Mapping[str, Any]] = {}
     atfile_tmp = out_dir / "@all.tmp"
     parallel_workers = (
-        _parallel_solver_workers(target)
+        _parallel_solver_workers(
+            target,
+            payload.get("solver_workers"),
+        )
         if judge and solver_backend == "embedded"
         else 1
     )
