@@ -442,6 +442,83 @@ def test_vector_tab_exposes_complete_and_filtered_generation(qt_app) -> None:  #
         app.processEvents()
 
 
+def test_scalar_memory_layout_uses_grouped_dependency_controls(qt_app) -> None:  # type: ignore[no-untyped-def]
+    app, QtWidgets, QtCore, QtGui, binding = qt_app
+    ui = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
+    try:
+        assert [
+            ui.scalar_axis_tabs.tabText(index)
+            for index in range(ui.scalar_axis_tabs.count())
+        ] == ["Relations", "Memory Layout"]
+        assert not ui.scalar_memory_enable.isChecked()
+        assert all(not group.isEnabled() for group in ui.scalar_memory_choice_groups)
+
+        ui.scalar_memory_enable.setChecked(True)
+        assert ui.scalar_memory_layout_group.isEnabled()
+        assert ui.scalar_memory_width_group.isEnabled()
+        assert ui.scalar_memory_boundary_group.isEnabled()
+        assert not ui.scalar_memory_overlap_group.isEnabled()
+        assert ui.scalar_memory_layout_group.title().endswith("3/5")
+        payload = ui._payload()["memory_layout"]
+        assert payload["enabled"] is True
+        assert payload["include_aligned"] is True
+        assert set(payload["modes"]) == {"misaligned", "mixed"}
+
+        atomic_mixed = next(
+            check
+            for check in ui.scalar_memory_mode_checks
+            if check.property("axis_value") == "atomic_mixed"
+        )
+        atomic_mixed.setChecked(True)
+        for check in ui.scalar_memory_mode_checks:
+            if check.property("axis_value") in {"misaligned", "mixed"}:
+                check.setChecked(False)
+        assert not ui.scalar_memory_boundary_group.isEnabled()
+        assert ui.scalar_memory_overlap_group.isEnabled()
+        assert all(check.isEnabled() for check in ui.scalar_annotation_checks)
+
+        mixed = next(
+            check
+            for check in ui.scalar_memory_mode_checks
+            if check.property("axis_value") == "mixed"
+        )
+        mixed.setChecked(True)
+        ui.scalar_memory_width_checks[1].setChecked(False)
+        ui.scalar_memory_width_checks[2].setChecked(False)
+        assert sum(check.isChecked() for check in ui.scalar_memory_width_checks) >= 2
+    finally:
+        ui.shutdown()
+        ui.window.close()
+        app.processEvents()
+
+
+def test_vector_axes_are_partitioned_and_keep_one_choice(qt_app) -> None:  # type: ignore[no-untyped-def]
+    app, QtWidgets, QtCore, QtGui, binding = qt_app
+    ui = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
+    try:
+        ui.mode_tabs.setCurrentWidget(ui.vector_tab)
+        ui.vector_complete.setChecked(False)
+        assert [
+            ui.vector_filter_widget.tabText(index)
+            for index in range(ui.vector_filter_widget.count())
+        ] == ["Relations", "Endpoints", "Memory", "Vector"]
+        assert ui.vector_basic_group.property("scope_mode") == "custom"
+        assert ui.vector_group_by_key["forms"].title().endswith("18/18")
+        assert ui.vector_checks["skeletons"][0].property("choice_role") == "core"
+        assert ui.vector_checks["sew"][0].property("choice_role") == "parameter"
+
+        forms = ui.vector_checks["forms"]
+        for check in forms[:-1]:
+            check.setChecked(False)
+        forms[-1].setChecked(False)
+        assert sum(check.isChecked() for check in forms) == 1
+        assert ui.vector_group_by_key["forms"].title().endswith("1/18")
+    finally:
+        ui.shutdown()
+        ui.window.close()
+        app.processEvents()
+
+
 def test_flow_panel_switches_layout_without_overlapping_cards(qt_app) -> None:  # type: ignore[no-untyped-def]
     app, QtWidgets, QtCore, QtGui, binding = qt_app
     ui = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)

@@ -419,6 +419,7 @@ class _LitmusLinkQtWindow:
         self.vector_checks: Dict[str, list[Any]] = {}
         self.vector_filter_groups: list[Any] = []
         self.vector_group_by_key: Dict[str, Any] = {}
+        self.vector_group_titles: Dict[str, str] = {}
         self.vector_category_checks: list[Any] = []
         self.vector_composition_checks: list[Any] = []
         self.vector_core_groups: list[Any] = []
@@ -474,9 +475,9 @@ class _LitmusLinkQtWindow:
         splitter = QtWidgets.QSplitter(_horizontal(QtCore))
         splitter.addWidget(self._build_config_panel())
         splitter.addWidget(self._build_result_panel())
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
-        splitter.setSizes([620, 780])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([700, 700])
         root.addWidget(splitter, 1)
 
         root.addLayout(self._build_action_bar())
@@ -536,11 +537,34 @@ class _LitmusLinkQtWindow:
         layout.addLayout(copy, 1)
         return step
 
+    def _compact_field(self, label: str, control: Any) -> Any:
+        field = self.QtWidgets.QWidget()
+        field.setObjectName("CompactField")
+        layout = self.QtWidgets.QVBoxLayout(field)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        caption = self.QtWidgets.QLabel(label)
+        caption.setObjectName("CompactFieldLabel")
+        layout.addWidget(caption)
+        layout.addWidget(control)
+        return field
+
+    def _axis_scroll_page(self, object_name: str) -> tuple[Any, Any]:
+        scroll = self.QtWidgets.QScrollArea()
+        scroll.setObjectName(object_name)
+        scroll.setWidgetResizable(True)
+        content = self.QtWidgets.QWidget()
+        layout = self.QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(6, 8, 8, 8)
+        layout.setSpacing(8)
+        scroll.setWidget(content)
+        return scroll, layout
+
     def _build_config_panel(self) -> Any:
         QtWidgets = self.QtWidgets
         panel = QtWidgets.QFrame()
         panel.setObjectName("Panel")
-        panel.setMaximumWidth(680)
+        panel.setMaximumWidth(760)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
@@ -560,16 +584,18 @@ class _LitmusLinkQtWindow:
 
     def _build_scalar_tab(self) -> Any:
         QtWidgets = self.QtWidgets
-        tab = QtWidgets.QScrollArea()
-        tab.setObjectName("ScalarConfigScroll")
-        tab.setWidgetResizable(True)
-        content = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(content)
+        tab = QtWidgets.QWidget()
+        tab.setObjectName("ScalarConfigTab")
+        layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        form = QtWidgets.QFormLayout()
-        _configure_responsive_form(form, QtWidgets)
+        basic_group = QtWidgets.QGroupBox("Run configuration")
+        basic_group.setObjectName("ScalarBasicConfiguration")
+        basic_grid = QtWidgets.QGridLayout(basic_group)
+        basic_grid.setContentsMargins(10, 8, 10, 10)
+        basic_grid.setHorizontalSpacing(10)
+        basic_grid.setVerticalSpacing(6)
         self.scalar_engine = QtWidgets.QComboBox()
         self.scalar_engine.addItem("Litmus-link native - exhaustive named families", "native_templates")
         self.scalar_engine.addItem("Litmus-link native - enumerate all relation cycles", "native_cycles")
@@ -580,27 +606,42 @@ class _LitmusLinkQtWindow:
         self.scalar_limit = QtWidgets.QSpinBox()
         self.scalar_limit.setRange(1, 1000000)
         self.scalar_limit.setValue(1000)
-        self.scalar_all_cases = QtWidgets.QCheckBox("Generate the complete accepted domain")
+        self.scalar_all_cases = QtWidgets.QCheckBox("Complete accepted domain")
+        self.scalar_all_cases.setToolTip(
+            "Generate every accepted case in the selected Scalar domain."
+        )
         self.scalar_all_cases.setChecked(True)
         self.scalar_all_cases.toggled.connect(lambda checked: self.scalar_limit.setEnabled(not checked))
         self.scalar_limit.setEnabled(False)
         self.scalar_preview_limit = QtWidgets.QSpinBox()
         self.scalar_preview_limit.setRange(1, 250000)
         self.scalar_preview_limit.setValue(2000)
-        self.scalar_judge = QtWidgets.QCheckBox("Verify generated outcomes")
+        self.scalar_judge = QtWidgets.QCheckBox("Verify outcomes")
         self.scalar_judge.setChecked(True)
         self.scalar_solver_backend = QtWidgets.QComboBox()
         self.scalar_solver_backend.addItem("Embedded RVWMO (offline)", "embedded")
         self.scalar_solver_backend.addItem("External herd7 + riscv.cat", "herd7")
         self.scalar_solver_backend.addItem("Cross-check embedded and herd7", "crosscheck")
-        form.addRow("Generation engine", self.scalar_engine)
-        form.addRow("Output directory", self.scalar_out)
-        form.addRow("Generation scope", self.scalar_all_cases)
-        form.addRow("File cap", self.scalar_limit)
-        form.addRow("Maximum preview rows", self.scalar_preview_limit)
-        form.addRow("Outcome verification", self.scalar_judge)
-        form.addRow("Solver backend", self.scalar_solver_backend)
-        layout.addLayout(form)
+        basic_grid.addWidget(self._compact_field("Generation engine", self.scalar_engine), 0, 0, 1, 2)
+        basic_grid.addWidget(self._compact_field("Output directory", self.scalar_out), 0, 2, 1, 2)
+        basic_grid.addWidget(self._compact_field("Generation scope", self.scalar_all_cases), 1, 0)
+        basic_grid.addWidget(self._compact_field("File cap", self.scalar_limit), 1, 1)
+        basic_grid.addWidget(self._compact_field("Preview rows", self.scalar_preview_limit), 1, 2)
+        basic_grid.addWidget(self._compact_field("Outcome verification", self.scalar_judge), 1, 3)
+        basic_grid.addWidget(self._compact_field("Solver backend", self.scalar_solver_backend), 2, 0, 1, 2)
+        for column in range(4):
+            basic_grid.setColumnStretch(column, 1)
+        layout.addWidget(basic_group)
+
+        self.scalar_axis_tabs = QtWidgets.QTabWidget()
+        self.scalar_axis_tabs.setObjectName("ScalarAxisTabs")
+        relations_page, relation_layout = self._axis_scroll_page("ScalarRelationsScroll")
+        memory_page, scalar_memory_page_layout = self._axis_scroll_page("ScalarMemoryScroll")
+        self.scalar_axis_tabs.addTab(relations_page, "Relations")
+        self.scalar_memory_tab_index = self.scalar_axis_tabs.addTab(
+            memory_page, "Memory Layout"
+        )
+        layout.addWidget(self.scalar_axis_tabs, 1)
 
         self.scalar_cross_group = QtWidgets.QGroupBox("Native relation domain")
         self.scalar_cross_group.setObjectName("ScalarPrimaryGroup")
@@ -614,7 +655,14 @@ class _LitmusLinkQtWindow:
         for index, name in enumerate(self.options["native_scalar"]["presets"]):
             check = QtWidgets.QCheckBox(name)
             check.setProperty("axis_value", name)
+            check.setProperty("choice_role", "core")
             check.setChecked(name == "MP")
+            check.setProperty("choice_state", "on" if check.isChecked() else "off")
+            check.toggled.connect(
+                lambda checked, control=check: self._update_choice_visual(
+                    control, checked
+                )
+            )
             skeleton_grid.addWidget(check, index // 5, index % 5)
             self.scalar_skeleton_checks.append(check)
         cross_layout.addWidget(self.scalar_skeleton_widget)
@@ -626,7 +674,14 @@ class _LitmusLinkQtWindow:
         for name in self.options["native_scalar"]["mechanisms"]:
             check = QtWidgets.QCheckBox(name)
             check.setProperty("axis_value", name)
+            check.setProperty("choice_role", "core")
             check.setChecked(True)
+            check.setProperty("choice_state", "on")
+            check.toggled.connect(
+                lambda checked, control=check: self._update_choice_visual(
+                    control, checked
+                )
+            )
             mechanism_row.addWidget(check)
             self.scalar_mechanism_checks.append(check)
         mechanism_row.addStretch(1)
@@ -643,8 +698,15 @@ class _LitmusLinkQtWindow:
         for name in self.options["native_scalar"]["annotations"]:
             check = QtWidgets.QCheckBox(name)
             check.setProperty("axis_value", name)
+            check.setProperty("choice_role", "core")
             check.setToolTip(annotation_tips.get(name, name))
             check.setChecked(True)
+            check.setProperty("choice_state", "on")
+            check.toggled.connect(
+                lambda checked, control=check: self._update_choice_visual(
+                    control, checked
+                )
+            )
             annotation_row.addWidget(check)
             self.scalar_annotation_checks.append(check)
         annotation_row.addStretch(1)
@@ -652,66 +714,101 @@ class _LitmusLinkQtWindow:
         self.scalar_include_same = QtWidgets.QCheckBox("Include same-location (s) as well as different-location (d) edges")
         self.scalar_include_same.setChecked(True)
         cross_layout.addWidget(self.scalar_include_same)
-        layout.addWidget(self.scalar_cross_group)
+        relation_layout.addWidget(self.scalar_cross_group)
 
-        self.scalar_memory_group = QtWidgets.QGroupBox("Scalar memory layout")
-        self.scalar_memory_group.setObjectName("AxisGroup")
-        self.scalar_memory_group.setProperty("axis_role", "parameter")
-        memory_layout = QtWidgets.QFormLayout(self.scalar_memory_group)
-        _configure_responsive_form(memory_layout, QtWidgets)
-        self.scalar_memory_enable = QtWidgets.QCheckBox("Enable extended scalar layouts")
+        self.scalar_memory_group = QtWidgets.QFrame()
+        self.scalar_memory_group.setObjectName("ScalarMemoryScope")
+        scope_layout = QtWidgets.QHBoxLayout(self.scalar_memory_group)
+        scope_layout.setContentsMargins(12, 9, 12, 9)
+        self.scalar_memory_enable = QtWidgets.QCheckBox(
+            "Use extended scalar memory layouts"
+        )
+        self.scalar_memory_enable.setObjectName("ScalarMemoryEnable")
+        self.scalar_memory_enable.setToolTip(
+            "Enable aligned, misaligned, mixed-size, and atomic layout axes."
+        )
+        scope_layout.addWidget(self.scalar_memory_enable)
+        scope_layout.addStretch(1)
         self.scalar_memory_enable.toggled.connect(self._update_scalar_memory_layout)
-        self.scalar_memory_include_aligned = QtWidgets.QCheckBox("Include aligned baseline")
-        self.scalar_memory_include_aligned.setChecked(True)
+        scalar_memory_page_layout.addWidget(self.scalar_memory_group)
 
-        mode_grid = QtWidgets.QGridLayout()
+        self.scalar_memory_choice_groups: list[Any] = []
+
+        def memory_choice_group(title: str) -> tuple[Any, Any]:
+            group = QtWidgets.QGroupBox(title)
+            group.setObjectName("ScalarMemoryChoiceGroup")
+            group.setProperty("axis_role", "parameter")
+            group.setProperty("base_title", title)
+            grid = QtWidgets.QGridLayout(group)
+            grid.setContentsMargins(10, 8, 10, 10)
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(6)
+            self.scalar_memory_choice_groups.append(group)
+            return group, grid
+
+        self.scalar_memory_layout_group, mode_grid = memory_choice_group(
+            "Layout families"
+        )
+        self.scalar_memory_include_aligned = QtWidgets.QCheckBox("Aligned baseline")
+        self.scalar_memory_include_aligned.setProperty("choice_role", "parameter")
+        self.scalar_memory_include_aligned.setChecked(True)
+        mode_grid.addWidget(self.scalar_memory_include_aligned, 0, 0)
+
         for index, (label, value) in enumerate((
             ("Misaligned", "misaligned"),
             ("Mixed-size misaligned", "mixed"),
             ("Fixed-width atomic", "atomic"),
             ("Mixed-size aligned atomic", "atomic_mixed"),
-        )):
+        ), start=1):
             check = QtWidgets.QCheckBox(label)
             check.setProperty("axis_value", value)
+            check.setProperty("choice_role", "parameter")
             check.setChecked(value in {"misaligned", "mixed"})
             self.scalar_memory_mode_checks.append(check)
             mode_grid.addWidget(check, index // 2, index % 2)
 
-        width_row = QtWidgets.QHBoxLayout()
+        self.scalar_memory_width_group, width_grid = memory_choice_group(
+            "Access widths"
+        )
         for width in self.options["native_scalar"]["memory_layout"]["width_bits"]:
             check = QtWidgets.QCheckBox(f"{width}-bit")
             check.setProperty("axis_value", str(width))
+            check.setProperty("choice_role", "parameter")
             check.setChecked(True)
             self.scalar_memory_width_checks.append(check)
-            width_row.addWidget(check)
-        width_row.addStretch(1)
+            width_grid.addWidget(check, 0, len(self.scalar_memory_width_checks) - 1)
 
         boundary_labels = {
             "same16": "Within 16 B",
             "cross16": "Cross 16 B",
             "cross64": "Cross 64 B line",
         }
-        boundary_row = QtWidgets.QHBoxLayout()
+        self.scalar_memory_boundary_group, boundary_grid = memory_choice_group(
+            "Misaligned boundaries"
+        )
         for boundary in self.options["native_scalar"]["memory_layout"]["boundaries"]:
             check = QtWidgets.QCheckBox(boundary_labels.get(boundary, boundary))
             check.setProperty("axis_value", boundary)
+            check.setProperty("choice_role", "parameter")
             check.setChecked(True)
             self.scalar_memory_boundary_checks.append(check)
-            boundary_row.addWidget(check)
-        boundary_row.addStretch(1)
+            boundary_grid.addWidget(
+                check, 0, len(self.scalar_memory_boundary_checks) - 1
+            )
 
-        atomic_overlap_row = QtWidgets.QHBoxLayout()
+        self.scalar_memory_overlap_group, overlap_grid = memory_choice_group(
+            "Atomic mixed-size overlap"
+        )
         for label, value in (("Same start", "same_start"), ("Partial overlap", "partial_overlap")):
             check = QtWidgets.QCheckBox(label)
             check.setProperty("axis_value", value)
+            check.setProperty("choice_role", "parameter")
             check.setChecked(True)
             self.scalar_memory_atomic_overlap_checks.append(check)
-            atomic_overlap_row.addWidget(check)
-        atomic_overlap_row.addStretch(1)
+            overlap_grid.addWidget(
+                check, 0, len(self.scalar_memory_atomic_overlap_checks) - 1
+            )
 
-        atomicity = QtWidgets.QLabel("misaligned: byte_level_no_mag; atomic: aligned / mixed-size atomic")
-        atomicity.setObjectName("OutputHint")
-        atomicity.setWordWrap(True)
         for control in (
             self.scalar_memory_include_aligned,
             *self.scalar_memory_mode_checks,
@@ -724,14 +821,18 @@ class _LitmusLinkQtWindow:
                     self.scalar_memory_enable.isChecked()
                 )
             )
-        memory_layout.addRow("Mode", self.scalar_memory_enable)
-        memory_layout.addRow("Corpus", self.scalar_memory_include_aligned)
-        memory_layout.addRow("Layouts", mode_grid)
-        memory_layout.addRow("Widths", width_row)
-        memory_layout.addRow("Boundaries", boundary_row)
-        memory_layout.addRow("Atomic overlap", atomic_overlap_row)
-        memory_layout.addRow("Atomicity", atomicity)
-        layout.addWidget(self.scalar_memory_group)
+
+        memory_axes = QtWidgets.QWidget()
+        memory_axes_grid = QtWidgets.QGridLayout(memory_axes)
+        memory_axes_grid.setContentsMargins(0, 0, 0, 0)
+        memory_axes_grid.setHorizontalSpacing(8)
+        memory_axes_grid.setVerticalSpacing(8)
+        memory_axes_grid.addWidget(self.scalar_memory_layout_group, 0, 0)
+        memory_axes_grid.addWidget(self.scalar_memory_width_group, 1, 0)
+        memory_axes_grid.addWidget(self.scalar_memory_boundary_group, 2, 0)
+        memory_axes_grid.addWidget(self.scalar_memory_overlap_group, 3, 0)
+        memory_axes_grid.setColumnStretch(0, 1)
+        scalar_memory_page_layout.addWidget(memory_axes)
 
         self.scalar_enumerate_group = QtWidgets.QGroupBox("Exhaustive cycle bounds")
         self.scalar_enumerate_group.setObjectName("ScalarParameterGroup")
@@ -760,7 +861,7 @@ class _LitmusLinkQtWindow:
         enumerate_layout.addRow("Maximum harts", self.scalar_nprocs)
         enumerate_layout.addRow("Maximum accesses per hart", self.scalar_max_accesses)
         enumerate_layout.addRow("Cycle constraints", flags)
-        layout.addWidget(self.scalar_enumerate_group)
+        relation_layout.addWidget(self.scalar_enumerate_group)
 
         self.scalar_diy_group = QtWidgets.QGroupBox("Diy-compatible generation policy")
         self.scalar_diy_group.setObjectName("ScalarParameterGroup")
@@ -820,34 +921,95 @@ class _LitmusLinkQtWindow:
         diy_layout.addRow("Observer policy", self.scalar_diy_observer)
         diy_layout.addRow("Observer implementation", self.scalar_diy_obstype)
         diy_layout.addRow("Policy flags", diy_flags)
-        layout.addWidget(self.scalar_diy_group)
-        layout.addStretch(1)
+        relation_layout.addWidget(self.scalar_diy_group)
+        relation_layout.addStretch(1)
+        scalar_memory_page_layout.addStretch(1)
         self._update_scalar_memory_layout(False)
         self._update_scalar_engine()
-        tab.setWidget(content)
         return tab
 
     def _update_scalar_memory_layout(self, enabled: bool) -> None:
         if not hasattr(self, "scalar_memory_group"):
             return
-        controls = [
-            self.scalar_memory_include_aligned,
-            *self.scalar_memory_mode_checks,
-            *self.scalar_memory_width_checks,
-            *self.scalar_memory_boundary_checks,
-            *self.scalar_memory_atomic_overlap_checks,
-        ]
-        for control in controls:
-            control.setEnabled(enabled)
-            control.setProperty("choice_state", "on" if enabled and control.isChecked() else "base")
-            self._refresh_widget_style(control)
-        self._set_group_state(self.scalar_memory_group, "active" if enabled else "inactive")
         selected_modes = {
             str(check.property("axis_value"))
             for check in self.scalar_memory_mode_checks
             if check.isChecked()
         }
+        if enabled and not selected_modes:
+            self._set_checked_without_signal(self.scalar_memory_mode_checks[0], True)
+            selected_modes = {"misaligned"}
+
+        mixed_layout_enabled = bool(selected_modes & {"mixed", "atomic_mixed"})
+        required_widths = 2 if mixed_layout_enabled else 1
+        if enabled:
+            self._ensure_checked_count(
+                self.scalar_memory_width_checks,
+                required_widths,
+            )
+            self._ensure_checked_count(self.scalar_memory_boundary_checks, 1)
+            if "atomic_mixed" in selected_modes:
+                self._ensure_checked_count(
+                    self.scalar_memory_atomic_overlap_checks,
+                    1,
+                )
+
+        misaligned_layout_enabled = bool(selected_modes & {"misaligned", "mixed"})
         atomic_layout_enabled = bool(selected_modes & {"atomic", "atomic_mixed"})
+        group_controls = (
+            (
+                self.scalar_memory_layout_group,
+                [self.scalar_memory_include_aligned, *self.scalar_memory_mode_checks],
+                enabled,
+            ),
+            (
+                self.scalar_memory_width_group,
+                self.scalar_memory_width_checks,
+                enabled,
+            ),
+            (
+                self.scalar_memory_boundary_group,
+                self.scalar_memory_boundary_checks,
+                enabled and misaligned_layout_enabled,
+            ),
+            (
+                self.scalar_memory_overlap_group,
+                self.scalar_memory_atomic_overlap_checks,
+                enabled and "atomic_mixed" in selected_modes,
+            ),
+        )
+        for group, controls, active in group_controls:
+            group.setEnabled(active)
+            group.setProperty("group_state", "active" if active else "inactive")
+            group.setProperty("dependency_state", "active" if active else "inactive")
+            selected = sum(control.isChecked() for control in controls)
+            group.setTitle(
+                f"{group.property('base_title')}  {selected}/{len(controls)}"
+            )
+            self._refresh_widget_style(group)
+            for control in controls:
+                control.setEnabled(active)
+                control.setProperty(
+                    "choice_state",
+                    "on" if active and control.isChecked() else "off",
+                )
+                self._refresh_widget_style(control)
+
+        self.scalar_memory_group.setProperty(
+            "group_state", "active" if enabled else "inactive"
+        )
+        self.scalar_memory_enable.setProperty(
+            "choice_state", "on" if enabled else "off"
+        )
+        self._refresh_widget_style(self.scalar_memory_group)
+        self._refresh_widget_style(self.scalar_memory_enable)
+        if hasattr(self, "scalar_axis_tabs"):
+            color = self.QtGui.QColor("#1d4ed8" if enabled else "#64748b")
+            self.scalar_axis_tabs.tabBar().setTabTextColor(
+                self.scalar_memory_tab_index,
+                color,
+            )
+
         for check in self.scalar_annotation_checks:
             annotation = str(check.property("axis_value"))
             if enabled and not atomic_layout_enabled and annotation != "P":
@@ -862,6 +1024,25 @@ class _LitmusLinkQtWindow:
                 if str(check.property("axis_value")) == "P":
                     check.setChecked(True)
             self.scalar_solver_backend.setCurrentIndex(0)
+
+    def _set_checked_without_signal(self, control: Any, checked: bool) -> None:
+        blocker = self.QtCore.QSignalBlocker(control)
+        control.setChecked(checked)
+        del blocker
+
+    def _update_choice_visual(self, control: Any, checked: bool) -> None:
+        control.setProperty("choice_state", "on" if checked else "off")
+        self._refresh_widget_style(control)
+
+    def _ensure_checked_count(self, controls: Iterable[Any], minimum: int) -> None:
+        choices = list(controls)
+        selected = sum(control.isChecked() for control in choices)
+        for control in choices:
+            if selected >= minimum:
+                break
+            if not control.isChecked():
+                self._set_checked_without_signal(control, True)
+                selected += 1
 
     def _update_scalar_engine(self) -> None:
         if not hasattr(self, "scalar_engine"):
@@ -886,9 +1067,12 @@ class _LitmusLinkQtWindow:
 
         basic_group = QtWidgets.QGroupBox("Basic configuration")
         basic_group.setObjectName("VectorBasicConfiguration")
-        form = QtWidgets.QFormLayout(basic_group)
-        _configure_responsive_form(form, QtWidgets)
-        self.vector_complete = QtWidgets.QCheckBox("Use the complete legal fusion domain")
+        self.vector_basic_group = basic_group
+        basic_grid = QtWidgets.QGridLayout(basic_group)
+        basic_grid.setContentsMargins(10, 8, 10, 10)
+        basic_grid.setHorizontalSpacing(10)
+        basic_grid.setVerticalSpacing(6)
+        self.vector_complete = QtWidgets.QCheckBox("Complete legal domain")
         self.vector_complete.setObjectName("VectorComplete")
         self.vector_complete.setChecked(True)
         self.vector_complete.setToolTip(
@@ -901,29 +1085,29 @@ class _LitmusLinkQtWindow:
         self.vector_preview_limit.setRange(1, 100000)
         self.vector_preview_limit.setValue(1000)
         self.vector_preview_sampling = QtWidgets.QComboBox()
-        self.vector_preview_sampling.addItem("Balanced skeleton coverage", "balanced")
-        self.vector_preview_sampling.addItem("Domain-weighted random", "domain_weighted")
+        self.vector_preview_sampling.addItem("Balanced coverage", "balanced")
+        self.vector_preview_sampling.addItem("Domain weighted", "domain_weighted")
         self.vector_random_seed = QtWidgets.QSpinBox()
         self.vector_random_seed.setRange(0, 2_147_483_647)
         self.vector_random_seed.setValue(1)
         self.vector_generation_mode = QtWidgets.QComboBox()
         self.vector_generation_mode.setObjectName("VectorGenerationMode")
-        self.vector_generation_mode.addItem("Balanced coverage sample", "balanced")
+        self.vector_generation_mode.addItem("Balanced sample", "balanced")
         self.vector_generation_mode.addItem("Domain-weighted sample", "domain_weighted")
-        self.vector_generation_mode.addItem("All legal combinations", "all")
+        self.vector_generation_mode.addItem("All legal cases", "all")
         self.vector_generate_limit = QtWidgets.QSpinBox()
         self.vector_generate_limit.setRange(1, 1_000_000)
         self.vector_generate_limit.setValue(10_000)
         self.vector_solver_backend = QtWidgets.QComboBox()
-        self.vector_solver_backend.addItem("Embedded RVWMO (offline)", "embedded")
+        self.vector_solver_backend.addItem("Embedded RVWMO", "embedded")
         self.vector_solver_backend.addItem(
-            "Cross-check with herd7 scalar projection", "crosscheck"
+            "herd7 cross-check", "crosscheck"
         )
         self.vector_solver_backend.setCurrentIndex(0)
         self.vector_verification_effort = QtWidgets.QComboBox()
-        self.vector_verification_effort.addItem("Interactive (fast preview)", "interactive")
+        self.vector_verification_effort.addItem("Interactive", "interactive")
         self.vector_verification_effort.addItem("Balanced", "balanced")
-        self.vector_verification_effort.addItem("Thorough (deep search)", "thorough")
+        self.vector_verification_effort.addItem("Thorough", "thorough")
         self.vector_verification_effort.setCurrentIndex(0)
         self.vector_verification_effort.setToolTip(
             "Controls the per-case search budget and the number of herd7 projections. "
@@ -938,54 +1122,98 @@ class _LitmusLinkQtWindow:
             "Maximum local processes used by Embedded RVWMO batch verification. "
             "The runtime also respects CPU affinity and LITMUS_LINK_SOLVER_WORKERS."
         )
-        form.addRow("Generation scope", self.vector_complete)
-        form.addRow("Output directory", self.vector_out)
-        form.addRow("Random preview cases", self.vector_preview_limit)
-        form.addRow("Preview distribution", self.vector_preview_sampling)
-        form.addRow("Random seed", self.vector_random_seed)
-        form.addRow("Generation mode", self.vector_generation_mode)
-        form.addRow("Maximum generated cases", self.vector_generate_limit)
-        form.addRow("Vector solver backend", self.vector_solver_backend)
-        form.addRow("Verification effort", self.vector_verification_effort)
-        form.addRow("Solver processes", self.vector_solver_workers)
+        basic_grid.addWidget(self.vector_complete, 0, 0)
+        basic_grid.addWidget(self._compact_field("Output directory", self.vector_out), 0, 1, 1, 3)
+        basic_grid.addWidget(self._compact_field("Preview cases", self.vector_preview_limit), 1, 0)
+        basic_grid.addWidget(self._compact_field("Preview distribution", self.vector_preview_sampling), 1, 1)
+        basic_grid.addWidget(self._compact_field("Random seed", self.vector_random_seed), 1, 2)
+        basic_grid.addWidget(self._compact_field("Solver processes", self.vector_solver_workers), 1, 3)
+        basic_grid.addWidget(self._compact_field("Generation mode", self.vector_generation_mode), 2, 0)
+        basic_grid.addWidget(self._compact_field("Generated file cap", self.vector_generate_limit), 2, 1)
+        basic_grid.addWidget(self._compact_field("Solver backend", self.vector_solver_backend), 2, 2)
+        basic_grid.addWidget(self._compact_field("Verification effort", self.vector_verification_effort), 2, 3)
+        for column in range(4):
+            basic_grid.setColumnStretch(column, 1)
         layout.addWidget(basic_group)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setObjectName("VectorAxesScroll")
-        scroll.setWidgetResizable(True)
-        self.vector_filter_widget = QtWidgets.QWidget()
-        filter_layout = QtWidgets.QVBoxLayout(self.vector_filter_widget)
-        filter_layout.setContentsMargins(0, 0, 8, 0)
-        filter_layout.setSpacing(8)
+        self.vector_filter_widget = QtWidgets.QTabWidget()
+        self.vector_filter_widget.setObjectName("VectorAxesTabs")
+        relations_page, relations_layout = self._axis_scroll_page(
+            "VectorRelationsScroll"
+        )
+        endpoints_page, endpoints_layout = self._axis_scroll_page(
+            "VectorEndpointsScroll"
+        )
+        memory_page, vector_memory_layout = self._axis_scroll_page(
+            "VectorMemoryScroll"
+        )
+        vector_page, vector_parameter_layout = self._axis_scroll_page(
+            "VectorParametersScroll"
+        )
+        self.vector_filter_widget.addTab(relations_page, "Relations")
+        self.vector_filter_widget.addTab(endpoints_page, "Endpoints")
+        self.vector_filter_widget.addTab(memory_page, "Memory")
+        self.vector_filter_widget.addTab(vector_page, "Vector")
+
         vector_forms = [
             value for value in self.options["axes"]["vector"] if value != "none"
         ]
-        core_header = QtWidgets.QLabel("Core axes")
-        core_header.setObjectName("AxisSectionHeader")
-        filter_layout.addWidget(core_header)
-        core_groups = [
+        relation_groups = [
             ("Relation skeletons", "skeletons", self.options["axes"]["skeleton"], 5, _axis_label),
             ("Relation mechanisms", "mechanisms", self.options["vector_native"]["mechanisms"], 3, _axis_label),
+        ]
+        endpoint_groups = [
             ("Endpoint categories", "endpoint_categories", ("vector", "scalar", "amo"), 3, _endpoint_category_label),
             ("Endpoint composition", "endpoint_compositions", self.options["vector_native"]["endpoint_compositions"], 2, _endpoint_composition_label),
-            ("Vector memory forms", "forms", vector_forms, 2, _vector_form_label),
         ]
-        for title, key, values, columns, labeler in core_groups:
-            filter_layout.addWidget(
+        for title, key, values, columns, labeler in relation_groups:
+            relations_layout.addWidget(
                 self._build_vector_choice_group(
                     title, key, values, columns, labeler=labeler, role="core"
                 )
             )
-        parameter_header = QtWidgets.QLabel("Parameter axes")
-        parameter_header.setObjectName("AxisSectionHeader")
-        filter_layout.addWidget(parameter_header)
-        parameter_groups = [
+        for title, key, values, columns, labeler in endpoint_groups:
+            endpoints_layout.addWidget(
+                self._build_vector_choice_group(
+                    title, key, values, columns, labeler=labeler, role="core"
+                )
+            )
+
+        endpoint_parameter_groups = [
             ("Scalar width", "scalar_widths", self.options["vector_native"]["scalar_widths"], 4, _scalar_width_label),
             ("AMO opcode", "amo_ops", self.options["vector_native"]["amo_ops"], 3, _amo_op_label),
             ("AMO width", "amo_widths", self.options["vector_native"]["amo_widths"], 2, _amo_width_label),
             ("AMO ordering", "amo_orderings", self.options["vector_native"]["amo_orderings"], 2, _amo_ordering_label),
+        ]
+        for title, key, values, columns, labeler in endpoint_parameter_groups:
+            endpoints_layout.addWidget(
+                self._build_vector_choice_group(
+                    title, key, values, columns, labeler=labeler, role="parameter"
+                )
+            )
+
+        memory_groups = [
             ("Overlap layout", "overlap_layouts", self.options["vector_native"]["overlap_layouts"], 2, _overlap_layout_label),
             ("Vector element alignment", "alignments", self.options["vector_native"]["alignments"], 2, _vector_alignment_label),
+        ]
+        for title, key, values, columns, labeler in memory_groups:
+            vector_memory_layout.addWidget(
+                self._build_vector_choice_group(
+                    title, key, values, columns, labeler=labeler, role="parameter"
+                )
+            )
+
+        vector_parameter_layout.addWidget(
+            self._build_vector_choice_group(
+                "Vector memory forms",
+                "forms",
+                vector_forms,
+                2,
+                labeler=_vector_form_label,
+                role="core",
+            )
+        )
+        vector_parameter_groups = [
             ("Data SEW", "sew", PARAM_AXIS_VALUES["sew"], 4, _sew_label),
             ("LMUL", "lmul", PARAM_AXIS_VALUES["lmul"], 4, _axis_label),
             ("Indexed offset EEW", "index_eew", PARAM_AXIS_VALUES["index_eew"], 4, _index_eew_label),
@@ -995,15 +1223,20 @@ class _LitmusLinkQtWindow:
             ("Tail and mask policy", "tail", PARAM_AXIS_VALUES["tail"], 4, _tail_label),
             ("Vector length", "vl", PARAM_AXIS_VALUES["vl"], 4, _vl_label),
         ]
-        for title, key, values, columns, labeler in parameter_groups:
-            filter_layout.addWidget(
+        for title, key, values, columns, labeler in vector_parameter_groups:
+            vector_parameter_layout.addWidget(
                 self._build_vector_choice_group(
                     title, key, values, columns, labeler=labeler, role="parameter"
                 )
             )
-        filter_layout.addStretch(1)
-        scroll.setWidget(self.vector_filter_widget)
-        layout.addWidget(scroll, 1)
+        for page_layout in (
+            relations_layout,
+            endpoints_layout,
+            vector_memory_layout,
+            vector_parameter_layout,
+        ):
+            page_layout.addStretch(1)
+        layout.addWidget(self.vector_filter_widget, 1)
 
         self.vector_complete.toggled.connect(self._update_vector_scope)
         self.vector_generation_mode.currentIndexChanged.connect(
@@ -1027,6 +1260,7 @@ class _LitmusLinkQtWindow:
         group = QtWidgets.QGroupBox(title)
         group.setObjectName("VectorFilterGroup")
         group.setProperty("axis_role", role)
+        group.setProperty("base_title", title)
         grid = QtWidgets.QGridLayout(group)
         grid.setContentsMargins(10, 8, 10, 10)
         grid.setHorizontalSpacing(14)
@@ -1036,6 +1270,8 @@ class _LitmusLinkQtWindow:
             value = str(value)
             check = QtWidgets.QCheckBox(labeler(value) if labeler else value)
             check.setProperty("axis_value", str(value))
+            check.setProperty("axis_key", key)
+            check.setProperty("choice_role", role)
             check.setToolTip(value)
             check.setChecked(True)
             grid.addWidget(check, index // columns, index % columns)
@@ -1046,6 +1282,7 @@ class _LitmusLinkQtWindow:
             )
             checks.append(check)
         self.vector_checks[key] = checks
+        self.vector_group_titles[key] = title
         self.vector_filter_groups.append(group)
         self.vector_group_by_key[key] = group
         if role == "core":
@@ -1060,17 +1297,44 @@ class _LitmusLinkQtWindow:
                     check.setEnabled(False)
         elif key == "endpoint_compositions":
             self.vector_composition_checks = checks
+        self._update_vector_group_title(key)
+        for check in checks:
+            check.setProperty("choice_state", "on" if check.isChecked() else "off")
+            self._refresh_widget_style(check)
         return group
 
     def _update_vector_choice_style(self, control: Any, checked: bool) -> None:
+        key = str(control.property("axis_key") or "")
+        checks = self.vector_checks.get(key, [])
+        group = self.vector_group_by_key.get(key)
+        if (
+            not checked
+            and group is not None
+            and group.isEnabled()
+            and control.isEnabled()
+            and not any(check.isChecked() for check in checks)
+        ):
+            self._set_checked_without_signal(control, True)
+            checked = True
         control.setProperty("choice_state", "on" if checked else "off")
         self._refresh_widget_style(control)
+        self._update_vector_group_title(key)
         if control in self.vector_category_checks:
             self._update_vector_endpoint_scope()
         elif control in self.vector_composition_checks:
             self._ensure_vector_composition()
         elif control in self.vector_checks.get("forms", []):
             self._update_vector_form_scope()
+
+    def _update_vector_group_title(self, key: str) -> None:
+        group = self.vector_group_by_key.get(key)
+        checks = self.vector_checks.get(key, [])
+        if group is None or not checks:
+            return
+        selected = sum(check.isChecked() for check in checks)
+        group.setTitle(
+            f"{self.vector_group_titles.get(key, group.title())}  {selected}/{len(checks)}"
+        )
 
     def _update_vector_endpoint_scope(self) -> None:
         selected = {
@@ -1116,6 +1380,7 @@ class _LitmusLinkQtWindow:
                 if str(check.property("axis_value")) == "vector_only" and check.isEnabled():
                     check.setChecked(True)
                     break
+        self._update_vector_group_title("endpoint_compositions")
 
     def _update_vector_form_scope(self) -> None:
         indexed = any(
@@ -1167,6 +1432,14 @@ class _LitmusLinkQtWindow:
                 for check in checks:
                     check.setChecked(True)
         self.vector_filter_widget.setEnabled(not complete)
+        self.vector_basic_group.setProperty(
+            "scope_mode", "complete" if complete else "custom"
+        )
+        self.vector_complete.setProperty(
+            "choice_state", "on" if complete else "custom"
+        )
+        self._refresh_widget_style(self.vector_basic_group)
+        self._refresh_widget_style(self.vector_complete)
         for group in self.vector_filter_groups:
             group.setProperty("group_state", "inactive" if complete else "active")
             self._refresh_widget_style(group)
@@ -2900,6 +3173,7 @@ def _stylesheet() -> str:
     QLabel#AxisSectionHeader { color: #0f4c5c; font-size: 14px; font-weight: 700; padding: 7px 2px 2px 2px; }
     QLabel#FlowArrow { color: #64748b; font-size: 18px; font-weight: 700; }
     QLabel#SectionTitle { color: #111827; font-size: 17px; font-weight: 700; }
+    QLabel#CompactFieldLabel { color: #475569; font-size: 12px; font-weight: 700; }
     QLabel#DialogFileName { color: #475569; font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 12px; }
     QTabWidget::pane { border: 1px solid #cfd9e6; border-radius: 7px; background: #ffffff; }
     QTabBar::tab { background: #e7edf5; color: #475569; padding: 8px 14px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
@@ -2909,11 +3183,19 @@ def _stylesheet() -> str:
     QGroupBox#AxisGroup[axis_role="parameter"] { border: 1px solid #d7dee8; background: #ffffff; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#AxisGroup[axis_role="parameter"][group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
+    QGroupBox#ScalarPrimaryGroup { border: 1px solid #0f766e; background: #f0fdfa; }
+    QGroupBox#ScalarParameterGroup { border: 1px solid #94a3b8; background: #f8fafc; }
+    QFrame#ScalarMemoryScope { border: 1px solid #cbd5e1; border-radius: 6px; background: #f8fafc; }
+    QFrame#ScalarMemoryScope[group_state="active"] { border: 2px solid #2563eb; background: #eff6ff; }
+    QGroupBox#ScalarMemoryChoiceGroup[group_state="active"] { border: 1px solid #2563eb; background: #eff6ff; }
+    QGroupBox#ScalarMemoryChoiceGroup[group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; color: #94a3b8; }
     QGroupBox#VectorFilterGroup[group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#VectorFilterGroup[group_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; }
     QGroupBox#VectorFilterGroup[axis_role="core"][group_state="active"] { border: 2px solid #0f766e; background: #ecfdf5; }
     QGroupBox#VectorFilterGroup[axis_role="parameter"][group_state="active"] { border: 1px solid #2563eb; background: #eff6ff; }
     QGroupBox#VectorFilterGroup[dependency_state="inactive"] { border: 1px solid #d7dee8; background: #f8fafc; color: #94a3b8; }
+    QGroupBox#VectorBasicConfiguration[scope_mode="custom"] { border: 2px solid #2563eb; background: #eff6ff; }
+    QTabWidget#ScalarAxisTabs::pane, QTabWidget#VectorAxesTabs::pane { border: 1px solid #d7dee8; background: #ffffff; }
     QLineEdit, QComboBox, QPlainTextEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 7px; }
     QComboBox#VectorGenerationMode[exhaustive="true"] { border: 2px solid #b45309; background: #fff7ed; color: #9a3412; font-weight: 700; }
     QPlainTextEdit { font-family: monospace; font-size: 12px; }
@@ -2925,9 +3207,14 @@ def _stylesheet() -> str:
     QTreeWidget#PreviewStats::item { padding: 3px 6px; }
     QHeaderView::section { background: #172033; color: #ffffff; padding: 6px 8px; border: none; border-right: 1px solid #2a3650; font-weight: 700; }
     QCheckBox { spacing: 7px; padding: 3px 6px; border-radius: 5px; }
+    QCheckBox[choice_state="on"][choice_role="core"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
+    QCheckBox[choice_state="on"][choice_role="parameter"] { background: #dbeafe; color: #1e3a8a; font-weight: 700; }
     QCheckBox[choice_state="on"] { background: #d1fae5; color: #064e3b; font-weight: 700; }
-    QCheckBox[choice_state="off"] { background: #fee2e2; color: #7f1d1d; font-weight: 700; }
+    QCheckBox[choice_state="custom"] { background: #dbeafe; color: #1e3a8a; font-weight: 700; }
+    QCheckBox[choice_state="off"] { background: #f1f5f9; color: #64748b; }
     QCheckBox#VectorComplete:checked { background: #d1fae5; color: #064e3b; font-weight: 700; }
+    QCheckBox#VectorComplete:unchecked { background: #dbeafe; color: #1e3a8a; font-weight: 700; }
+    QCheckBox#ScalarMemoryEnable:checked { background: #dbeafe; color: #1e3a8a; font-weight: 700; }
     QCheckBox:disabled { color: #94a3b8; background: transparent; }
     QPushButton { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px 12px; font-weight: 700; }
     QPushButton:hover { background: #eef6ff; }

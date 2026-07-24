@@ -211,7 +211,7 @@ def test_dedicated_vector_mode_uses_relation_cycles_and_random_final_cases(tmp_p
     preview = preview_payload(payload)
     assert preview["source"] == "litmus-link-native-cycle+rvv"
     assert preview["report"]["total_combinations"] > 5
-    assert preview["report"]["generated_litmus"] == preview["report"]["total_combinations"]
+    assert preview["report"]["generated_litmus"] == 5
     assert len(preview["sample"]) == 5
     assert {item["case_ir"]["variant"] for item in preview["sample"]} == {
         "vector-native-cycle"
