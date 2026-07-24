@@ -13,7 +13,7 @@ from .corpus_ir import corpus_to_ir
 from .corpus_riscv import parse_litmus
 from .diagram import DIAGRAM_RENDER_VERSION, diagram_summary, render_diagram
 from .litmus_ir import LitmusCaseIR
-from .models import GENERATED, Combination
+from .models import GENERATED, Combination, GeneratedCase
 from .native_scalar import (
     DEFAULT_NATIVE_MECHANISMS,
     NATIVE_ANNOTATIONS,
@@ -134,12 +134,17 @@ def options_payload() -> Dict[str, Any]:
 def preview_payload(
     payload: Dict[str, Any],
     progress_callback: Callable[[int, int, str], None] | None = None,
+    prepared_callback: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     mode = str(payload.get("mode", "scalar"))
     if mode == "scalar":
         return _scalar_preview_payload(payload, progress_callback=progress_callback)
     if mode == "vector":
-        return _vector_native_preview_payload(payload, progress_callback=progress_callback)
+        return _vector_native_preview_payload(
+            payload,
+            progress_callback=progress_callback,
+            prepared_callback=prepared_callback,
+        )
     raise ValueError("GUI workflow supports only scalar and vector modes")
 
 
@@ -233,13 +238,26 @@ def _vector_native_preview_payload(
     payload: Dict[str, Any],
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    prepared_callback: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     compute_verdicts = bool(payload.get("compute_verdicts", True))
+
+    def publish_prepared(
+        cases: Iterable[GeneratedCase],
+        domain_summary: Dict[str, Any],
+    ) -> None:
+        if prepared_callback is None:
+            return
+        prepared_callback(
+            _provisional_vector_preview_payload(cases, domain_summary)
+        )
+
     cases, audit = sample_vector_cases(
         payload,
         compute_verdicts=compute_verdicts,
         compact_solver_results=True,
         progress_callback=progress_callback,
+        prepared_callback=publish_prepared if prepared_callback is not None else None,
     )
     sample = [
         _preview_item(
@@ -255,14 +273,18 @@ def _vector_native_preview_payload(
         )
         for case in cases
     ]
+    exact_total = audit.get("total_cases")
+    cardinality_exact = bool(audit.get("cardinality_exact", True))
     report = {
         "schema": "litmus-link.vector-native-preview.v2",
         "profile": "vector-native",
-        "total_combinations": audit["total_cases"],
-        "generated": audit["total_cases"],
-        "generated_litmus": audit["total_cases"],
+        "total_combinations": exact_total,
+        "case_upper_bound": audit.get("case_upper_bound"),
+        "cardinality_exact": cardinality_exact,
+        "generated": len(sample),
+        "generated_litmus": len(sample),
         "displayed_litmus": len(sample),
-        "raw_combinations": audit.get("raw_combinations", audit["total_cases"]),
+        "raw_combinations": audit.get("raw_combinations"),
         "excluded_illegal": audit.get("excluded_illegal", 0),
         "excluded_unsupported": audit.get("excluded_unsupported", 0),
         "excluded": audit.get("excluded", {}),
@@ -279,13 +301,17 @@ def _vector_native_preview_payload(
         "profile": "vector-native",
         "source": "litmus-link-native-cycle+rvv",
         "report": report,
-        "available_litmus": audit["total_cases"],
+        "available_litmus": exact_total,
+        "case_upper_bound": audit.get("case_upper_bound"),
+        "cardinality_exact": cardinality_exact,
         "displayed_litmus": len(sample),
         "sample": sample,
         "classification_counts": _preview_classification_counts(sample),
         "domain_classification_counts": {
-            "domain_cases": audit["total_cases"],
-            "generated_cases": audit["total_cases"],
+            "domain_cases": exact_total,
+            "case_upper_bound": audit.get("case_upper_bound"),
+            "cardinality_exact": cardinality_exact,
+            "generated_cases": len(sample),
             "relation_cycles": audit["relation_cycles"],
             "read_endpoint_choices": audit["read_endpoint_choices"],
             "write_endpoint_choices": audit["write_endpoint_choices"],
@@ -293,6 +319,120 @@ def _vector_native_preview_payload(
             "excluded": audit.get("excluded", {}),
         },
         "audit": audit,
+    }
+
+
+def _provisional_vector_preview_payload(
+    cases: Iterable[GeneratedCase],
+    domain_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build lightweight rows while solver workers verify full case IRs."""
+
+    case_list = list(cases)
+    sample = [_provisional_vector_preview_item(case) for case in case_list]
+    cardinality_exact = bool(domain_summary.get("cardinality_exact", True))
+    total_cases = domain_summary.get("total_cases")
+    report = {
+        "schema": "litmus-link.vector-native-preview.v2",
+        "profile": "vector-native",
+        "total_combinations": total_cases,
+        "case_upper_bound": domain_summary.get("case_upper_bound"),
+        "cardinality_exact": cardinality_exact,
+        "generated": len(sample),
+        "generated_litmus": len(sample),
+        "displayed_litmus": len(sample),
+        "sampling": domain_summary.get("sampling"),
+        "random_seed": domain_summary.get("sample_seed"),
+        "relation_cycles": domain_summary.get("relation_cycles", 0),
+        "solver_backend": domain_summary.get("solver_backend"),
+        "solver_workers": domain_summary.get("solver_workers"),
+        "verification_effort": domain_summary.get("verification_effort"),
+        "verification_pending": True,
+    }
+    return {
+        "profile": "vector-native",
+        "source": "litmus-link-native-cycle+rvv",
+        "report": report,
+        "available_litmus": total_cases,
+        "case_upper_bound": domain_summary.get("case_upper_bound"),
+        "cardinality_exact": cardinality_exact,
+        "displayed_litmus": len(sample),
+        "sample": sample,
+        "classification_counts": _preview_classification_counts(sample),
+        "domain_classification_counts": {
+            "domain_cases": total_cases,
+            "case_upper_bound": domain_summary.get("case_upper_bound"),
+            "cardinality_exact": cardinality_exact,
+            "generated_cases": len(sample),
+            "relation_cycles": domain_summary.get("relation_cycles", 0),
+            "read_endpoint_choices": domain_summary.get(
+                "read_endpoint_choices", 0
+            ),
+            "write_endpoint_choices": domain_summary.get(
+                "write_endpoint_choices", 0
+            ),
+            "sampling": domain_summary.get("sampling"),
+        },
+        "verification_pending": True,
+    }
+
+
+def _provisional_vector_preview_item(case: GeneratedCase) -> Dict[str, Any]:
+    case_ir = case.case_ir
+    if case_ir is None:
+        raise ValueError("Vector preview case has no case IR")
+    metadata = case_ir.metadata
+    case_ir_summary = {
+        "schema": case_ir.schema,
+        "name": case_ir.name,
+        "file_name": case.file_name,
+        "display_name": case_ir.display_name,
+        "combination_name": case_ir.combination_name,
+        "skeleton": case_ir.skeleton,
+        "variant": case_ir.variant,
+        "cycle": case_ir.cycle,
+        "harts": [[] for _hart in case_ir.harts],
+        "relations": [relation.to_json() for relation in case_ir.relations],
+        "exists": case_ir.exists,
+        "expected_outcome": case_ir.expected_outcome,
+        "model": case_ir.model,
+        "metadata": {
+            key: metadata[key]
+            for key in ("endpoint_choices", "memory_layout", "vector_instructions")
+            if key in metadata
+        },
+    }
+    pending_solver = {
+        "status": "pending",
+        "verdict": "pending",
+        "allowed": None,
+        "cross_check": "not_run",
+        "reason": "RVWMO outcome verification is in progress",
+    }
+    return {
+        "name": case_ir.display_name,
+        "case_id": case_ir.name,
+        "file_name": case.file_name,
+        "combination": case.combination.to_json(),
+        "decision": case.decision.to_json(),
+        "litmus": "",
+        "case_ir": case_ir_summary,
+        "solver": pending_solver,
+        "diagram": None,
+        "analysis": {
+            "cycle": case_ir.cycle,
+            "cycle_tokens": [
+                relation.label or relation.kind for relation in case_ir.relations
+            ],
+            "exists": case_ir.exists,
+            "outcome_interpretation": "RVWMO outcome verification is in progress.",
+            "forbidden_outcome": "RVWMO outcome verification is in progress.",
+            "solver_status": "pending",
+            "solver_verdict": "pending",
+            "harts": case_ir.hart_names(),
+            "memory_locations": case_ir.memory_locations(),
+        },
+        "provisional": True,
     }
 
 

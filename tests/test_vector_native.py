@@ -142,6 +142,38 @@ def test_random_vector_preview_is_reproducible_and_not_prefix_ordered() -> None:
     assert first_audit["sampling_mode"] == "balanced"
 
 
+def test_deferred_cardinality_preview_publishes_pending_rows(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(vector_native, "_MAX_EXACT_CARDINALITY_WORK", 0)
+    prepared = []
+    result = preview_payload(
+        _small_payload(
+            sample_limit=6,
+            compute_verdicts=False,
+            solver_backend="embedded",
+        ),
+        prepared_callback=prepared.append,
+    )
+
+    assert len(prepared) == 1
+    pending = prepared[0]
+    assert pending["verification_pending"] is True
+    assert pending["cardinality_exact"] is False
+    assert pending["available_litmus"] is None
+    assert pending["case_upper_bound"] is not None
+    assert len(pending["sample"]) == 6
+    assert all(item["provisional"] is True for item in pending["sample"])
+    assert all(item["solver"]["status"] == "pending" for item in pending["sample"])
+    assert all(item["file_name"].endswith(".litmus") for item in pending["sample"])
+
+    assert result["cardinality_exact"] is False
+    assert result["available_litmus"] is None
+    assert len(result["sample"]) == 6
+    assert all("provisional" not in item for item in result["sample"])
+    assert all(item["solver"]["status"] == "unchecked" for item in result["sample"])
+
+
 def test_balanced_sampling_allocates_equal_skeleton_quotas() -> None:
     domain = VectorNativeDomain.from_payload(
         _small_payload(

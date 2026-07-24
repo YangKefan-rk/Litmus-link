@@ -81,6 +81,7 @@ def _make_worker_class(QtCore: Any) -> Any:
     class ActionWorker(QtCore.QObject):
         started = _signal(QtCore, str)
         progress = _signal(QtCore, object)
+        preview_ready = _signal(QtCore, object)
         finished = _signal(QtCore, str, object)
         failed = _signal(QtCore, str, str)
 
@@ -137,6 +138,7 @@ def _make_worker_class(QtCore: Any) -> Any:
                     result = preview_payload(
                         verify_payload,
                         progress_callback=self._report_progress,
+                        prepared_callback=self.preview_ready.emit,
                     )
                 elif action == "audit":
                     self._stage("Classifying combinations with legality rules")
@@ -285,6 +287,10 @@ def _make_ui_receiver_class(QtCore: Any) -> Any:
         @_slot(QtCore, object)
         def handle_progress(self, payload: object) -> None:
             self.owner._handle_progress(payload)
+
+        @_slot(QtCore, object)
+        def handle_preview_ready(self, payload: object) -> None:
+            self.owner._handle_provisional_preview(payload)
 
         @_slot(QtCore, str, object)
         def handle_finished(self, label: str, result: object) -> None:
@@ -437,6 +443,7 @@ class _LitmusLinkQtWindow:
         self.action_bus.request.connect(self.action_worker.run_request)
         self.action_worker.started.connect(self.ui_receiver.handle_started)
         self.action_worker.progress.connect(self.ui_receiver.handle_progress)
+        self.action_worker.preview_ready.connect(self.ui_receiver.handle_preview_ready)
         self.action_worker.finished.connect(self.ui_receiver.handle_finished)
         self.action_worker.failed.connect(self.ui_receiver.handle_failed)
         self.action_thread.start()
@@ -1552,6 +1559,22 @@ class _LitmusLinkQtWindow:
             else self.summary_view
         )
 
+    def _handle_provisional_preview(self, result: object) -> None:
+        if self.active_label != "Verify Preview" or not isinstance(result, dict):
+            return
+        self._populate_preview_list(result)
+        count = len(result.get("sample", []))
+        self.summary_view.setPlainText(
+            f"Verify Preview is running.\n\n"
+            f"Prepared {count:,} cases; RVWMO outcomes are pending. "
+            "The rows will be replaced with final verdicts when verification completes."
+        )
+        self.status_label.setText(
+            f"Verify Preview: prepared {count:,} cases; checking RVWMO outcomes"
+        )
+        self.result_tabs.setCurrentWidget(self.preview_page)
+        self._append_log(f"Prepared {count:,} preview cases; outcome verification continues")
+
     def _handle_failed(self, label: str, message: str) -> None:
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
         self.progress_bar.setRange(0, 100)
@@ -1648,7 +1671,12 @@ class _LitmusLinkQtWindow:
             or 0
         )
         domain = int(statistics.get("domain_cases", 0) or 0)
-        if domain:
+        cardinality_exact = bool(statistics.get("cardinality_exact", True))
+        if not cardinality_exact:
+            self.preview_stats_label.setText(
+                f"Large finite domain: exact count deferred; preview shows {displayed:,} sampled cases"
+            )
+        elif domain:
             generated = int(statistics.get("generated_cases", domain) or 0)
             self.preview_stats_label.setText(
                 f"Full domain: {generated:,} generated cases; preview shows {displayed:,}"
@@ -1711,6 +1739,12 @@ class _LitmusLinkQtWindow:
         index = item.data(_user_role(self.QtCore))
         if index is None or index < 0 or index >= len(self.preview_items):
             return
+        if self.preview_items[index].get("provisional"):
+            self.status_label.setText(
+                "Case details become available after RVWMO verification completes"
+            )
+            self._append_log("Case inspector deferred while this case is still pending")
+            return
         dialog = _LitmusPreviewDialog(self.QtWidgets, self.QtCore, self.QtGui, self.preview_items[index], self.window)
         screen = self.window.screen()
         if screen is None:
@@ -1764,13 +1798,24 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
     )
     if solver_workers is not None:
         lines.append(f"Solver processes used: {solver_workers}")
+    cardinality_exact = bool(counts.get("cardinality_exact", True))
+    total_value = counts.get(
+        "total_combinations",
+        counts.get("available_litmus", counts.get("total_cases")),
+    )
+    if not cardinality_exact and total_value is None:
+        total_text = "deferred (large finite domain)"
+    else:
+        total_text = str(total_value if total_value is not None else "-")
+    raw_value = counts.get("raw_combinations")
+    raw_text = str(raw_value if raw_value is not None else "deferred")
     lines.extend(
         [
             f"Output directory: {out_dir}",
             "",
             "Counts:",
-            f"  total combinations: {counts.get('total_combinations', counts.get('available_litmus', counts.get('total_cases', '-')))}",
-            f"  raw combinations: {counts.get('raw_combinations', '-')}",
+            f"  total combinations: {total_text}",
+            f"  raw combinations: {raw_text}",
             f"  generated: {counts.get('generated', counts.get('generated_litmus', '-'))}",
             f"  excluded illegal: {counts.get('excluded_illegal', '-')}",
             f"  excluded unsupported: {counts.get('excluded_unsupported', '-')}",
@@ -1848,6 +1893,8 @@ def _summary_text(label: str, result: Dict[str, Any], out_dir: str) -> str:
         )
     if "sample" in result:
         available = counts.get("available_litmus", result.get("available_litmus", len(result.get("sample", []))))
+        if available is None and not cardinality_exact:
+            available = "exact count deferred"
         lines.extend(
             [
                 "",

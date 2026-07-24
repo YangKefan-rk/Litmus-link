@@ -75,6 +75,10 @@ from .solver import solve_generated_case
 
 
 ProgressCallback = Callable[[int, int, str], None]
+PreparedCasesCallback = Callable[
+    [Sequence[GeneratedCase], Mapping[str, Any]],
+    None,
+]
 
 VECTOR_ALIGNMENTS = VECTOR_ALIGNMENT_MODES
 
@@ -111,6 +115,12 @@ VECTOR_SAMPLING_LABELS = {
     VECTOR_SAMPLE_DOMAIN_WEIGHTED: "domain-weighted-random-without-replacement",
     VECTOR_GENERATE_ALL: "exhaustive-deterministic-enumeration",
 }
+
+# Exact cardinality remains useful for focused configurations, but the full
+# GUI domain contains six-endpoint cycles and misaligned overlap geometries.
+# Exhaustively classifying those geometries before drawing the first preview
+# case is more expensive than sampling the requested cases themselves.
+_MAX_EXACT_CARDINALITY_WORK = 5_000_000
 
 VECTOR_VERIFICATION_EFFORTS = ("interactive", "balanced", "thorough")
 VECTOR_VERIFICATION_LIMITS: Mapping[str, Mapping[str, Any]] = {
@@ -606,6 +616,76 @@ class VectorNativeDomain:
     def choices_for(self, direction: str) -> tuple[EndpointChoice, ...]:
         return self.read_choices if direction == READ else self.write_choices
 
+    @cached_property
+    def _choices_by_direction_category(
+        self,
+    ) -> Mapping[tuple[str, str], tuple[EndpointChoice, ...]]:
+        return {
+            (direction, category): tuple(
+                choice
+                for choice in self.choices_for(direction)
+                if choice.category == category
+            )
+            for direction in (READ, WRITE)
+            for category in ENDPOINT_CATEGORIES
+        }
+
+    @cached_property
+    def cardinality_work_estimate(self) -> int:
+        """Conservative operation count for the exact geometry audit.
+
+        The estimate depends on relation/location structure and byte-width
+        classes, not on the often much larger number of concrete Vector
+        instruction configurations represented by each width class.
+        """
+
+        work = 0
+        structures = {_cycle_structure_key(cycle) for cycle in self.cycles}
+        alignment_layouts = max(len(self.alignments), 1) * max(
+            len(self.overlap_layouts), 1
+        )
+        for directions, locations, _relations in structures:
+            category_states = _product(
+                max(len(self._width_multiplicities[direction]), 1)
+                for direction in directions
+            )
+            group_width_states = 0
+            for location in set(locations):
+                vertices = tuple(
+                    vertex
+                    for vertex, actual in enumerate(locations)
+                    if actual == location
+                )
+                group_width_states += _product(
+                    max(
+                        (
+                            len(widths)
+                            for widths in self._width_multiplicities[
+                                directions[vertex]
+                            ].values()
+                        ),
+                        default=1,
+                    )
+                    for vertex in vertices
+                )
+            work += category_states * max(group_width_states, 1) * alignment_layouts
+        return work
+
+    @cached_property
+    def cardinality_exact(self) -> bool:
+        return self.cardinality_work_estimate <= _MAX_EXACT_CARDINALITY_WORK
+
+    def _raw_upper_bound_for_cycle(self, cycle: NativeCycle) -> int:
+        endpoint_product = _product(
+            len(self.choices_for(direction))
+            for direction in vertex_directions(cycle.edges)
+        )
+        return endpoint_product * len(self.alignments) * len(self.overlap_layouts)
+
+    @cached_property
+    def raw_case_upper_bound(self) -> int:
+        return sum(self._raw_upper_bound_for_cycle(cycle) for cycle in self.cycles)
+
     def count_for_cycle(self, cycle: NativeCycle) -> int:
         return self._cycle_count_breakdown(cycle)["generated"]
 
@@ -739,6 +819,15 @@ class VectorNativeDomain:
         seed: int,
         strategy: str = VECTOR_SAMPLE_BALANCED,
     ) -> list[VectorAssignment]:
+        if not self.cardinality_exact:
+            if strategy == VECTOR_SAMPLE_BALANCED:
+                return self._bounded_balanced_assignments(limit, seed)
+            if strategy == VECTOR_SAMPLE_DOMAIN_WEIGHTED:
+                return self._bounded_domain_weighted_assignments(limit, seed)
+            raise ValueError(
+                f"unknown Vector sampling strategy: {strategy}; "
+                f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
+            )
         if strategy == VECTOR_SAMPLE_BALANCED:
             return self._balanced_assignments(limit, seed)
         if strategy == VECTOR_SAMPLE_DOMAIN_WEIGHTED:
@@ -747,6 +836,173 @@ class VectorNativeDomain:
             f"unknown Vector sampling strategy: {strategy}; "
             f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
         )
+
+    def _bounded_balanced_assignments(
+        self,
+        limit: int,
+        seed: int,
+    ) -> list[VectorAssignment]:
+        if limit < 1:
+            return []
+        family_cycles = {
+            family: tuple(cycle for cycle in self.cycles if cycle.family == family)
+            for family in dict.fromkeys(cycle.family for cycle in self.cycles)
+        }
+        active = [family for family, cycles in family_cycles.items() if cycles]
+        if not active:
+            return []
+        rng = random.Random(seed)
+        rng.shuffle(active)
+        base, extra = divmod(limit, len(active))
+        quotas = {
+            family: base + int(index < extra)
+            for index, family in enumerate(active)
+        }
+        selected: dict[tuple[Any, ...], VectorAssignment] = {}
+        for family in active:
+            family_rng = random.Random(_derived_seed(seed, family))
+            self._bounded_sample_into(
+                selected,
+                family_cycles[family],
+                quotas[family],
+                family_rng,
+                balance_compositions=True,
+            )
+        assignments = list(selected.values())
+        rng.shuffle(assignments)
+        return assignments[:limit]
+
+    def _bounded_domain_weighted_assignments(
+        self,
+        limit: int,
+        seed: int,
+    ) -> list[VectorAssignment]:
+        if limit < 1 or not self.cycles:
+            return []
+        selected: dict[tuple[Any, ...], VectorAssignment] = {}
+        self._bounded_sample_into(
+            selected,
+            self.cycles,
+            limit,
+            random.Random(seed),
+            balance_compositions=False,
+        )
+        return list(selected.values())[:limit]
+
+    def _bounded_sample_into(
+        self,
+        selected: dict[tuple[Any, ...], VectorAssignment],
+        cycles: Sequence[NativeCycle],
+        requested: int,
+        rng: random.Random,
+        *,
+        balance_compositions: bool,
+    ) -> None:
+        if requested < 1 or not cycles:
+            return
+        initial = len(selected)
+        target = initial + requested
+        patterns: dict[
+            tuple[tuple[str, ...], str],
+            tuple[tuple[str, ...], ...],
+        ] = {}
+        viable_layouts = tuple(
+            layout for layout in self.overlap_layouts if layout != "disjoint_control"
+        )
+        if not viable_layouts:
+            return
+
+        if balance_compositions:
+            cycle_weights = None
+            cumulative = None
+            raw_total = None
+        else:
+            cycle_weights = [self._raw_upper_bound_for_cycle(cycle) for cycle in cycles]
+            cumulative = []
+            running = 0
+            for weight in cycle_weights:
+                running += weight
+                cumulative.append(running)
+            raw_total = running
+
+        attempts = 0
+        max_attempts = max(requested * 200, 2_000)
+        while len(selected) < target and attempts < max_attempts:
+            attempts += 1
+            if cumulative is None or raw_total is None:
+                cycle = rng.choice(cycles)
+            else:
+                cycle = cycles[
+                    bisect.bisect_right(cumulative, rng.randrange(raw_total))
+                ]
+            directions = vertex_directions(cycle.edges)
+
+            if balance_compositions:
+                composition = self.compositions[
+                    (len(selected) - initial + attempts - 1) % len(self.compositions)
+                ]
+                required = _COMPOSITION_CATEGORIES[composition]
+                key = (directions, composition)
+                category_patterns = patterns.get(key)
+                if category_patterns is None:
+                    category_domains = tuple(
+                        tuple(
+                            category
+                            for category in ENDPOINT_CATEGORIES
+                            if self._choices_by_direction_category[(direction, category)]
+                        )
+                        for direction in directions
+                    )
+                    category_patterns = tuple(
+                        values
+                        for values in product(*category_domains)
+                        if frozenset(values) == required
+                    )
+                    patterns[key] = category_patterns
+                if not category_patterns:
+                    continue
+                categories = rng.choice(category_patterns)
+                choices = tuple(
+                    rng.choice(
+                        self._choices_by_direction_category[(direction, category)]
+                    )
+                    for direction, category in zip(directions, categories)
+                )
+            else:
+                choices = tuple(
+                    rng.choice(self.choices_for(direction)) for direction in directions
+                )
+                if not self._composition_allowed(choices):
+                    continue
+
+            categories = frozenset(choice.category for choice in choices)
+            alignment_candidates = tuple(
+                alignment
+                for alignment in self.alignments
+                if alignment == "aligned" or "amo" not in categories
+            )
+            if not alignment_candidates:
+                continue
+            alignment = rng.choice(alignment_candidates)
+            overlap_layout = rng.choice(viable_layouts)
+            try:
+                self._layout_for(cycle, choices, alignment, overlap_layout)
+            except FusionLayoutError:
+                continue
+            assignment = VectorAssignment(
+                cycle,
+                choices,
+                alignment,
+                overlap_layout,
+            )
+            selected.setdefault(assignment.key, assignment)
+
+        if len(selected) < target:
+            raise RuntimeError(
+                f"bounded Vector sampler selected {len(selected) - initial:,}/"
+                f"{requested:,} requested unique cases after {attempts:,} attempts; "
+                "narrow the selected compositions or alignment/layout axes"
+            )
 
     def _balanced_assignments(self, limit: int, seed: int) -> list[VectorAssignment]:
         if limit < 1 or self.total_cases < 1:
@@ -912,7 +1168,50 @@ class VectorNativeDomain:
                             cycle, tuple(choices), alignment, overlap_layout
                         )
 
-    def audit(self) -> dict[str, Any]:
+    def audit(self, *, exact: bool | None = None) -> dict[str, Any]:
+        use_exact = self.cardinality_exact if exact is None else bool(exact)
+        if not use_exact:
+            family_cycles = Counter(cycle.family for cycle in self.cycles)
+            family_upper_bounds: Counter[str] = Counter()
+            for cycle in self.cycles:
+                family_upper_bounds[cycle.family] += self._raw_upper_bound_for_cycle(
+                    cycle
+                )
+            return {
+                "schema": "litmus-link.vector-native-audit.v2",
+                "audit_mode": "bounded-sampling",
+                "cardinality_exact": False,
+                "cardinality_work_estimate": self.cardinality_work_estimate,
+                "relation_cycles": len(self.cycles),
+                "read_endpoint_choices": len(self.read_choices),
+                "write_endpoint_choices": len(self.write_choices),
+                "alignments": list(self.alignments),
+                "overlap_layouts": list(self.overlap_layouts),
+                "endpoint_compositions": list(self.compositions),
+                "formal_scope": self._formal_scope(),
+                "raw_combinations": None,
+                "case_upper_bound": self.raw_case_upper_bound,
+                "total_cases": None,
+                "generated": None,
+                "excluded": {},
+                "excluded_counts_exact": False,
+                "excluded_illegal": self._endpoint_exclusion_count(
+                    "excluded_illegal"
+                ),
+                "excluded_unsupported": self._endpoint_exclusion_count(
+                    "excluded_unsupported"
+                ),
+                "endpoint_domain": dict(self.endpoint_audit),
+                "request_exclusions": dict(sorted(self.request_exclusions.items())),
+                "hand_required": 0,
+                "missing": 0,
+                "family_relation_cycles": dict(sorted(family_cycles.items())),
+                "family_case_upper_bound": dict(
+                    sorted(family_upper_bounds.items())
+                ),
+                "relation_audit": dict(self.relation_audit),
+            }
+
         family_cycles: dict[str, int] = {}
         family_cases: dict[str, int] = {}
         raw = 0
@@ -927,48 +1226,23 @@ class VectorNativeDomain:
             excluded.update(breakdown["excluded"])
         return {
             "schema": "litmus-link.vector-native-audit.v2",
+            "audit_mode": "exact",
+            "cardinality_exact": True,
+            "cardinality_work_estimate": self.cardinality_work_estimate,
             "relation_cycles": len(self.cycles),
             "read_endpoint_choices": len(self.read_choices),
             "write_endpoint_choices": len(self.write_choices),
             "alignments": list(self.alignments),
             "overlap_layouts": list(self.overlap_layouts),
             "endpoint_compositions": list(self.compositions),
-            "formal_scope": {
-                "pbmt": 0,
-                "attribute": "cacheable",
-                "pma_atomic": True,
-                "vector_alignment": list(self.alignments),
-                "misaligned_atomicity": (
-                    "byte_level_no_mag"
-                    if any(value != "aligned" for value in self.alignments)
-                    else "not_requested"
-                ),
-                "scalar_alignment": "natural",
-                "amo_alignment": "natural",
-            },
+            "formal_scope": self._formal_scope(),
             "raw_combinations": raw,
             "total_cases": self.total_cases,
             "generated": self.total_cases,
             "excluded": dict(sorted(excluded.items())),
-            "excluded_illegal": sum(
-                count
-                for reason, count in self.request_exclusions.items()
-                if reason.startswith("excluded_illegal")
-            ) + sum(
-                count
-                for audit in self.endpoint_audit.values()
-                for reason, count in dict(audit.get("excluded", {})).items()
-                if reason.startswith("excluded_illegal")
-            ),
-            "excluded_unsupported": sum(
-                count
-                for reason, count in self.request_exclusions.items()
-                if reason.startswith("excluded_unsupported")
-            ) + sum(
-                count
-                for audit in self.endpoint_audit.values()
-                for reason, count in dict(audit.get("excluded", {})).items()
-                if reason.startswith("excluded_unsupported")
+            "excluded_illegal": self._endpoint_exclusion_count("excluded_illegal"),
+            "excluded_unsupported": self._endpoint_exclusion_count(
+                "excluded_unsupported"
             ),
             "endpoint_domain": dict(self.endpoint_audit),
             "request_exclusions": dict(sorted(self.request_exclusions.items())),
@@ -978,6 +1252,33 @@ class VectorNativeDomain:
             "family_cases": dict(sorted(family_cases.items())),
             "relation_audit": dict(self.relation_audit),
         }
+
+    def _formal_scope(self) -> dict[str, Any]:
+        return {
+            "pbmt": 0,
+            "attribute": "cacheable",
+            "pma_atomic": True,
+            "vector_alignment": list(self.alignments),
+            "misaligned_atomicity": (
+                "byte_level_no_mag"
+                if any(value != "aligned" for value in self.alignments)
+                else "not_requested"
+            ),
+            "scalar_alignment": "natural",
+            "amo_alignment": "natural",
+        }
+
+    def _endpoint_exclusion_count(self, prefix: str) -> int:
+        return sum(
+            count
+            for reason, count in self.request_exclusions.items()
+            if reason.startswith(prefix)
+        ) + sum(
+            count
+            for audit in self.endpoint_audit.values()
+            for reason, count in dict(audit.get("excluded", {})).items()
+            if reason.startswith(prefix)
+        )
 
 
 def _derived_seed(seed: int, family: str) -> int:
@@ -1673,6 +1974,7 @@ def sample_vector_cases(
     compute_verdicts: bool,
     compact_solver_results: bool = False,
     progress_callback: ProgressCallback | None = None,
+    prepared_callback: PreparedCasesCallback | None = None,
 ) -> tuple[list[GeneratedCase], dict[str, Any]]:
     if progress_callback is not None:
         progress_callback(0, 0, "Building the selected relation and endpoint domain")
@@ -1687,12 +1989,20 @@ def sample_vector_cases(
             f"unknown Vector preview sampling mode: {sampling}; "
             f"expected one of {', '.join(VECTOR_SAMPLE_MODES)}"
         )
+    exact_total = domain.total_cases if domain.cardinality_exact else None
     if progress_callback is not None:
-        progress_callback(
-            0,
-            0,
-            f"Selecting up to {limit:,} reproducible cases from {domain.total_cases:,} legal combinations",
-        )
+        if exact_total is None:
+            progress_callback(
+                0,
+                max(limit, 1),
+                f"Large finite domain detected; selecting {limit:,} cases without exhaustive pre-count",
+            )
+        else:
+            progress_callback(
+                0,
+                0,
+                f"Selecting up to {limit:,} reproducible cases from {exact_total:,} legal combinations",
+            )
     assignments = domain.random_assignments(limit, seed, sampling)
     if progress_callback is not None:
         progress_callback(
@@ -1726,6 +2036,29 @@ def sample_vector_cases(
                 total * 2,
                 f"Prepared {index:,}/{len(assignments):,} cases for {parallel_workers} solver workers",
             )
+
+    if prepared_callback is not None:
+        prepared_callback(
+            tuple(lowered),
+            {
+                "cardinality_exact": domain.cardinality_exact,
+                "total_cases": exact_total,
+                "case_upper_bound": (
+                    None if domain.cardinality_exact else domain.raw_case_upper_bound
+                ),
+                "relation_cycles": len(domain.cycles),
+                "read_endpoint_choices": len(domain.read_choices),
+                "write_endpoint_choices": len(domain.write_choices),
+                "sample_seed": seed,
+                "sample_requested": limit,
+                "sampled_cases": len(lowered),
+                "sampling_mode": sampling,
+                "sampling": VECTOR_SAMPLING_LABELS[sampling],
+                "solver_backend": solver_backend,
+                "solver_workers": parallel_workers,
+                "verification_effort": effort,
+            },
+        )
 
     parallel_solvers: list[dict[str, Any] | None] | None = None
     if parallel_workers > 1:
@@ -1821,7 +2154,7 @@ def sample_vector_cases(
                     external_statuses,
                 ),
             )
-    audit = domain.audit()
+    audit = domain.audit(exact=domain.cardinality_exact)
     audit.update(
         {
             "sample_seed": seed,
@@ -1859,20 +2192,28 @@ def generate_vector_cases(
             f"expected one of {', '.join(VECTOR_GENERATION_MODES)}"
         )
     seed = int(payload.get("random_seed", 1))
+    exact_total = domain.total_cases if domain.cardinality_exact else None
     if generation_mode == VECTOR_GENERATE_ALL:
         requested: int | None = None
         assignments: Iterable[VectorAssignment] = domain.assignments()
-        target = domain.total_cases
+        target: int | None = exact_total
     else:
         requested = int(payload.get("generate_limit", 10000))
         if requested < 1:
             raise ValueError("generate_limit must be positive for sampled generation")
         if progress_callback is not None:
-            progress_callback(
-                0,
-                0,
-                f"Selecting up to {requested:,} reproducible cases from {domain.total_cases:,} legal combinations",
-            )
+            if exact_total is None:
+                progress_callback(
+                    0,
+                    max(requested, 1),
+                    f"Large finite domain detected; selecting {requested:,} cases without exhaustive pre-count",
+                )
+            else:
+                progress_callback(
+                    0,
+                    0,
+                    f"Selecting up to {requested:,} reproducible cases from {exact_total:,} legal combinations",
+                )
         sampled = domain.random_assignments(requested, seed, generation_mode)
         assignments = sampled
         target = len(sampled)
@@ -1889,7 +2230,9 @@ def generate_vector_cases(
     atfile_tmp = out_dir / "@all.tmp"
     parallel_workers = (
         _parallel_solver_workers(
-            target,
+            target
+            if target is not None
+            else max(int(payload.get("solver_workers", 1) or 1), 1),
             payload.get("solver_workers"),
         )
         if judge and solver_backend == "embedded"
@@ -1969,18 +2312,25 @@ def generate_vector_cases(
                     external = str(solver.get("cross_check", "not_run") or "not_run")
                     external_statuses[external] = external_statuses.get(external, 0) + 1
                     if progress_callback is not None:
-                        progress_callback(
-                            generated_count,
-                            max(target, 1),
-                            _verification_progress(
-                                "Generated",
+                        if target is None:
+                            progress_callback(
                                 generated_count,
-                                target,
-                                solver_statuses,
-                                external_statuses,
-                                file_name=case.file_name,
-                            ),
-                        )
+                                0,
+                                f"Generated {generated_count:,} cases; full-domain cardinality was not pre-counted ({case.file_name})",
+                            )
+                        else:
+                            progress_callback(
+                                generated_count,
+                                max(target, 1),
+                                _verification_progress(
+                                    "Generated",
+                                    generated_count,
+                                    target,
+                                    solver_statuses,
+                                    external_statuses,
+                                    file_name=case.file_name,
+                                ),
+                            )
     except Exception:
         atfile_tmp.unlink(missing_ok=True)
         raise
@@ -1988,15 +2338,24 @@ def generate_vector_cases(
         if executor is not None:
             executor.shutdown(wait=True, cancel_futures=True)
     atfile_tmp.replace(out_dir / "@all")
-    audit = domain.audit()
+    audit = domain.audit(exact=domain.cardinality_exact)
+    available_litmus = audit.get("total_cases")
     report = {
         "schema": "litmus-link.vector-native-generation.v1",
         "profile": "vector-native",
-        "available_litmus": domain.total_cases,
+        "available_litmus": available_litmus,
+        "case_upper_bound": audit.get("case_upper_bound"),
+        "cardinality_exact": audit.get("cardinality_exact", True),
         "generated_litmus": generated_count,
         "generation_mode": generation_mode,
         "generation_limit": requested,
-        "generation_limited": generated_count < domain.total_cases,
+        "generation_limited": (
+            generation_mode != VECTOR_GENERATE_ALL
+            and (
+                available_litmus is None
+                or generated_count < int(available_litmus)
+            )
+        ),
         "random_seed": seed if generation_mode != VECTOR_GENERATE_ALL else None,
         "sampling": VECTOR_SAMPLING_LABELS[generation_mode],
         "file_name_scheme": "LLV-<family>-<sha256>.litmus",

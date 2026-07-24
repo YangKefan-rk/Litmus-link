@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+import litmus_link.qt_gui as qt_gui_module
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -122,6 +123,99 @@ def test_vector_verify_action_can_run_twice_with_compact_results(qt_app) -> None
                 item["solver"]["vector"]["preview_compact"]
                 for item in ui.preview_items
             )
+    finally:
+        ui.shutdown()
+        ui.window.close()
+        app.processEvents()
+
+
+def test_vector_verify_displays_pending_rows_before_solver_finishes(
+    qt_app,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    app, QtWidgets, QtCore, QtGui, binding = qt_app
+    ui = _LitmusLinkQtWindow(QtWidgets, QtCore, QtGui, binding)
+    base_item = {
+        "name": "MP pending case",
+        "case_id": "LLV-MP-pending",
+        "file_name": "LLV-MP-" + "1" * 64 + ".litmus",
+        "combination": {"skeleton": "MP", "params": {}},
+        "decision": {"status": "generated"},
+        "litmus": "",
+        "case_ir": {
+            "name": "LLV-MP-pending",
+            "display_name": "MP pending case",
+            "skeleton": "MP",
+            "cycle": "PodWW -> Rfe -> PodRR -> Fre",
+            "harts": [[], []],
+            "relations": [],
+            "metadata": {},
+        },
+        "diagram": None,
+        "analysis": {"cycle": "PodWW -> Rfe -> PodRR -> Fre"},
+    }
+
+    def result_with(status: str, verdict: str, provisional: bool) -> dict[str, object]:
+        item = dict(base_item)
+        item["solver"] = {
+            "status": status,
+            "verdict": verdict,
+            "allowed": verdict == "allowed" if status == "verified" else None,
+        }
+        if provisional:
+            item["provisional"] = True
+        return {
+            "profile": "vector-native",
+            "report": {
+                "cardinality_exact": False,
+                "generated": 1,
+                "verification_pending": provisional,
+            },
+            "cardinality_exact": False,
+            "available_litmus": None,
+            "sample": [item],
+            "classification_counts": {"displayed_cases": 1, "groups": {}},
+            "domain_classification_counts": {
+                "cardinality_exact": False,
+                "generated_cases": 1,
+            },
+            "verification_pending": provisional,
+        }
+
+    def delayed_preview(
+        payload,  # type: ignore[no-untyped-def]
+        progress_callback=None,  # type: ignore[no-untyped-def]
+        prepared_callback=None,  # type: ignore[no-untyped-def]
+    ):
+        assert payload["compute_verdicts"] is True
+        assert prepared_callback is not None
+        prepared_callback(result_with("pending", "pending", True))
+        time.sleep(0.2)
+        return result_with("verified", "allowed", False)
+
+    monkeypatch.setattr(qt_gui_module, "preview_payload", delayed_preview)
+    ui._payload = lambda: {"mode": "vector"}  # type: ignore[method-assign]
+    ui.window.show()
+    try:
+        ui._run_action("verify", "Verify Preview")
+        _process_until(
+            app,
+            lambda: (
+                ui.active_thread is not None
+                and ui.preview_model.rowCount() == 1
+                and ui.preview_items[0]["solver"]["status"] == "pending"
+            ),
+        )
+        assert ui.result_tabs.currentWidget() is ui.preview_page
+
+        _process_until(app, lambda: ui.active_thread is None)
+        assert ui.preview_model.rowCount() == 1
+        assert ui.preview_items[0]["solver"] == {
+            "status": "verified",
+            "verdict": "allowed",
+            "allowed": True,
+        }
+        assert "provisional" not in ui.preview_items[0]
     finally:
         ui.shutdown()
         ui.window.close()
