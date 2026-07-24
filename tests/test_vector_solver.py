@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+import litmus_link.rvwmo_solver as rvwmo_solver
 from litmus_link.litmus_ir import LitmusCaseIR
 from litmus_link.models import Combination, EXCLUDED_UNSUPPORTED, GENERATED
 from litmus_link.profiles import (
@@ -540,6 +541,53 @@ def test_interactive_memory_event_limit_is_inconclusive_not_forbidden() -> None:
     assert result.embedded is None
     assert "transaction" in result.reason
     assert "limit is 8" in result.reason
+
+
+def test_large_whole_register_graph_fits_interactive_event_budget() -> None:
+    domain = VectorNativeDomain.from_payload(
+        {
+            "skeletons": ["IRIW"],
+            "mechanisms": ["po"],
+            "endpoint_categories": ["vector"],
+            "endpoint_compositions": ["vector_only"],
+            "forms": ["whole_register_load", "whole_register_store"],
+            "sew": ["e8"],
+            "whole_nreg": ["nreg8"],
+            "alignments": ["aligned"],
+            "overlap_layouts": ["same_start"],
+        }
+    )
+    case = lower_vector_assignment(next(domain.assignments()))
+    expansion = expand_vector_case(case.case_ir)
+    event_count = sum(
+        event.kind in {"load", "store", "amo"}
+        for event in expansion.case.events()
+    )
+
+    assert event_count == 768
+    result = solve_vector_case(
+        case.case_ir,
+        max_memory_events=1_024,
+        max_search_steps=1,
+    )
+    assert result.status == "inconclusive"
+    assert "search_step_limit" in result.reason
+    assert "execution graph" not in result.reason
+
+
+def test_recursion_resource_limit_is_inconclusive_not_forbidden(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fail_rf_enumeration(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RecursionError("synthetic recursive RF exhaustion")
+        yield  # pragma: no cover - keep this function a generator
+
+    monkeypatch.setattr(rvwmo_solver, "_rf_candidates", fail_rf_enumeration)
+    result = solve_vector_case(_case("unit_load").case_ir)
+
+    assert result.status == "inconclusive"
+    assert result.verdict == "unknown"
+    assert result.allowed is None
+    assert "recursion_limit" in result.reason
+    assert "forbidden verdict requires exhaustive search" in result.reason
 
 
 @pytest.mark.parametrize(

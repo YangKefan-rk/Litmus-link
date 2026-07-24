@@ -335,9 +335,10 @@ def test_interactive_crosscheck_is_bounded_and_progress_is_classified(
 
     assert len(cases) == 6
     assert external_flags == [True, True, True, True, False, False]
-    assert all(limits["max_memory_events"] == 256 for limits in received_limits)
-    assert all(limits["timeout_seconds"] == 5.0 for limits in received_limits)
-    assert all(limits["max_search_steps"] == 1_000_000 for limits in received_limits)
+    assert all(limits["max_candidates"] == 100_000 for limits in received_limits)
+    assert all(limits["max_memory_events"] == 1_024 for limits in received_limits)
+    assert all(limits["timeout_seconds"] == 10.0 for limits in received_limits)
+    assert all(limits["max_search_steps"] == 2_000_000 for limits in received_limits)
     assert audit["verification_effort"] == "interactive"
     assert audit["external_status"] == {"agree": 4, "batch_limit_skipped": 2}
     assert cases[-1].solver["cross_check"] == "batch_limit_skipped"

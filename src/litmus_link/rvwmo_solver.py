@@ -18,6 +18,7 @@ generation path can request both backends.
 """
 
 import re
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -31,6 +32,14 @@ Pair = tuple[str, str]
 Relation = set[Pair]
 ByteEdge = tuple[str, str, str]
 ByteRelation = set[ByteEdge]
+
+
+# RF enumeration is intentionally lazy, but each selected read/byte group
+# currently contributes generator frames.  Large legal RVV transfers can
+# exceed CPython's default recursion limit before reaching their search
+# budget.  4096 covers the supported <=1024-event interactive/balanced domain
+# while the RecursionError guard below keeps larger searches inconclusive.
+_MIN_SOLVER_RECURSION_LIMIT = 4_096
 
 
 class RvwmoSolverError(ValueError):
@@ -347,6 +356,8 @@ def solve_rvwmo(
         raise RvwmoSolverError("timeout_seconds must be positive")
     if max_search_steps < 1:
         raise RvwmoSolverError("max_search_steps must be at least 1")
+    if sys.getrecursionlimit() < _MIN_SOLVER_RECURSION_LIMIT:
+        sys.setrecursionlimit(_MIN_SOLVER_RECURSION_LIMIT)
     started = time.monotonic()
     budget = _SearchBudget(started + timeout_seconds, max_search_steps)
     events: tuple[MemoryEvent, ...] = ()
@@ -380,6 +391,13 @@ def solve_rvwmo(
         )
     except _SearchLimit as exc:
         return _limited_verdict(exc, started, budget, events)
+    except RecursionError:
+        return _limited_verdict(
+            _SearchLimit("recursion_limit"),
+            started,
+            budget,
+            events,
+        )
 
     violations: dict[str, int] = defaultdict(int)
     examples: dict[str, tuple[str, ...]] = {}
@@ -462,6 +480,17 @@ def solve_rvwmo(
     except _SearchLimit as exc:
         return _limited_verdict(
             exc,
+            started,
+            budget,
+            last_resolved_events,
+            candidates=min(candidates, max_candidates),
+            consistent=consistent,
+            violations=violations,
+            examples=examples,
+        )
+    except RecursionError:
+        return _limited_verdict(
+            _SearchLimit("recursion_limit"),
             started,
             budget,
             last_resolved_events,

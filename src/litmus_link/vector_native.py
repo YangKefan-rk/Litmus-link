@@ -125,19 +125,19 @@ _MAX_EXACT_CARDINALITY_WORK = 5_000_000
 VECTOR_VERIFICATION_EFFORTS = ("interactive", "balanced", "thorough")
 VECTOR_VERIFICATION_LIMITS: Mapping[str, Mapping[str, Any]] = {
     "interactive": {
-        "max_candidates": 50_000,
-        "timeout_seconds": 5.0,
-        "max_search_steps": 1_000_000,
-        "max_memory_events": 256,
+        "max_candidates": 100_000,
+        "timeout_seconds": 10.0,
+        "max_search_steps": 2_000_000,
+        "max_memory_events": 1_024,
         "external_max_projections": 2,
         "external_timeout": 3,
         "external_case_limit": 4,
     },
     "balanced": {
-        "max_candidates": 100_000,
-        "timeout_seconds": 10.0,
-        "max_search_steps": 2_000_000,
-        "max_memory_events": 256,
+        "max_candidates": 250_000,
+        "timeout_seconds": 20.0,
+        "max_search_steps": 5_000_000,
+        "max_memory_events": 1_024,
         "external_max_projections": 16,
         "external_timeout": 10,
         "external_case_limit": 32,
