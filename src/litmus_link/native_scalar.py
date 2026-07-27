@@ -335,6 +335,23 @@ def lower_native_cycle(
             register = memory_regs[vertex]
             annotation = annotations[vertex]
             access = memory_accesses[vertex]
+            amo_offset = access.offset_bytes if annotation != "P" else 0
+            if amo_offset:
+                # AMOs have no immediate offset. Adjust the base after any
+                # incoming address dependency, then restore it below so other
+                # accesses to this location retain their own layout offsets.
+                # This uses no extra register, even in long dependency chains.
+                setup = f"addi {address},{address},{amo_offset}"
+                events.append(
+                    LitmusEvent(
+                        event_id=f"v{vertex}_amo_base",
+                        hart=proc,
+                        kind="setup",
+                        instruction=setup,
+                        role="amo-address-offset",
+                    )
+                )
+                instructions.append(setup)
             if directions[vertex] == READ:
                 instruction = _load_instruction(register, address, annotation, access)
                 kind = "load" if annotation == "P" else "amo"
@@ -357,6 +374,18 @@ def lower_native_cycle(
                 )
             )
             instructions.append(instruction)
+            if amo_offset:
+                restore = f"addi {address},{address},{-amo_offset}"
+                events.append(
+                    LitmusEvent(
+                        event_id=f"v{vertex}_amo_base_restore",
+                        hart=proc,
+                        kind="setup",
+                        instruction=restore,
+                        role="amo-address-restore",
+                    )
+                )
+                instructions.append(restore)
             outgoing = cycle.edges[vertex]
             target = (vertex + 1) % nvertices
             if outgoing.scope == LOCAL:
