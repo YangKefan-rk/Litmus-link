@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import pytest
 
+from litmus_link.herd_reference import HerdCapability
 from litmus_link.native_cycles import (
     NativeCycle,
     enumerate_relation_cycles,
@@ -139,6 +140,25 @@ def test_native_generation_writes_and_validates_without_diytools(tmp_path: Path)
     assert len(validate_path(tmp_path / "@all")) == 3
     metadata = json.loads(next(tmp_path.glob("*.meta.json")).read_text(encoding="utf-8"))
     assert metadata["generated_from"] == "litmus-link-native"
+
+
+def test_native_validation_accepts_unsupported_herd_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "litmus_link.native_scalar.capability_for_scalar_case",
+        lambda *_args, **_kwargs: HerdCapability(False, "herd7 is not installed"),
+    )
+    report = generate_native_templates(
+        out_dir=tmp_path,
+        presets=["MP"],
+        mechanisms=["po"],
+        annotations=["P"],
+        include_same=False,
+        solver_backend="herd7",
+    )
+    assert report["verdicts"] == {"external_unsupported": 1}
+    assert len(validate_path(tmp_path)) == 1
 
 
 def test_native_generation_reports_completed_case_progress(tmp_path: Path) -> None:

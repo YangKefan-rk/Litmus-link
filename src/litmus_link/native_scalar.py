@@ -763,9 +763,12 @@ def _cycles_with_layouts(
     cycles: Iterable[NativeCycle],
     memory_layouts: Sequence[MemoryLayoutConfig],
 ) -> Iterable[tuple[NativeCycle, MemoryLayoutConfig]]:
+    layouts_by_size: dict[int, tuple[MemoryLayoutConfig, ...]] = {}
     for cycle in cycles:
+        if cycle.size not in layouts_by_size:
+            layouts_by_size[cycle.size] = _materialize_memory_layouts(cycle.size, memory_layouts)
         plain = all(annotation == "P" for annotation in _cycle_annotations(cycle))
-        for layout in _materialize_memory_layouts(cycle, memory_layouts):
+        for layout in layouts_by_size[cycle.size]:
             if layout.is_aligned or plain:
                 yield cycle, layout
 
@@ -780,7 +783,7 @@ def _validate_memory_layouts(
 
 
 def _materialize_memory_layouts(
-    cycle: NativeCycle,
+    cycle_size: int,
     memory_layouts: Sequence[MemoryLayoutConfig],
 ) -> tuple[MemoryLayoutConfig, ...]:
     """Expand mixed-size widths for the actual number of cycle events.
@@ -811,14 +814,14 @@ def _materialize_memory_layouts(
                 ("atomic_mixed",),
                 widths=domain,
                 atomic_overlaps=(boundary_or_overlap,),
-                event_count=cycle.size,
+                event_count=cycle_size,
             )
         else:
             variants = expand_memory_layouts(
                 ("mixed",),
                 widths=domain,
                 boundaries=(boundary_or_overlap,),
-                event_count=cycle.size,
+                event_count=cycle_size,
             )
         for layout in variants:
             if layout.id not in seen:
@@ -833,19 +836,20 @@ def _memory_layout_count_for_cycles(
     memory_layouts: Sequence[MemoryLayoutConfig],
 ) -> tuple[int, int]:
     selected = _validate_annotations(annotations)
+    plain_for_cycle = int("P" in selected)
     accepted = 0
     excluded_atomic = 0
+    counts_by_size: dict[int, tuple[int, int]] = {}
     for cycle in cycles:
-        variants = _materialize_memory_layouts(cycle, memory_layouts)
-        aligned = sum(layout.is_aligned for layout in variants)
-        misaligned = len(variants) - aligned
-        annotated_for_cycle = sum(
-            1 for _ in annotated_native_cycles((cycle,), selected)
-        )
-        plain_for_cycle = 1 if "P" in selected else 0
+        if cycle.size not in counts_by_size:
+            variants = _materialize_memory_layouts(cycle.size, memory_layouts)
+            aligned = sum(layout.is_aligned for layout in variants)
+            counts_by_size[cycle.size] = aligned, len(variants) - aligned
+        aligned, misaligned = counts_by_size[cycle.size]
+        annotated_for_cycle = _annotated_cycle_count(cycle, len(selected))
         accepted += annotated_for_cycle * aligned + plain_for_cycle * misaligned
         excluded_atomic += (annotated_for_cycle - plain_for_cycle) * misaligned
-    if accepted == 0:
+    if accepted == 0 and excluded_atomic:
         raise NativeGenerationError(
             "selected misaligned layouts require the ordinary P annotation"
         )
@@ -860,7 +864,7 @@ def _memory_layout_counts_by_cycle_size(
     for cycle in cycles:
         if cycle.size in sizes:
             continue
-        variants = _materialize_memory_layouts(cycle, memory_layouts)
+        variants = _materialize_memory_layouts(cycle.size, memory_layouts)
         counts = Counter(layout.mode for layout in variants)
         sizes[cycle.size] = {
             "cycle_events": cycle.size,
@@ -1428,12 +1432,15 @@ def _edge_symmetries(cycle: NativeCycle) -> tuple[int, ...]:
 
 
 def _annotated_count(cycles: Sequence[NativeCycle], annotations: Sequence[str]) -> int:
-    modes = _validate_annotations(annotations)
-    count = 0
-    for cycle in cycles:
-        symmetries = _edge_symmetries(cycle)
-        count += sum(len(modes) ** gcd(cycle.size, offset) for offset in symmetries) // len(symmetries)
-    return count
+    annotation_count = len(_validate_annotations(annotations))
+    return sum(_annotated_cycle_count(cycle, annotation_count) for cycle in cycles)
+
+
+def _annotated_cycle_count(cycle: NativeCycle, annotation_count: int) -> int:
+    # Burnside's lemma counts assignments up to rotations preserving the edges.
+    symmetries = _edge_symmetries(cycle)
+    fixed_assignments = sum(annotation_count ** gcd(cycle.size, offset) for offset in symmetries)
+    return fixed_assignments // len(symmetries)
 
 
 def _rotate(values: Sequence[str], offset: int) -> tuple[str, ...]:

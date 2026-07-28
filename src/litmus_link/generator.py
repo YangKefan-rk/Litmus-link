@@ -166,6 +166,7 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
     with (
         _JsonArrayWriter(out_dir / "covered.json") as covered,
         _JsonArrayWriter(out_dir / "excluded-illegal.json") as excluded_illegal,
+        _JsonArrayWriter(out_dir / "excluded-unsupported.json") as excluded_unsupported,
         _JsonArrayWriter(out_dir / "hand-required.json") as hand_required,
         _JsonArrayWriter(out_dir / "missing.json", empty_file_when_empty=True) as missing,
     ):
@@ -179,6 +180,8 @@ def write_audit_for_combinations(profile: str, combinations: Iterable[Combinatio
                 covered.write(item)
             elif decision.status == EXCLUDED_ILLEGAL:
                 excluded_illegal.write(item)
+            elif decision.status == EXCLUDED_UNSUPPORTED:
+                excluded_unsupported.write(item)
             elif decision.status == HAND_REQUIRED:
                 hand_required.write(item)
             elif decision.status == MISSING:

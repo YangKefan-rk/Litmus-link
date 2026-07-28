@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ from typing import Iterable, List
 
 DEFAULT_MARCH = "rv64gcv_zifencei_zicbom_zicboz"
 DEFAULT_MABI = "lp64d"
+SUBWORD_AMO = re.compile(r"amo[a-z]+\.[bh](?:\.|\s|$)", re.IGNORECASE)
 
 
 def asm_check(atfile: Path, gcc: str) -> List[str]:
@@ -39,8 +41,11 @@ def asm_check(atfile: Path, gcc: str) -> List[str]:
             source = tmpdir / f"case_{checked}.S"
             source.write_text(_assembly_source(instructions), encoding="utf-8")
             obj = tmpdir / f"case_{checked}.o"
+            march = DEFAULT_MARCH
+            if any(SUBWORD_AMO.match(instruction) for instruction in instructions):
+                march += "_zabha"
             proc = subprocess.run(
-                [gcc_path, "-c", f"-march={DEFAULT_MARCH}", f"-mabi={DEFAULT_MABI}", str(source), "-o", str(obj)],
+                [gcc_path, "-c", f"-march={march}", f"-mabi={DEFAULT_MABI}", str(source), "-o", str(obj)],
                 capture_output=True,
                 text=True,
                 timeout=30,

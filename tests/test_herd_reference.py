@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
-from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,7 @@ from litmus_link.vector_native import (
     VectorNativeDomain,
     lower_vector_assignment,
 )
+from litmus_link.verification import verify_path
 from litmus_link.vector_solver import expand_vector_case
 
 
@@ -222,6 +224,45 @@ def test_ordered_advisory_disagreement_does_not_become_conflict(monkeypatch) -> 
     assert result["status"] == "advisory_disagree"
 
 
+@pytest.mark.parametrize("ordered", [False, True])
+def test_verify_herd7_only_verifies_exact_vector_projection(
+    ordered: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    case = (
+        _case(
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=["indexed_ordered_load", "indexed_ordered_store"],
+            vl=["vl2"],
+        )
+        if ordered
+        else _case()
+    )
+    litmus = tmp_path / f"{case.name}.litmus"
+    litmus.write_text(case.litmus, encoding="utf-8")
+    litmus.with_suffix(".meta.json").write_text(
+        json.dumps({"case_ir": case.case_ir.to_json()}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        reference, "probe_case_herd_capabilities", lambda *_args, **_kwargs: _all_supported_capabilities()
+    )
+
+    def judge(source: str, variants: tuple[str, ...], timeout: int) -> HerdVerdict:
+        assert "vset" not in source
+        assert timeout == 17
+        return _herd(False)
+
+    monkeypatch.setattr(reference, "_judge_projection", judge)
+    result = verify_path(litmus, backend="herd7", timeout=17)["results"][0]["result"]
+    if ordered:
+        assert result["status"] in {"advisory_agree", "advisory_disagree"}
+        assert result["allowed"] is None
+        assert result["results"][0]["verdict"] == "forbidden"
+    else:
+        assert result["status"] == "verified"
+        assert result["verdict"] == "forbidden"
+
+
 def test_missing_mixed_capability_preserves_embedded_scope() -> None:
     case = _case(
         scalar_widths=["d"],
@@ -264,8 +305,8 @@ def test_scalar_case_capability_checks_required_amo_semantics() -> None:
 
 
 def test_interactive_capability_probe_only_checks_required_amo(
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     case = _case(
         endpoint_categories=["amo", "vector"],
         endpoint_compositions=["vector_amo"],
@@ -279,6 +320,13 @@ def test_interactive_capability_probe_only_checks_required_amo(
         probes.append((source, variants))
         return HerdCapability(True, "probed", variants=variants)
 
+    herd = tmp_path / "herd7"
+    model = tmp_path / "riscv.cat"
+    herd.touch()
+    model.touch()
+    monkeypatch.setattr(reference.toolchain, "HERD", herd)
+    monkeypatch.setattr(reference.toolchain, "RISCV_CAT", model)
+    monkeypatch.setattr(reference.toolchain, "tool_version", lambda _path: "test")
     monkeypatch.setattr(reference, "_probe", fake_probe)
     capabilities = probe_case_herd_capabilities(
         case.case_ir,

@@ -122,9 +122,8 @@ class MemoryLayoutConfig:
             "width_bytes": None if self.mode in {"mixed", "atomic_mixed"} else self.width_bytes,
             "mixed_width_bytes": list(self.width_pattern or MISALIGNED_WIDTHS)
             if self.mode in {"mixed", "atomic_mixed"} else [],
-            "width_pattern_bytes": [width * 8 for width in self.width_pattern],
-            "width_domain_bytes": sorted({width * 8 for width in self.width_pattern})
-            if self.width_pattern else [],
+            "width_pattern_bytes": list(self.width_pattern),
+            "width_domain_bytes": sorted(set(self.width_pattern)),
             "boundary": self.boundary,
             "overlap": self.overlap,
             "atomicity_model": (

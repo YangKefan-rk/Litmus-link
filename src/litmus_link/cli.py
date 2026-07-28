@@ -392,8 +392,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             print(json.dumps(report, indent=2, sort_keys=True))
             verdicts = report.get("verdicts", {})
+            if not args.no_judge and args.solver_backend == "herd7":
+                return 0 if verdicts.get("verified", 0) == report["generated_litmus"] else 1
             return 1 if any(verdicts.get(key, 0) for key in ("unknown", "inconclusive", "conflict")) else 0
-    except (ValueError, FileNotFoundError, ValidationError, VerificationError, RuleFileError, QtGuiError, ScalarGenerationError, NativeGenerationError, NativeDiyError, ToolchainError) as exc:
+    except (ValueError, OSError, ValidationError, VerificationError, RuleFileError, QtGuiError, ScalarGenerationError, NativeGenerationError, NativeDiyError, ToolchainError) as exc:
         print(f"litmus-link: error: {exc}", file=sys.stderr)
         return 2
     return 2

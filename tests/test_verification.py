@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 
 from litmus_link.native_diy import DEFAULT_DIY_RELAX, DEFAULT_DIY_SAFE, DiyConfig
-from litmus_link.native_scalar import generate_native_diy
-from litmus_link.generator import generate_combinations
+from litmus_link.native_scalar import generate_native_diy, generate_native_templates
+from litmus_link.generator import generate_combinations, generate_profile
+from litmus_link.memory_layout import MemoryLayoutConfig
 from litmus_link.models import Combination
-from litmus_link.toolchain import tools_available
-from litmus_link.verification import verify_path
+from litmus_link.toolchain import HerdVerdict, tools_available
+from litmus_link.verification import VerificationError, verify_path
 
 
 def _corpus(path: Path) -> Path:
@@ -40,6 +41,56 @@ def test_verify_path_embedded_does_not_claim_unmodeled_upstream_file(tmp_path: P
     litmus.write_text("RISCV Upstream\n{}\n P0;\n nop;\nexists (1=1)\n", encoding="utf-8")
     report = verify_path(litmus, backend="embedded")
     assert report["counts"] == {"not_applicable": 1}
+
+
+def test_verify_path_checks_source_against_case_ir(tmp_path: Path) -> None:
+    atfile = _corpus(tmp_path)
+    litmus = tmp_path / atfile.read_text(encoding="utf-8").splitlines()[0]
+    source = litmus.read_text(encoding="utf-8")
+    litmus.write_text("(* test comment *)\n" + source, encoding="utf-8")
+    assert verify_path(litmus)["counts"] == {"verified": 1}
+
+    body, marker, _ = source.partition("\nexists\n")
+    assert marker
+    litmus.write_text(body + marker + "(0:x5=999)\n", encoding="utf-8")
+    with pytest.raises(VerificationError, match="litmus body differs from case_ir metadata"):
+        verify_path(litmus, write=True)
+
+
+def test_verify_path_leaves_generated_observation_cases_unmodeled(tmp_path: Path) -> None:
+    generate_profile("smoke", tmp_path)
+    observations = []
+    for path in tmp_path.glob("*.litmus"):
+        meta = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
+        if meta["case_ir"]["variant"] == "observation":
+            observations.append(path)
+    assert len(observations) == 3
+    for path in observations:
+        assert verify_path(path)["counts"] == {"not_applicable": 1}
+
+
+def test_verify_path_herd7_uses_misaligned_scalar_variants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generate_native_templates(
+        out_dir=tmp_path,
+        presets=("MP",),
+        mechanisms=("po",),
+        annotations=("P",),
+        memory_layouts=(MemoryLayoutConfig("misaligned"),),
+        limit=1,
+        judge=False,
+    )
+
+    def judge(source: str, *, timeout: int, variants: tuple[str, ...]) -> HerdVerdict:
+        assert "RISCV MP" in source
+        assert timeout == 13
+        assert variants == ("mixed", "unaligned")
+        return HerdVerdict("observable", True, "Sometimes", 1, 1, 2, "", "")
+
+    monkeypatch.setattr("litmus_link.verification.herd_judge", judge)
+    report = verify_path(tmp_path, backend="herd7", timeout=13)
+    assert report["counts"] == {"verified": 1}
 
 
 def test_verify_path_dispatches_vector_metadata_to_vector_solver(tmp_path: Path) -> None:

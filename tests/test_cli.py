@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 from litmus_link.cli import main
+from litmus_link.herd_reference import HerdCapability
 from litmus_link.workflow import audit_payload, generate_payload, options_payload, preview_payload
 from litmus_link.qt_gui import _summary_text, qt_binding_status
 from litmus_link.toolchain import tools_available
@@ -67,6 +68,23 @@ def test_cli_native_diy_and_verify(tmp_path: Path, capsys) -> None:  # type: ign
     assert main(["verify", str(out / "@all"), "--backend", "embedded"]) == 0
     verified = json.loads(capsys.readouterr().out)
     assert verified["counts"] == {"verified": 3}
+
+
+def test_cli_native_herd7_exits_nonzero_when_reference_unavailable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "litmus_link.native_scalar.capability_for_scalar_case",
+        lambda *args, **kwargs: HerdCapability(False, "herd7 unavailable"),
+    )
+    out = tmp_path / "native-mp"
+    args = [
+        "native", "templates", "--skeleton", "MP", "--mechanism", "po",
+        "--annotation", "P", "--limit", "1", "--solver-backend", "herd7", "--out", str(out),
+    ]
+    assert main(args) == 1
+    assert json.loads(capsys.readouterr().out)["verdicts"] == {"external_unsupported": 1}
+    assert main([*args, "--no-judge"]) == 0
 
 
 def test_cli_native_generates_real_no_mag_misaligned_cases(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -464,6 +482,16 @@ def test_qt_summary_text_highlights_generated_artifacts() -> None:
 def test_cli_requires_exactly_one_generation_source(tmp_path: Path) -> None:
     assert main(["generate", "--out", str(tmp_path / "out")]) == 2
     assert main(["generate", "--profile", "smoke", "--rule-file", str(tmp_path / "rules.json"), "--out", str(tmp_path / "out")]) == 2
+
+
+def test_cli_reports_a_file_blocking_the_output_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "out"
+    out.write_text("existing\n", encoding="utf-8")
+    assert main(["generate", "--profile", "smoke", "--out", str(out)]) == 2
+    assert capsys.readouterr().err.startswith("litmus-link: error:")
+    assert out.read_text(encoding="utf-8") == "existing\n"
 
 
 def test_cli_asm_check_returns_nonzero_on_assembler_failure(tmp_path: Path) -> None:

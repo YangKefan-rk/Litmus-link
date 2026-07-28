@@ -8,7 +8,12 @@ from litmus_link.litmus_ir import LitmusCaseIR, LitmusEvent, MemoryAccess
 from litmus_link.memory_layout import all_accesses_overlap, expand_memory_layouts
 from litmus_link.native_cycles import NativeCycle
 from litmus_link.native_edges import edge_by_label
-from litmus_link.native_scalar import generate_native_templates, lower_native_cycle, native_template_audit
+from litmus_link.native_scalar import (
+    generate_native_relations,
+    generate_native_templates,
+    lower_native_cycle,
+    native_template_audit,
+)
 from litmus_link.toolchain import ToolchainError, herd_judge, tools_available
 
 
@@ -215,6 +220,9 @@ def test_atomic_mixed_widths_are_assigned_per_cycle_event() -> None:
         if event.role == "cycle-event" and event.memory_access is not None
     }
     assert by_event == {"v0": 2, "v1": 4, "v2": 2, "v3": 8}
+    layout_metadata = case.metadata["memory_layout"]
+    assert layout_metadata["width_pattern_bytes"] == [by_event[f"v{index}"] for index in range(4)]
+    assert layout_metadata["width_domain_bytes"] == sorted(set(by_event.values()))
 
 
 def test_audit_uses_concrete_event_level_layout_count() -> None:
@@ -237,6 +245,27 @@ def test_audit_uses_concrete_event_level_layout_count() -> None:
         "mode_atomic": 3,
         "mode_atomic_mixed": 156,
     }
+
+
+def test_audit_counts_rotationally_equivalent_annotations_once() -> None:
+    layouts = expand_memory_layouts(
+        ("aligned", "misaligned"), widths=(4,), boundaries=("same16",)
+    )
+    audit = native_template_audit(
+        ("LB",), ("po",), include_same=False,
+        annotations=("P", "AMO"), memory_layouts=layouts,
+    )
+    assert audit["base_cycles"] == 1
+    assert audit["annotated_cycles"] == 10
+    assert audit["accepted"] == 11
+    assert audit["excluded_misaligned_atomic_annotations"] == 9
+
+
+def test_empty_native_relation_domain_reports_zero_cases(tmp_path) -> None:
+    report = generate_native_relations(out_dir=tmp_path, min_size=2, max_size=2, judge=False)
+    assert report["available_litmus"] == report["generated_litmus"] == 0
+    assert report["audit"]["excluded_misaligned_atomic_annotations"] == 0
+    assert (tmp_path / "@all").read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.skipif(not tools_available(), reason="herd7/riscv.cat is not installed")

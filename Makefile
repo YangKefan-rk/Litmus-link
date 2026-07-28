@@ -12,15 +12,19 @@ test:
 	fi
 
 herd7:
-	@command -v herd7 >/dev/null && { echo "herd7 already installed: $$(command -v herd7)"; exit 0; } || true
-	@command -v opam  >/dev/null || { echo "opam not found. Install OCaml/opam first (see README.md)."; exit 1; }
-	opam install -y herdtools7
-	@echo "herd7 installed. Re-run 'make smoke' to cross-validate scalar verdicts against riscv.cat."
+	@if command -v herd7 >/dev/null; then \
+		echo "herd7 already installed: $$(command -v herd7)"; \
+	else \
+		command -v opam >/dev/null || { echo "opam not found. Install OCaml/opam first."; exit 1; }; \
+		opam install -y herdtools7 && \
+			echo "herd7 installed. Re-run 'make smoke' to cross-validate scalar verdicts against riscv.cat."; \
+	fi
 
 verify:
 	PYTHONPATH=src $(PYTHON) -m litmus_link generate --profile smoke --out out/smoke
-	@PYTHONPATH=src $(PYTHON) -c "import json,glob; \
-rows=[json.load(open(f)) for f in glob.glob('out/smoke/*.solver.json')]; \
+	@$(PYTHON) -c "import json; from pathlib import Path; \
+root=Path('out/smoke'); entries=(root/'@all').read_text(encoding='utf-8').splitlines(); \
+rows=[json.loads((root/entry).with_suffix('.solver.json').read_text(encoding='utf-8')) for entry in entries]; \
 ag=sum(r.get('cross_check')=='agree' for r in rows); \
 cf=sum(r.get('status')=='conflict' for r in rows); \
 na=sum(r.get('status')=='not_applicable' for r in rows); \

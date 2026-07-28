@@ -18,23 +18,27 @@ class ValidationError(Exception):
 def validate_path(path: Path) -> List[str]:
     atfile = _resolve_atfile(path)
     base = atfile.parent
+    entries = _read_atfile(atfile)
     errors: List[str] = []
-    for entry in _read_atfile(atfile):
+    for entry in entries:
         litmus_path = base / entry
-        if not litmus_path.exists():
+        if not litmus_path.is_file():
             errors.append(f"missing litmus file: {litmus_path}")
             continue
         if litmus_path.suffix != ".litmus":
             errors.append(f"@all entry is not a .litmus file: {entry}")
             continue
         meta_path = litmus_path.with_suffix(".meta.json")
-        if not meta_path.exists():
+        if not meta_path.is_file():
             errors.append(f"missing metadata file: {meta_path}")
             continue
-        errors.extend(_validate_pair(litmus_path, meta_path))
+        try:
+            errors.extend(_validate_pair(litmus_path, meta_path))
+        except ValidationError as exc:
+            errors.append(str(exc))
     if errors:
         raise ValidationError("\n".join(errors))
-    return _read_atfile(atfile)
+    return entries
 
 
 def _resolve_atfile(path: Path) -> Path:
@@ -56,12 +60,15 @@ def _read_atfile(path: Path) -> List[str]:
 
 def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     errors: List[str] = []
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta = _read_json_object(meta_path)
     if meta.get("schema") == "litmus-link.scalar-meta.v1":
         return _validate_scalar_pair(litmus_path, meta_path, meta)
     if meta.get("schema") == "litmus-link.native-scalar-meta.v1":
         return _validate_native_scalar_pair(litmus_path, meta_path, meta)
-    combination = Combination.from_json(meta["combination"])
+    try:
+        combination = Combination.from_json(meta["combination"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValidationError(f"{meta_path}: invalid combination metadata: {exc}") from exc
     decision = evaluate(combination)
     litmus_lines = litmus_path.read_text(encoding="utf-8").splitlines()
     header = litmus_lines[0].strip() if litmus_lines else ""
@@ -90,7 +97,26 @@ def _validate_pair(litmus_path: Path, meta_path: Path) -> List[str]:
     for key in ["axes", "requires", "rvwmo_class", "expected_kind", "generated_from"]:
         if key not in meta:
             errors.append(f"{meta_path}: missing key {key}")
+    solver_path = litmus_path.with_suffix(".solver.json")
+    if "solver" in meta or solver_path.exists():
+        solver = meta.get("solver")
+        if not isinstance(solver, dict):
+            errors.append(f"{meta_path}: missing or invalid solver result")
+        if not solver_path.is_file():
+            errors.append(f"missing solver file: {solver_path}")
+        elif isinstance(solver, dict) and solver != _read_json_object(solver_path):
+            errors.append(f"{solver_path}: solver JSON differs from metadata")
     return errors
+
+
+def _read_json_object(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValidationError(f"{path}: could not read JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValidationError(f"{path}: expected a JSON object")
+    return data
 
 
 def _validate_vector_file_identity(
@@ -163,7 +189,7 @@ def _validate_scalar_pair(litmus_path: Path, meta_path: Path, meta: dict) -> Lis
     solver_path = litmus_path.with_suffix(".solver.json")
     if not solver_path.exists():
         errors.append(f"missing scalar solver file: {solver_path}")
-    elif solver != json.loads(solver_path.read_text(encoding="utf-8")):
+    elif solver != _read_json_object(solver_path):
         errors.append(f"{solver_path}: solver JSON differs from metadata")
     return errors
 
@@ -191,12 +217,13 @@ def _validate_native_scalar_pair(litmus_path: Path, meta_path: Path, meta: dict)
         errors.append(f"{meta_path}: missing or inconsistent native case IR")
     solver = meta.get("solver")
     if not isinstance(solver, dict) or solver.get("status") not in {
-        "verified", "unknown", "unchecked", "inconclusive", "conflict", "unavailable", "not_applicable"
+        "verified", "unknown", "unchecked", "inconclusive", "conflict", "unavailable", "not_applicable",
+        "external_unsupported",
     }:
         errors.append(f"{meta_path}: missing or invalid native solver result")
     solver_path = litmus_path.with_suffix(".solver.json")
     if not solver_path.exists():
         errors.append(f"missing native solver file: {solver_path}")
-    elif solver != json.loads(solver_path.read_text(encoding="utf-8")):
+    elif solver != _read_json_object(solver_path):
         errors.append(f"{solver_path}: native solver JSON differs from metadata")
     return errors

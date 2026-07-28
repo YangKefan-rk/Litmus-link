@@ -2,12 +2,15 @@ import json
 import shutil
 from pathlib import Path
 
-from litmus_link.generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit
+import pytest
+
+from litmus_link import rule_file
+from litmus_link.generator import audit_profile, audit_summary, generate_combinations, generate_profile, write_audit, write_audit_for_combinations
 from litmus_link.workflow import materialize_preview_diagram, preview_payload
 from litmus_link.models import Combination
 from litmus_link.profiles import profile_combinations
-from litmus_link.rule_file import RuleFileError, load_rule_file
-from litmus_link.validator import validate_path
+from litmus_link.rule_file import RuleFileError, load_rule_data, load_rule_file
+from litmus_link.validator import ValidationError, validate_path
 
 
 def test_smoke_generation_round_trip(tmp_path: Path) -> None:
@@ -29,6 +32,31 @@ def test_smoke_generation_round_trip(tmp_path: Path) -> None:
     assert first_solver["status"] in {"verified", "conflict", "not_applicable"}
     assert first_meta["test_description"]["summary"]
     assert first_meta["test_description"]["features"]
+
+
+def test_validate_profile_solver_sidecar(tmp_path: Path) -> None:
+    generate_profile("smoke", tmp_path)
+    entry = validate_path(tmp_path)[0]
+    solver_path = (tmp_path / entry).with_suffix(".solver.json")
+
+    solver_path.write_text('{}\n', encoding="utf-8")
+    with pytest.raises(ValidationError, match="solver JSON differs from metadata"):
+        validate_path(tmp_path)
+
+    solver_path.unlink()
+    with pytest.raises(ValidationError, match="missing solver file"):
+        validate_path(tmp_path)
+
+
+@pytest.mark.parametrize(("body", "message"), [("[]", "expected a JSON object"), ("{}", "invalid combination metadata")])
+def test_validate_profile_reports_malformed_metadata(tmp_path: Path, body: str, message: str) -> None:
+    generate_profile("smoke", tmp_path)
+    entry = validate_path(tmp_path)[0]
+    meta_path = (tmp_path / entry).with_suffix(".meta.json")
+    meta_path.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValidationError, match=message):
+        validate_path(tmp_path)
 
 
 def test_profile_generation_can_explicitly_write_diagrams(tmp_path: Path) -> None:
@@ -91,6 +119,18 @@ def test_summary_only_audit_skips_detail_json(tmp_path: Path) -> None:
     assert (tmp_path / "audit-report.json").exists()
     assert (tmp_path / "cross-coverage.md").exists()
     assert not (tmp_path / "covered.json").exists()
+    assert not (tmp_path / "excluded-unsupported.json").exists()
+
+
+def test_audit_lists_unsupported_combinations(tmp_path: Path) -> None:
+    rules = load_rule_data({"axes": {"attribute": ["cacheable", "pbmt_nc"], "vector": "unit_load"}})
+    report = write_audit_for_combinations(rules.name, rules.combinations, tmp_path)
+    excluded = json.loads((tmp_path / "excluded-unsupported.json").read_text(encoding="utf-8"))
+
+    assert len(excluded) == report["excluded_unsupported"] == 1
+    assert excluded[0]["combination"]["attribute"] == "pbmt_nc"
+    assert excluded[0]["decision"]["status"] == "excluded_unsupported"
+    assert "restricted to cacheable mappings" in excluded[0]["decision"]["reason"]
 
 
 def test_vector_profile_contains_only_nanhu_supported_memory_types() -> None:
@@ -261,6 +301,33 @@ def test_rule_file_param_axes_expand_into_params(tmp_path: Path) -> None:
     assert {combination.params["sew"] for combination in rule_set.combinations} == {"e32", "e64"}
     assert {combination.params["footprint"] for combination in rule_set.combinations} == {"same_line", "cross_page"}
     assert all(combination.params["stress"] == "load_queue_replay" for combination in rule_set.combinations)
+
+
+def test_rule_limit_is_checked_before_creating_parameter_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_expansion(*args, **kwargs) -> None:
+        pytest.fail("over-limit parameter rows should never be expanded")
+
+    monkeypatch.setattr(rule_file, "_expand_params", unexpected_expansion)
+    with pytest.raises(RuleFileError, match="more than 3 combinations"):
+        load_rule_data({"axes": {}, "param_axes": {"a": list(range(30)), "b": list(range(40))}, "limit": 3})
+
+
+def test_rule_limit_counts_only_included_axes_and_cases() -> None:
+    rule_set = load_rule_data(
+        {
+            "axes": {"skeleton": ["MP", "SB"]},
+            "param_axes": {"width": ["w32", "w64"]},
+            "cases": [{"skeleton": "LB", "params": {"extra": True}}],
+            "exclude": [{"skeleton": "SB"}],
+            "limit": 4,
+        }
+    )
+    assert [(row.skeleton, row.params) for row in rule_set.combinations] == [
+        ("MP", {"width": "w32"}),
+        ("MP", {"width": "w64"}),
+        ("LB", {"width": "w32", "extra": "true"}),
+        ("LB", {"width": "w64", "extra": "true"}),
+    ]
 
 
 def test_vector_params_render_into_observation_body(tmp_path: Path) -> None:
