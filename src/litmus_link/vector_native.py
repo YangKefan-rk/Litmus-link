@@ -1585,30 +1585,34 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
 
             combination = _choice_combination(assignment.cycle.family, event, choice)
             base_register, data_register = _scalar_memory_operands(event)
-            setup, extra_init = _vector_setup(combination, hart_id, f"{event.event_id}_vector")
-            large_avl = str((choice.params or {}).get("vl")) in {"vl32", "vl64"}
-            strided = "strided" in choice.vector_form
-            scale_register = strided or choice.vector_form.startswith(
-                "segment_indexed_"
-            )
+            setup, constants = _vector_setup(combination, hart_id, f"{event.event_id}_vector")
             temporary_registers = iter(
                 _free_temp_registers(
                     sequence,
-                    1 + int(large_avl) + int(scale_register) + int(offset != 0),
+                    1 + len(constants) + int(offset != 0),
                 )
             )
-            config_register = next(temporary_registers)
-            register_map = {"x10": config_register}
-            if large_avl:
-                register_map["x11"] = next(temporary_registers)
-            if scale_register:
-                register_map["x20"] = next(temporary_registers)
-            setup = [
-                replace(setup_event, instruction=_replace_registers(setup_event.instruction, register_map))
+            register_map = {"x10": next(temporary_registers)}
+            # Each endpoint can reuse scratch registers once its memory instruction finishes.
+            for register, constant in constants.items():
+                temporary = next(temporary_registers)
+                register_map[register] = temporary
+                expanded.append(
+                    LitmusEvent(
+                        f"{event.event_id}_vector_constant_{register}",
+                        hart_id,
+                        "setup",
+                        f"li {temporary},{constant}",
+                        role="vector-fusion-constant",
+                    )
+                )
+            expanded.extend(
+                replace(
+                    setup_event,
+                    instruction=_replace_registers(setup_event.instruction, register_map),
+                )
                 for setup_event in setup
-            ]
-            extra_init = [_replace_registers(line, register_map) for line in extra_init]
-            expanded.extend(setup)
+            )
             vector_base = base_register
             element_bytes = choice.width_bytes
             if offset:
@@ -1622,9 +1626,9 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                         role="vector-fusion-base",
                     )
                 )
-            instruction = _replace_registers(
-                _rebase_vector(_vector_instruction(combination), vector_base),
-                register_map,
+            instruction = _rebase_vector(
+                _replace_registers(_vector_instruction(combination), register_map),
+                vector_base,
             )
             atomicity_model = (
                 "aligned_atomic"
@@ -1645,14 +1649,7 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
             )
             if event.kind == "store":
                 expanded.extend(
-                    replace(
-                        broadcast,
-                        instruction=_replace_registers(
-                            broadcast.instruction,
-                            register_map,
-                        ),
-                    )
-                    for broadcast in _vector_store_broadcast_events(
+                    _vector_store_broadcast_events(
                         combination,
                         hart_id,
                         event.event_id,
@@ -1690,8 +1687,6 @@ def lower_vector_assignment(assignment: VectorAssignment) -> GeneratedCase:
                         role="vector-extract-element0",
                     )
                 )
-            if extra_init:
-                init_lines.extend(extra_init)
             metadata = dict(_vector_metadata(combination))
             footprint = vector_footprint_kind(
                 choice.vector_form,

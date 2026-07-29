@@ -14,7 +14,7 @@ wrappers.  They remain available as independent reference paths:
 
 The native tests use these tools for differential checks when installed.
 Binary/lib locations are configurable via the HERDTOOLS_BIN / HERDTOOLS_LIB
-environment variables; defaults point at the local Nanhu-V5.1 build.
+environment variables. Model discovery also checks the herd7 install prefix.
 """
 
 import os
@@ -46,20 +46,24 @@ def _resolve_executable(name: str) -> Path:
     return next((candidate for candidate in candidates if candidate.exists()), candidates[0])
 
 
-def _resolve_libdir() -> Path:
+def _resolve_libdir(herd: Path) -> Path:
     configured = os.environ.get("HERDTOOLS_LIB")
     candidates = []
     if configured:
         candidates.append(Path(configured))
-    candidates.extend([_THIRD_PARTY_ROOT / "herd" / "libdir", Path(_DEFAULT_LIB)])
-    return next((candidate for candidate in candidates if (candidate / "riscv.cat").exists()), candidates[0])
+    candidates.append(_THIRD_PARTY_ROOT / "herd" / "libdir")
+    if herd.is_file():
+        for executable in (herd, herd.resolve()):
+            candidates.append(executable.parent.parent / "share" / "herdtools7" / "herd")
+    candidates.append(Path(_DEFAULT_LIB))
+    return next((candidate for candidate in candidates if (candidate / "riscv.cat").is_file()), candidates[0])
 
 
 DIY = _resolve_executable("diy7")
 DIYCROSS = _resolve_executable("diycross7")
 HERD = _resolve_executable("herd7")
 HERDTOOLS_BIN = DIY.parent
-HERDTOOLS_LIB = _resolve_libdir()
+HERDTOOLS_LIB = _resolve_libdir(HERD)
 RISCV_CAT = HERDTOOLS_LIB / "riscv.cat"
 
 

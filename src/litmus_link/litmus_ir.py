@@ -455,9 +455,9 @@ def _vector_variant_ids(combination: Combination) -> list[str]:
     return list(VECTOR_CYCLE_VARIANTS)
 
 
-def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], list[str]]:
+def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[list[LitmusEvent], dict[str, int]]:
     events: list[LitmusEvent] = []
-    extra_init: list[str] = []
+    constants: dict[str, int] = {}
     if combination.vector in WHOLE_REGISTER_VECTOR_OPS:
         # Whole-register memory instructions do not depend on vl or vtype.
         # The explicit vtype is used only to initialize a complete store source
@@ -467,13 +467,13 @@ def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[lis
             if combination.vector == "whole_register_store"
             else f"vsetivli x10,1,e{_vector_width(combination)},m1,ta,ma"
         )
-        return [_event(f"{prefix}_vset", hart, "setup", setup)], extra_init
+        return [_event(f"{prefix}_vset", hart, "setup", setup)], constants
     vl = str(combination.params.get("vl", "vlmax"))
     if vl in {"vl32", "vl64"}:
         # vsetivli has a 5-bit AVL immediate.  Larger finite AVL values use
         # vsetvli with an initialized scalar register, keeping the emitted
         # instruction architecturally legal rather than silently clamping it.
-        extra_init.append(f"{hart}:x11={int(vl[2:])};")
+        constants["x11"] = int(vl[2:])
     if "indexed" in combination.vector:
         events.append(
             _event(
@@ -486,7 +486,7 @@ def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[lis
         events.append(_event(f"{prefix}_vid", hart, "setup", "vid.v v16"))
         scale = _vector_element_bytes(combination) * _vector_nf(combination)
         if scale & (scale - 1):
-            extra_init.append(f"{hart}:x20={scale};")
+            constants["x20"] = scale
             events.append(
                 _event(
                     f"{prefix}_index_scale",
@@ -521,8 +521,8 @@ def _vector_setup(combination: Combination, hart: int, prefix: str) -> tuple[lis
             ]
         )
     if "strided" in combination.vector:
-        extra_init.append(f"{hart}:x20={_vector_stride_bytes(combination)};")
-    return events, extra_init
+        constants["x20"] = _vector_stride_bytes(combination)
+    return events, constants
 
 
 def _rebase_vector(instruction: str, base_reg: str) -> str:
@@ -583,7 +583,7 @@ def _vector_case(combination: Combination, variant: str, name: str) -> LitmusCas
                 expanded.append(event)
                 continue
             base_register, data_register = _scalar_memory_operands(event)
-            setup, extra_init = _vector_setup(combination, hart_id, f"{target_id}_vector")
+            setup, constants = _vector_setup(combination, hart_id, f"{target_id}_vector")
             expanded.extend(setup)
             vector_instruction = _rebase_vector(_vector_instruction(combination), base_register)
             if event.kind == "store":
@@ -622,8 +622,11 @@ def _vector_case(combination: Combination, variant: str, name: str) -> LitmusCas
                         role="vector-extract-element0",
                     )
                 )
-            if extra_init:
-                init_lines[hart_id] = init_lines[hart_id] + " " + " ".join(extra_init)
+            if constants:
+                initializers = " ".join(
+                    f"{hart_id}:{register}={value};" for register, value in constants.items()
+                )
+                init_lines[hart_id] += " " + initializers
         harts.append(expanded)
 
     return replace(
@@ -733,16 +736,22 @@ def _effective_ordering_variant(variant: str) -> str:
     return _DEP_TO_VARIANT.get(match.group(1), "base")
 
 
-def _ordering_events(hart: int, variant: str, prefix: str, role: str) -> list[LitmusEvent]:
+def _ordering_events(
+    hart: int, variant: str, prefix: str, role: str, *, target_base: str = "x8"
+) -> list[LitmusEvent]:
     if variant == "fence_rw_rw":
         return [_event(f"{prefix}_fence_rw_rw", hart, "fence", "fence rw,rw", role=role)]
     if variant == "fence_w_w_r_rw":
         instruction = "fence w,w" if role == "writer" else "fence r,rw"
         return [_event(f"{prefix}_fence", hart, "fence", instruction, role=role)]
     if role == "reader" and variant == "addr_dep":
+        # x13 is reserved for dependency arithmetic in the profile skeletons.
         return [
-            _event(f"{prefix}_xor", hart, "dep", "xor x9,x5,x5", register="x9", role="addr-dep"),
-            _event(f"{prefix}_add", hart, "dep", "add x8,x8,x9", register="x8", role="addr-dep"),
+            _event(f"{prefix}_xor", hart, "dep", "xor x13,x5,x5", register="x13", role="addr-dep"),
+            _event(
+                f"{prefix}_add", hart, "dep", f"add {target_base},{target_base},x13",
+                register=target_base, role="addr-dep",
+            ),
         ]
     if role == "reader" and variant == "ctrl_dep":
         return [
@@ -850,12 +859,12 @@ def _mp_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
 def _lb_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
     p0 = [
         _event("p0_rx", 0, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
-        *_ordering_events(0, variant, "p0", "reader"),
+        *_ordering_events(0, variant, "p0", "reader", target_base="x7"),
         _event("p0_wy", 0, "store", "sw x9,0(x7)", "y", value="1"),
     ]
     p1 = [
         _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1"),
-        *_ordering_events(1, variant, "p1", "reader"),
+        *_ordering_events(1, variant, "p1", "reader", target_base="x7"),
         _event("p1_wx", 1, "store", "sw x9,0(x7)", "x", value="1"),
     ]
     return _case(
@@ -909,7 +918,7 @@ def _wrc_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR
     p0 = [_event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1")]
     p1 = [
         _event("p1_rx", 1, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
-        *_ordering_events(1, variant, "p1", "reader"),
+        *_ordering_events(1, variant, "p1", "reader", target_base="x7"),
         _event("p1_wy", 1, "store", "sw x5,0(x7)", "y", value="1"),
     ]
     p2 = [
@@ -1008,7 +1017,7 @@ def _isa2_case(combination: Combination, variant: str, name: str) -> LitmusCaseI
     ]
     p1 = [
         _event("p1_ry", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1"),
-        *_ordering_events(1, variant, "p1", "reader"),
+        *_ordering_events(1, variant, "p1", "reader", target_base="x7"),
         _event("p1_wz", 1, "store", "sw x12,0(x7)", "z", value="1"),
     ]
     p2 = [
@@ -1077,7 +1086,7 @@ def _s_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
     ]
     p1 = [
         _event("p1_rx", 1, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
-        *_ordering_events(1, variant, "p1", "reader"),
+        *_ordering_events(1, variant, "p1", "reader", target_base="x7"),
         _event("p1_wy", 1, "store", "sw x12,0(x7)", "y", value="1"),
     ]
     return _case(
@@ -1102,7 +1111,7 @@ def _co_case(combination: Combination, variant: str, name: str) -> LitmusCaseIR:
     p0 = [_event("p0_wx", 0, "store", "sw x5,0(x6)", "x", value="1")]
     p1 = [
         _event("p1_rx_new", 1, "load", "lw x5,0(x6)", "x", register="x5", value="1"),
-        *_ordering_events(1, variant, "p1", "reader"),
+        *_ordering_events(1, variant, "p1", "reader", target_base="x6"),
         _event("p1_rx_old", 1, "load", "lw x7,0(x6)", "x", register="x7", value="0"),
     ]
     return _case(
@@ -1154,12 +1163,9 @@ def _generic_scalar_case(combination: Combination, variant: str, name: str) -> L
 
 
 def _observation_case(combination: Combination, decision: Decision) -> LitmusCaseIR:
-    events = _observation_events(combination)
+    events, vector_init = _observation_events(combination)
     relations = [_relation(events[0][0].event_id, events[-1][-1].event_id, "obs", "observation")]
-    init_lines = ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;"]
-    if "strided" in combination.vector:
-        hart = 0 if combination.memory_event == "vector_store" else 1
-        init_lines[hart] = init_lines[hart] + f" {hart}:x9=4;"
+    init_lines = ["0:x5=1; 0:x6=x; 0:x7=y;", "1:x6=y; 1:x8=x;", *vector_init]
     return LitmusCaseIR(
         name=combination.name,
         display_name=combination.name,
@@ -1178,27 +1184,25 @@ def _observation_case(combination: Combination, decision: Decision) -> LitmusCas
     )
 
 
-def _observation_events(combination: Combination) -> list[list[LitmusEvent]]:
-    if combination.vector != "none" and combination.cmo != "no_cmo":
-        setup, _extra_init = _vector_setup(combination, 0, "p0")
-        p0 = [
-            *setup,
-            _event("p0_vec", 0, "vector", _vector_instruction(combination), "x"),
-            *_cmo_events(combination, 0, "p0"),
-        ]
-        p1 = [_event("p1_r", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1")]
-        return [p0, p1]
+def _observation_events(combination: Combination) -> tuple[list[list[LitmusEvent]], list[str]]:
     if combination.vector != "none":
-        hart = 0 if combination.memory_event == "vector_store" else 1
-        setup, _extra_init = _vector_setup(combination, hart, f"p{hart}")
+        has_cmo = combination.cmo != "no_cmo"
+        hart = 0 if has_cmo or combination.memory_event == "vector_store" else 1
+        setup, registers = _vector_setup(combination, hart, f"p{hart}")
+        init = [f"{hart}:{register}={value};" for register, value in registers.items()]
         base_reg = "x6" if hart == 0 else "x8"
         vector_event = _event(f"p{hart}_vec", hart, "vector", _rebase_vector(_vector_instruction(combination), base_reg), "x")
+        if has_cmo:
+            return [
+                [*setup, vector_event, *_cmo_events(combination, 0, "p0")],
+                [_event("p1_r", 1, "load", "lw x5,0(x6)", "y", register="x5", value="1")],
+            ], init
         if hart == 0:
-            return [[*setup, vector_event], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
-        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [*setup, vector_event]]
+            return [[*setup, vector_event], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]], init
+        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [*setup, vector_event]], init
     if combination.cmo != "no_cmo":
-        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x"), *_cmo_events(combination, 0, "p0")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
-    return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]]
+        return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x"), *_cmo_events(combination, 0, "p0")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]], []
+    return [[_event("p0_w", 0, "store", "sw x5,0(x6)", "x")], [_event("p1_r", 1, "load", "lw x5,0(x6)", "y")]], []
 
 
 def _cmo_events(combination: Combination, hart: int, prefix: str) -> list[LitmusEvent]:
@@ -1440,6 +1444,8 @@ def _cycle_label(base: str, variant: str) -> str:
 
 
 def _variant_po_label(base: str, variant: str) -> str:
+    if base.endswith(("WR", "WW")) and variant in {"addr_dep", "ctrl_dep", "ctrl_fencei"}:
+        return base
     mapping = {
         "fence_rw_rw": f"{base}+fence.rw.rw",
         "fence_w_w_r_rw": f"{base}+fence",

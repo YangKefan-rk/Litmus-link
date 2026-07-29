@@ -1036,12 +1036,14 @@ def _static_relations(
         # Relations are recorded between architectural parent instructions.
         # Every active memory element belongs to that instruction, so lift both
         # endpoints over the complete parent event set. Element-level ordering
-        # inside an unordered Vector instruction remains absent; this only
-        # preserves the parent dependency to another instruction.
+        # inside an unordered Vector instruction remains absent. Older profile
+        # cases can carry a dependency label on a store-originated po edge.
         lifted = {
             (source.event_id, target.event_id)
             for source in sources
+            if source.read
             for target in targets
+            if (source.event_id, target.event_id) in po
         }
         if "addr" in label:
             addr.update(lifted)

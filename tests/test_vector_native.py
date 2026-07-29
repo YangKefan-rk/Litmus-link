@@ -644,6 +644,57 @@ def test_every_generated_vector_endpoint_has_aligned_active_elements() -> None:
         assert all((index * stride) % width == 0 for index in active)
 
 
+@pytest.mark.parametrize("form", ["strided", "segment_indexed_unordered"])
+def test_vector_lowering_preserves_base_and_endpoint_constants(form: str) -> None:
+    domain = VectorNativeDomain.from_payload(
+        _small_payload(
+            skeletons=["MP"],
+            include_same=False,
+            endpoint_categories=["vector"],
+            endpoint_compositions=["vector_only"],
+            forms=[f"{form}_load", f"{form}_store"],
+            sew=["e16", "e32"],
+            vl=["vl32", "vl64"],
+            nf=["nf3"],
+        )
+    )
+    assignment = next(
+        assignment
+        for assignment in domain.assignments()
+        if {
+            (choice.width_bytes, choice.params["vl"])
+            for choice in assignment.choices
+            if choice.direction == READ and choice.params is not None
+        } == {(2, "vl32"), (4, "vl64")}
+    )
+    case = lower_vector_assignment(assignment).case_ir
+    assert case is not None
+    configs = case.metadata["vectors"]
+    for hart, events in enumerate(case.harts):
+        initial_registers = dict(
+            re.findall(rf"^{hart}:(x\d+)=([^;]+);$", "\n".join(case.init_lines), re.MULTILINE)
+        )
+        constants = {}
+        avl = index_scale = None
+        for event in events:
+            opcode, _, arguments = event.instruction.partition(" ")
+            operands = arguments.split(",")
+            if opcode == "li":
+                constants[operands[0]] = int(operands[1])
+            elif opcode == "vsetvli":
+                avl = constants.get(operands[1])
+            elif opcode == "vmul.vx":
+                index_scale = constants.get(operands[-1])
+            elif event.event_id in configs:
+                config = configs[event.event_id]
+                assert initial_registers[operands[1].strip("()")] == event.location
+                assert avl == int(config["avl"][2:])
+                if form == "strided":
+                    assert constants.get(operands[2]) == config["stride_bytes"]
+                else:
+                    assert index_scale == config["sew_bits"] // 8 * config["nf"]
+
+
 def test_segment_native_cycle_lowers_all_fields_and_is_formally_solved() -> None:
     domain = VectorNativeDomain.from_payload(
         _small_payload(

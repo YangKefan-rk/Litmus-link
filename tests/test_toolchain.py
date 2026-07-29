@@ -1,5 +1,7 @@
-import pytest
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import litmus_link.toolchain as toolchain
 from litmus_link.toolchain import ToolchainError, diy_generate, tools_available, diycross_generate, herd_judge, toolchain_info, _parse_herd, _strip_nondeterministic
@@ -60,6 +62,27 @@ def test_toolchain_info_has_stable_shape() -> None:
     assert set(info["tools"]) == {"diy7", "diycross7", "herd7"}
     assert info["model"]["path"].endswith("riscv.cat")
     assert info["riscv_capabilities"]["schema"] == "litmus-link.herd-capabilities.v1"
+
+
+@pytest.mark.parametrize("symlinked", [False, True])
+def test_herd_libdir_uses_standard_install_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlinked: bool
+) -> None:
+    prefix = tmp_path / "herdtools7-install"
+    executable = prefix / "bin" / "herd7"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    if symlinked:
+        link = tmp_path / "bin" / "herd7"
+        link.parent.mkdir()
+        link.symlink_to(executable)
+        executable = link
+    libdir = prefix / "share" / "herdtools7" / "herd"
+    libdir.mkdir(parents=True)
+    (libdir / "riscv.cat").touch()
+    monkeypatch.delenv("HERDTOOLS_LIB", raising=False)
+    monkeypatch.setattr(toolchain, "_THIRD_PARTY_ROOT", tmp_path / "third_party")
+    assert toolchain._resolve_libdir(executable) == libdir
 
 
 def test_herd_judge_passes_mixed_unaligned_variants(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

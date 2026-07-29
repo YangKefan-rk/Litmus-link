@@ -115,8 +115,11 @@ def test_real_capability_probe_checks_semantics_when_herd_is_present() -> None:
     assert "/tmp/ll-herd-" not in str(capabilities.to_json())
 
 
-def test_vl1_projection_contains_no_vector_instruction_and_is_exact() -> None:
-    case = _case()
+@pytest.mark.parametrize("form", ["unit", "strided"])
+def test_vl1_projection_omits_vector_setup_and_is_exact(form: str) -> None:
+    case = _case(forms=[f"{form}_load", f"{form}_store"])
+    if form == "strided":
+        assert any(event.role == "vector-fusion-constant" for event in case.case_ir.events())
     expansion = expand_vector_case(case.case_ir)
     bundle = build_scalar_projections(case.case_ir, expansion)
     assert bundle.status == "ready"
@@ -127,6 +130,9 @@ def test_vl1_projection_contains_no_vector_instruction_and_is_exact() -> None:
     assert "vset" not in source
     assert "vle" not in source
     assert "vse" not in source
+    assert "vlse" not in source
+    assert "vsse" not in source
+    assert "li " not in source
     assert "uint32_t" in source
     assert bundle.projections[0].variants == ()
 

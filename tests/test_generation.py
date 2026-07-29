@@ -220,6 +220,43 @@ def test_rule_file_vector_cmo_cross_renders_both_operations(tmp_path: Path) -> N
     assert "cbo.flush" in litmus
 
 
+@pytest.mark.parametrize(
+    ("vector", "cmo", "params", "hart", "constants", "instructions"),
+    [
+        (
+            "strided_load", "flush", {"vl": "vl32", "stride_bytes": 16}, 0,
+            {"x11": 32, "x20": 16}, ["vsetvli x10,x11", "vlse32.v v8,(x6),x20"],
+        ),
+        (
+            "strided_load", "no_cmo", {"vl": "vl64", "footprint": "cross_line"}, 1,
+            {"x11": 64, "x20": 8}, ["vsetvli x10,x11", "vlse32.v v8,(x8),x20"],
+        ),
+        (
+            "segment_indexed_unordered_load", "flush", {"nf": "nf3", "vl": "vl2"}, 0,
+            {"x20": 12}, ["vmul.vx v16,v16,x20", "vluxseg3ei32.v v8,(x6),v16"],
+        ),
+    ],
+)
+def test_vector_observation_initializes_setup_registers(
+    tmp_path: Path, vector: str, cmo: str, params: dict, hart: int,
+    constants: dict[str, int], instructions: list[str],
+) -> None:
+    rules = load_rule_data({"cases": [{"vector": vector, "cmo": cmo, "params": params}]})
+    report = generate_combinations(rules.name, rules.combinations, tmp_path)
+    assert report["generated_litmus"] == 1
+    litmus = next(tmp_path.glob("*.litmus")).read_text(encoding="utf-8")
+    meta = json.loads(next(tmp_path.glob("*.meta.json")).read_text(encoding="utf-8"))
+    case_ir = meta["case_ir"]
+    assert case_ir["variant"] == "observation"
+    for register, value in constants.items():
+        initializer = f"{hart}:{register}={value};"
+        assert initializer in case_ir["init_lines"]
+        assert initializer in litmus
+    setup_instructions = [event["instruction"] for event in case_ir["harts"][hart]]
+    for instruction in instructions:
+        assert any(rendered.startswith(instruction) for rendered in setup_instructions)
+
+
 def test_preview_payload_includes_litmus_and_analysis() -> None:
     preview = preview_payload(
         {

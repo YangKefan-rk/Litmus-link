@@ -29,18 +29,17 @@ def asm_check(atfile: Path, gcc: str) -> List[str]:
     base = atfile.parent
     entries = _read_atfile(atfile)
     errors: list[str] = []
-    checked = 0
     with tempfile.TemporaryDirectory(prefix="ll-asm-check-") as tmp:
         tmpdir = Path(tmp)
-        for entry in entries:
+        for index, entry in enumerate(entries, start=1):
             litmus = base / entry
             instructions = extract_litmus_instructions(litmus.read_text(encoding="utf-8"))
             if not instructions:
+                errors.append(f"{litmus}: no thread-table instructions found")
                 continue
-            checked += 1
-            source = tmpdir / f"case_{checked}.S"
+            source = tmpdir / f"case_{index}.S"
             source.write_text(_assembly_source(instructions), encoding="utf-8")
-            obj = tmpdir / f"case_{checked}.o"
+            obj = tmpdir / f"case_{index}.o"
             march = DEFAULT_MARCH
             if any(SUBWORD_AMO.match(instruction) for instruction in instructions):
                 march += "_zabha"
@@ -54,8 +53,8 @@ def asm_check(atfile: Path, gcc: str) -> List[str]:
                 detail = (proc.stderr or proc.stdout).strip().splitlines()
                 errors.append(f"{litmus}: assembler rejected extracted instructions: {detail[0] if detail else 'unknown error'}")
     if errors:
-        return [f"asm-check failed: {len(errors)} of {checked} litmus files rejected", *errors]
-    return [f"asm-check passed: {checked} litmus files assembled with {gcc_path}"]
+        return [f"asm-check failed: {len(errors)} of {len(entries)} litmus files rejected", *errors]
+    return [f"asm-check passed: {len(entries)} litmus files assembled with {gcc_path}"]
 
 
 def extract_litmus_instructions(text: str) -> list[str]:
@@ -64,8 +63,6 @@ def extract_litmus_instructions(text: str) -> list[str]:
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped:
-            if in_table:
-                break
             continue
         low = stripped.lower()
         if low.startswith(("exists", "forall", "~exists", "observed", "locations", "filter")):

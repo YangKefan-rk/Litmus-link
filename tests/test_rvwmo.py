@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from litmus_link.litmus_ir import (
     _co_case,
     _iriw_case,
@@ -12,6 +14,7 @@ from litmus_link.litmus_ir import (
 )
 from litmus_link.models import Combination
 from litmus_link.rvwmo import check_rvwmo
+from litmus_link.rvwmo_solver import solve_rvwmo
 
 
 BUILDERS = {
@@ -72,6 +75,9 @@ def test_rvwmo_verdict_table() -> None:
             case = builder(_combo(), variant, f"chk_{skeleton}_{variant}")
             result = check_rvwmo(case)
             assert result.status == "verified", f"{skeleton}/{variant} not verified"
+            embedded = solve_rvwmo(case)
+            assert embedded.status == "verified", f"{skeleton}/{variant}: {embedded.reason}"
+            assert embedded.allowed == result.allowed, f"{skeleton}/{variant}: solver verdicts differ"
             forbidden = result.allowed is False
             want = EXPECTED[skeleton][variant]
             if forbidden != want:
@@ -100,6 +106,29 @@ def test_rvwmo_addr_dep_breaks_only_writer_side_of_mp() -> None:
     assert po[("p1_ry", "p1_rx")].rule == "rvwmo-9"
     # ...but the writer W->W has no ordering, which is what breaks the cycle.
     assert not po[("p0_wx", "p0_wy")].preserved
+
+
+def test_lb_address_dependency_preserves_store_data_and_uses_its_base() -> None:
+    case = _lb_case(_combo(), "addr_dep", "chk_lb_addr")
+    for hart in case.harts:
+        assert [event.instruction for event in hart] == [
+            "lw x5,0(x6)",
+            "xor x13,x5,x5",
+            "add x7,x7,x13",
+            "sw x9,0(x7)",
+        ]
+    assert all(f"{index}:x9=1;" in line for index, line in enumerate(case.init_lines))
+
+
+def test_embedded_solver_ignores_legacy_store_originated_dependency_label() -> None:
+    case = _mp_case(_combo(), "addr_dep", "chk_legacy_mp_addr")
+    writer, *rest = case.relations
+    legacy = replace(case, relations=[replace(writer, label="PodWW+addr"), *rest])
+
+    result = solve_rvwmo(legacy)
+    assert result.verdict == "observable"
+    assert result.execution is not None
+    assert result.execution.ppo_rules["r9"] == {("p1_ry", "p1_rx")}
 
 
 def test_rvwmo_control_dependency_orders_stores_only() -> None:
